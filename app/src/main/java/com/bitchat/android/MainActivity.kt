@@ -37,6 +37,7 @@ import com.bitchat.android.onboarding.OnboardingCoordinator
 import com.bitchat.android.onboarding.OnboardingState
 import com.bitchat.android.onboarding.PermissionExplanationScreen
 import com.bitchat.android.onboarding.PermissionManager
+import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
 import com.bitchat.android.ui.ChatScreen
 import com.bitchat.android.ui.ChatViewModel
 import com.bitchat.android.ui.OrientationAwareActivity
@@ -60,6 +61,7 @@ class MainActivity : OrientationAwareActivity() {
     private lateinit var unifiedMeshService: MeshService
     private val mainViewModel: MainViewModel by viewModels()
     private var pendingMeshForegroundServiceStart = false
+    private var pendingDogecoinPaymentRequest by mutableStateOf<DogecoinPaymentRequest?>(null)
     private val chatViewModel: ChatViewModel by viewModels { 
         object : ViewModelProvider.Factory {
             override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
@@ -109,6 +111,7 @@ class MainActivity : OrientationAwareActivity() {
         }
 
         com.bitchat.android.service.AppShutdownCoordinator.cancelPendingShutdown()
+        handleDogecoinIntent(intent)
         
         // Enable edge-to-edge display for modern Android look
         enableEdgeToEdge()
@@ -327,7 +330,11 @@ class MainActivity : OrientationAwareActivity() {
 
                 // Add the callback - this will be automatically removed when the activity is destroyed
                 onBackPressedDispatcher.addCallback(this, backCallback)
-                ChatScreen(viewModel = chatViewModel)
+                ChatScreen(
+                    viewModel = chatViewModel,
+                    externalDogecoinPaymentRequest = pendingDogecoinPaymentRequest,
+                    onDogecoinPaymentRequestConsumed = ::clearPendingDogecoinPaymentRequest
+                )
             }
             
             OnboardingState.ERROR -> {
@@ -725,7 +732,7 @@ class MainActivity : OrientationAwareActivity() {
                 if (!permissionManager.areAllPermissionsGranted()) {
                     val missing = permissionManager.getMissingPermissions()
                     Log.w("MainActivity", "Permissions revoked during initialization: $missing")
-                    handleOnboardingFailed("Some permissions were revoked. Please grant all permissions to continue.")
+                    handleOnboardingFailed(getString(R.string.permissions_revoked_error))
                     return@launch
                 }
 
@@ -746,7 +753,7 @@ class MainActivity : OrientationAwareActivity() {
                 mainViewModel.updateOnboardingState(OnboardingState.COMPLETE)
             } catch (e: Exception) {
                 Log.e("MainActivity", "Failed to initialize app", e)
-                handleOnboardingFailed("Failed to initialize the app: ${e.message}")
+                handleOnboardingFailed(getString(R.string.initialization_failed_error, e.message))
             }
         }
     }
@@ -763,6 +770,7 @@ class MainActivity : OrientationAwareActivity() {
         }
 
         com.bitchat.android.service.AppShutdownCoordinator.cancelPendingShutdown()
+        handleDogecoinIntent(intent)
         
         // Handle notification intents when app is already running
         if (mainViewModel.onboardingState.value == OnboardingState.COMPLETE) {
@@ -876,6 +884,46 @@ class MainActivity : OrientationAwareActivity() {
                     chatViewModel.clearNotificationsForGeohash(geohash)
                 }
             }
+        }
+    }
+
+    private fun handleDogecoinIntent(intent: Intent) {
+        val request = dogecoinPaymentRequestFromIntent(intent) ?: return
+        pendingDogecoinPaymentRequest = request
+        Log.d("MainActivity", "Queued Dogecoin payment request from external intent")
+    }
+
+    private fun dogecoinPaymentRequestFromIntent(intent: Intent): DogecoinPaymentRequest? {
+        if (intent.data?.scheme.equals("dogecoin", ignoreCase = true)) {
+            intent.dataString?.let { data ->
+                DogecoinPaymentRequest.parse(data)?.let { return it }
+            }
+        }
+
+        if (intent.action == Intent.ACTION_SEND) {
+            val sharedText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            if (!sharedText.isNullOrBlank()) {
+                DogecoinPaymentRequest.parseAddressOrUri(sharedText)?.let { return it }
+            }
+        }
+
+        return null
+    }
+
+    private fun clearPendingDogecoinPaymentRequest() {
+        pendingDogecoinPaymentRequest = null
+        if (
+            intent.data?.scheme.equals("dogecoin", ignoreCase = true) ||
+            intent.action == Intent.ACTION_SEND
+        ) {
+            val clearedIntent = Intent(intent).apply {
+                setData(null)
+                removeExtra(Intent.EXTRA_TEXT)
+                if (action == Intent.ACTION_SEND) {
+                    action = Intent.ACTION_MAIN
+                }
+            }
+            setIntent(clearedIntent)
         }
     }
 

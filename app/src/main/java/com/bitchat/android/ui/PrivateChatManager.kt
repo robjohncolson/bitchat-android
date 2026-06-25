@@ -112,9 +112,17 @@ class PrivateChatManager(
         )
 
         messageManager.addPrivateMessage(peerID, message)
-        onSendMessage(content, peerID, recipientNickname ?: "", message.id)
-
-        return true
+        return try {
+            onSendMessage(content, peerID, recipientNickname ?: "", message.id)
+            messageManager.updateMessageDeliveryStatus(message.id, DeliveryStatus.Sent)
+            true
+        } catch (e: Exception) {
+            messageManager.updateMessageDeliveryStatus(
+                message.id,
+                DeliveryStatus.Failed(e.message ?: "send failed")
+            )
+            false
+        }
     }
 
     // MARK: - Peer Management

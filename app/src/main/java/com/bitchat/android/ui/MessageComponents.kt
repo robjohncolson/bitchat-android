@@ -65,7 +65,8 @@ fun MessagesList(
     onNicknameClick: ((String) -> Unit)? = null,
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
-    onImageClick: ((String, List<String>, Int) -> Unit)? = null
+    onImageClick: ((String, List<String>, Int) -> Unit)? = null,
+    onDogecoinUriClick: ((String) -> Unit)? = null
 ) {
     val listState = rememberLazyListState()
     
@@ -126,7 +127,8 @@ fun MessagesList(
                     onNicknameClick = onNicknameClick,
                     onMessageLongPress = onMessageLongPress,
                     onCancelTransfer = onCancelTransfer,
-                    onImageClick = onImageClick
+                    onImageClick = onImageClick,
+                    onDogecoinUriClick = onDogecoinUriClick
                 )
         }
     }
@@ -142,7 +144,8 @@ fun MessageItem(
     onNicknameClick: ((String) -> Unit)? = null,
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
-    onImageClick: ((String, List<String>, Int) -> Unit)? = null
+    onImageClick: ((String, List<String>, Int) -> Unit)? = null,
+    onDogecoinUriClick: ((String) -> Unit)? = null
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -171,6 +174,7 @@ fun MessageItem(
                     onMessageLongPress = onMessageLongPress,
                     onCancelTransfer = onCancelTransfer,
                     onImageClick = onImageClick,
+                    onDogecoinUriClick = onDogecoinUriClick,
                     modifier = Modifier
                         .weight(1f)
                         .padding(end = endPad)
@@ -208,6 +212,7 @@ fun MessageItem(
         onMessageLongPress: ((BitchatMessage) -> Unit)?,
         onCancelTransfer: ((BitchatMessage) -> Unit)?,
         onImageClick: ((String, List<String>, Int) -> Unit)?,
+        onDogecoinUriClick: ((String) -> Unit)?,
         modifier: Modifier = Modifier
     ) {
     // Image special rendering
@@ -437,7 +442,13 @@ fun MessageItem(
                         )
                         if (urlAnnotations.isNotEmpty()) {
                             val raw = urlAnnotations.first().item
-                            val resolved = if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) raw else "https://$raw"
+                            val dogecoinUri = DogecoinUri.normalize(raw)
+                            if (dogecoinUri != null && onDogecoinUriClick != null) {
+                                onDogecoinUriClick.invoke(dogecoinUri)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                return@detectTapGestures
+                            }
+                            val resolved = ClickableUriResolver.resolve(raw)
                             try {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(resolved))
                                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

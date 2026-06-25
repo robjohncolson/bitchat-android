@@ -31,6 +31,9 @@ android {
 
     buildTypes {
         debug {
+            // Separate package id so the debug build installs alongside a release-signed
+            // com.bitchat.droid (e.g. a Play Store install) instead of failing on signature mismatch.
+            applicationIdSuffix = ".debug"
             ndk {
                 // Include x86_64 for emulator support during development
                 abiFilters += listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
@@ -73,6 +76,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {

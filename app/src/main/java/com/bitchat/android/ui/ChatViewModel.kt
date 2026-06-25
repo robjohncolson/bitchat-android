@@ -566,6 +566,23 @@ class ChatViewModel(
                 )
 
                 if (currentChannelValue != null) {
+                    if (
+                        channelManager.isChannelPasswordProtected(currentChannelValue) &&
+                        !channelManager.hasChannelKey(currentChannelValue)
+                    ) {
+                        channelManager.addChannelMessage(
+                            currentChannelValue,
+                            BitchatMessage(
+                                sender = "system",
+                                content = "enter the channel password before sending to $currentChannelValue.",
+                                timestamp = Date(),
+                                isRelay = false
+                            ),
+                            null
+                        )
+                        return
+                    }
+
                     channelManager.addChannelMessage(currentChannelValue, message, mesh.myPeerID)
 
                     // Check if encrypted channel
@@ -577,10 +594,25 @@ class ChatViewModel(
                             state.getNicknameValue(),
                             mesh.myPeerID,
                             onEncryptedPayload = { encryptedData ->
-                                mesh.sendMessage(content, mentions, currentChannelValue)
+                                mesh.sendChannelMessage(
+                                    message.copy(
+                                        content = "",
+                                        encryptedContent = encryptedData,
+                                        isEncrypted = true
+                                    )
+                                )
                             },
                             onFallback = {
-                                mesh.sendMessage(content, mentions, currentChannelValue)
+                                channelManager.addChannelMessage(
+                                    currentChannelValue,
+                                    BitchatMessage(
+                                        sender = "system",
+                                        content = "failed to encrypt message for $currentChannelValue.",
+                                        timestamp = Date(),
+                                        isRelay = false
+                                    ),
+                                    null
+                                )
                             }
                         )
                     } else {

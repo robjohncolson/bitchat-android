@@ -38,6 +38,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
@@ -143,7 +144,7 @@ fun VerificationSheet(
                     onClick = { selectedTab = 0 },
                     text = {
                         Text(
-                            text = "My QR",
+                            text = stringResource(R.string.verify_tab_my_qr),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 14.sp
                         )
@@ -154,7 +155,7 @@ fun VerificationSheet(
                     onClick = { selectedTab = 1 },
                     text = {
                         Text(
-                            text = "Scan",
+                            text = stringResource(R.string.verify_tab_scan),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 14.sp
                         )
@@ -182,6 +183,9 @@ fun VerificationSheet(
                             val qr = VerificationService.verifyScannedQR(code)
                             if (qr != null && viewModel.beginQRVerification(qr)) {
                                 selectedTab = 0
+                                true
+                            } else {
+                                false
                             }
                         }
                     )
@@ -318,9 +322,11 @@ private fun MyQrTabContent(
 @Composable
 private fun ScanTabContent(
     accent: Color,
-    onScan: (String) -> Unit
+    onScan: (String) -> Boolean
 ) {
     val permissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
+    var pastedCode by remember { mutableStateOf("") }
+    var pasteError by remember { mutableStateOf(false) }
     
     Column(
         modifier = Modifier
@@ -338,7 +344,10 @@ private fun ScanTabContent(
                     .background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                ScannerView(onScan = onScan)
+                ScannerView(onScan = { code ->
+                    onScan(code)
+                    Unit
+                })
                 
                 // Overlay border
                 Box(
@@ -401,6 +410,45 @@ private fun ScanTabContent(
                     )
                 }
             }
+        }
+
+        OutlinedTextField(
+            value = pastedCode,
+            onValueChange = {
+                pastedCode = it
+                pasteError = false
+            },
+            label = {
+                Text(
+                    text = stringResource(R.string.verify_paste_label),
+                    fontFamily = FontFamily.Monospace
+                )
+            },
+            isError = pasteError,
+            supportingText = if (pasteError) {
+                {
+                    Text(
+                        text = stringResource(R.string.verify_invalid_url),
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            } else null,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Button(
+            onClick = {
+                pasteError = !onScan(pastedCode.trim())
+            },
+            enabled = pastedCode.isNotBlank(),
+            colors = ButtonDefaults.buttonColors(containerColor = accent),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = stringResource(R.string.verify_validate),
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }

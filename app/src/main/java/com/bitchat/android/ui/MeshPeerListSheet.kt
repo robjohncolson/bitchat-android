@@ -631,9 +631,9 @@ private fun PeerItem(
                             else -> Icons.Filled.Route
                         },
                         contentDescription = when {
-                            isWifiAware -> "Direct Wi-Fi Aware"
-                            isDirect -> "Direct Bluetooth"
-                            else -> "Routed"
+                            isWifiAware -> stringResource(R.string.cd_direct_wifi_aware)
+                            isDirect -> stringResource(R.string.cd_direct_bluetooth)
+                            else -> stringResource(R.string.cd_routed)
                         },
                         modifier = Modifier.size(16.dp),
                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
@@ -671,7 +671,7 @@ private fun PeerItem(
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(
                             imageVector = Icons.Filled.Wifi,
-                            contentDescription = "Direct Wi-Fi Aware",
+                            contentDescription = stringResource(R.string.cd_direct_wifi_aware),
                             modifier = Modifier.size(13.dp),
                             tint = colorScheme.onSurface.copy(alpha = 0.8f)
                         )
@@ -700,7 +700,7 @@ private fun PeerItem(
                 ) {
                     Icon(
                         imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
-                        contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                        contentDescription = if (isFavorite) stringResource(R.string.cd_remove_favorite) else stringResource(R.string.cd_add_favorite),
                         modifier = Modifier.size(16.dp),
                         tint = if (isFavorite) Color(0xFFFFD700) else Color(0xFF4CAF50)
                     )
@@ -952,7 +952,7 @@ fun PrivateChatSheet(
                                 isWifiAware -> {
                                     Icon(
                                         imageVector = Icons.Filled.Wifi,
-                                        contentDescription = "Direct Wi-Fi Aware",
+                                        contentDescription = stringResource(R.string.cd_direct_wifi_aware),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )
@@ -960,7 +960,7 @@ fun PrivateChatSheet(
                                 isDirect -> {
                                     Icon(
                                         imageVector = Icons.Outlined.Bluetooth,
-                                        contentDescription = "Direct Bluetooth",
+                                        contentDescription = stringResource(R.string.cd_direct_bluetooth),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )
@@ -968,7 +968,7 @@ fun PrivateChatSheet(
                                 isConnected -> {
                                     Icon(
                                         imageVector = Icons.Filled.Route,
-                                        contentDescription = "Routed",
+                                        contentDescription = stringResource(R.string.cd_routed),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )

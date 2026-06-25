@@ -764,7 +764,37 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
      */
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
         if (content.isEmpty()) return
-        
+
+        val payload = if (channel != null || mentions.isNotEmpty()) {
+            val message = BitchatMessage(
+                sender = delegate?.getNickname() ?: myPeerID,
+                content = content,
+                timestamp = Date(),
+                isRelay = false,
+                senderPeerID = myPeerID,
+                mentions = mentions.takeIf { it.isNotEmpty() },
+                channel = channel
+            )
+            message.toBinaryPayload() ?: run {
+                Log.e(TAG, "Failed to encode channel message payload for $channel")
+                return
+            }
+        } else {
+            content.toByteArray(Charsets.UTF_8)
+        }
+
+        sendBroadcastMessagePayload(payload)
+    }
+
+    fun sendChannelMessage(message: BitchatMessage) {
+        val payload = message.toBinaryPayload() ?: run {
+            Log.e(TAG, "Failed to encode channel message payload for ${message.channel}")
+            return
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    private fun sendBroadcastMessagePayload(payload: ByteArray) {
         serviceScope.launch {
             val packet = BitchatPacket(
                 version = 1u,
@@ -772,7 +802,7 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
                 senderID = hexStringToByteArray(myPeerID),
                 recipientID = SpecialRecipients.BROADCAST,
                 timestamp = System.currentTimeMillis().toULong(),
-                payload = content.toByteArray(Charsets.UTF_8),
+                payload = payload,
                 signature = null,
                 ttl = MAX_TTL
             )

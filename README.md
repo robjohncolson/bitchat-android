@@ -38,6 +38,7 @@ This project is released into the public domain. See the [LICENSE](LICENSE.md) f
 - **✅ Store & Forward**: Messages cached for offline peers and delivered when they reconnect
 - **✅ Privacy First**: No accounts, no phone numbers, no persistent identifiers
 - **✅ IRC-Style Commands**: Familiar `/join`, `/msg`, `/who` style interface
+- **Dogecoin Testnet Wallet**: Experimental in-app testnet address/request wallet with clickable `dogecoin:` payment links; mainnet is intentionally unsupported
 - **✅ Message Retention**: Optional channel-wide message saving controlled by channel owners
 - **✅ Emergency Wipe**: Triple-tap logo to instantly clear all data
 - **✅ Modern Android UI**: Jetpack Compose with Material Design 3
@@ -124,8 +125,6 @@ The app requires the following permissions (automatically requested):
 - `/unblock @name` - Unblock a peer
 - `/clear` - Clear chat messages
 - `/pass [password]` - Set/change channel password (owner only)
-- `/transfer @name` - Transfer channel ownership
-- `/save` - Toggle message retention for channel (owner only)
 
 ### Getting Started
 
@@ -149,15 +148,13 @@ The app requires the following permissions (automatically requested):
 ### Channel Features
 
 - **Password Protection**: Channel owners can set passwords with `/pass`
-- **Message Retention**: Owners can enable mandatory message saving with `/save`
 - **@ Mentions**: Use `@nickname` to mention users (with autocomplete)
-- **Ownership Transfer**: Pass control to trusted users with `/transfer`
 
 ## Security & Privacy
 
 ### Encryption
 - **Private Messages**: X25519 key exchange + AES-256-GCM encryption
-- **Channel Messages**: Argon2id password derivation + AES-256-GCM
+- **Channel Messages**: PBKDF2 password derivation + AES-256-GCM
 - **Digital Signatures**: Ed25519 for message authenticity
 - **Forward Secrecy**: New key pairs generated each session
 
@@ -201,7 +198,6 @@ bitchat uses an efficient binary protocol optimized for Bluetooth LE:
 ### Mesh Networking
 - Each device acts as both client and peripheral
 - Automatic peer discovery and connection management
-- Store-and-forward for offline message delivery
 - Adaptive duty cycling for battery optimization
 
 ### Android-Specific Optimizations

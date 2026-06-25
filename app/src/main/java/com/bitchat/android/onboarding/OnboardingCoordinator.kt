@@ -213,11 +213,13 @@ class OnboardingCoordinator(
         
         if (deniedCritical.isNotEmpty()) {
             val message = buildString {
-                append("Critical permissions were denied. bitchat requires these permissions to function:\n")
+                append(activity.getString(com.bitchat.android.R.string.critical_permissions_denied_intro))
+                append("\n")
                 deniedCritical.keys.forEach { permission ->
                     append("- ${getPermissionDisplayName(permission)}\n")
                 }
-                append("\nPlease grant these permissions in Settings to use bitchat.")
+                append("\n")
+                append(activity.getString(com.bitchat.android.R.string.critical_permissions_denied_action))
             }
             
             Log.e(TAG, "Critical permissions denied: $deniedCritical")
@@ -268,11 +270,11 @@ class OnboardingCoordinator(
      */
     private fun getPermissionDisplayName(permission: String): String {
         return when {
-            permission.contains("BLUETOOTH") -> "Bluetooth/Nearby Devices"
-            permission.contains("BACKGROUND") -> "Background Location"
-            permission.contains("LOCATION") -> "Location (for Bluetooth scanning)"
-            permission.contains("NEARBY_WIFI") -> "Nearby Wi‑Fi Devices (for Wi‑Fi Aware)"
-            permission.contains("NOTIFICATION") -> "Notifications"
+            permission.contains("BLUETOOTH") -> activity.getString(com.bitchat.android.R.string.permission_display_bluetooth)
+            permission.contains("BACKGROUND") -> activity.getString(com.bitchat.android.R.string.permission_display_background_location)
+            permission.contains("LOCATION") -> activity.getString(com.bitchat.android.R.string.permission_display_location)
+            permission.contains("NEARBY_WIFI") -> activity.getString(com.bitchat.android.R.string.permission_display_nearby_wifi)
+            permission.contains("NOTIFICATION") -> activity.getString(com.bitchat.android.R.string.permission_display_notifications)
             else -> permission.substringAfterLast(".")
         }
     }

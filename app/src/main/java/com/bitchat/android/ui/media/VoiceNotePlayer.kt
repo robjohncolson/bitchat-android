@@ -16,9 +16,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontFamily
+import com.bitchat.android.R
 
 @Composable
 fun VoiceNotePlayer(
@@ -95,7 +97,7 @@ fun VoiceNotePlayer(
         FilledTonalIconButton(onClick = { if (controlsEnabled) isPlaying = !isPlaying }, enabled = controlsEnabled, modifier = Modifier.size(28.dp)) {
             Icon(
                 imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play"
+                contentDescription = if (isPlaying) stringResource(R.string.cd_pause_voice) else stringResource(R.string.cd_play_voice)
             )
         }
         val progressBarColor = progressColor ?: MaterialTheme.colorScheme.primary
@@ -113,4 +115,3 @@ fun VoiceNotePlayer(
         Text(text = durText, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
     }
 }
-

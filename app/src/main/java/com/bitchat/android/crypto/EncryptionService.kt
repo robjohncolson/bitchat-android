@@ -300,7 +300,7 @@ open class EncryptionService(private val context: Context) {
     // MARK: - Channel Encryption
     
     /**
-     * Set password for a channel (derives encryption key using Argon2id)
+     * Set password for a channel (derives encryption key using PBKDF2)
      */
     fun setChannelPassword(password: String, channel: String) {
         noiseService.setChannelPassword(password, channel)

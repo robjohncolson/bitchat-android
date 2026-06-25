@@ -29,6 +29,12 @@ class ChannelManager(
     
     fun joinChannel(channel: String, password: String? = null, myPeerID: String): Boolean {
         val channelTag = if (channel.startsWith("#")) channel else "#$channel"
+
+        if (password != null && !channelKeys.containsKey(channelTag)) {
+            if (!verifyChannelPassword(channelTag, password)) {
+                return false
+            }
+        }
         
         // Check if already joined
         if (state.getJoinedChannelsValue().contains(channelTag)) {
@@ -48,9 +54,7 @@ class ChannelManager(
         
         // If password protected and no key yet
         if (state.getPasswordProtectedChannelsValue().contains(channelTag) && !channelKeys.containsKey(channelTag)) {
-            if (dataManager.isChannelCreator(channelTag, myPeerID)) {
-                // Channel creator bypass
-            } else if (password != null) {
+            if (password != null) {
                 if (!verifyChannelPassword(channelTag, password)) {
                     return false
                 }
@@ -101,6 +105,7 @@ class ChannelManager(
         dataManager.removeChannelMembers(channel)
         channelKeys.remove(channel)
         channelPasswords.remove(channel)
+        channelKeyCommitments.remove(channel)
         dataManager.removeChannelCreator(channel)
         
         saveChannelData()
@@ -119,8 +124,29 @@ class ChannelManager(
     // MARK: - Channel Password and Encryption
     
     private fun verifyChannelPassword(channel: String, password: String): Boolean {
-        // TODO: REMOVE THIS - FOR TESTING ONLY
-        return true
+        if (password.isEmpty()) return false
+
+        return try {
+            val key = deriveChannelKey(password, channel)
+            val commitment = calculateKeyCommitment(key)
+            val expectedCommitment = channelKeyCommitments[channel]
+
+            if (expectedCommitment != null && expectedCommitment != commitment) {
+                return false
+            }
+
+            channelKeys[channel] = key
+            channelPasswords[channel] = password
+            channelKeyCommitments[channel] = commitment
+            state.setPasswordProtectedChannels(
+                state.getPasswordProtectedChannelsValue().toMutableSet().apply { add(channel) }
+            )
+            hidePasswordPrompt()
+            saveChannelData()
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
     
     private fun deriveChannelKey(password: String, channelName: String): SecretKeySpec {
@@ -134,6 +160,12 @@ class ChannelManager(
         )
         val secretKey = factory.generateSecret(spec)
         return SecretKeySpec(secretKey.encoded, "AES")
+    }
+
+    private fun calculateKeyCommitment(key: SecretKeySpec): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(key.encoded)
+        return hash.joinToString("") { "%02x".format(it) }
     }
     
     fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
@@ -170,8 +202,26 @@ class ChannelManager(
         onEncryptedPayload: (ByteArray) -> Unit,
         onFallback: () -> Unit
     ) {
-        // TODO: REIMPLEMENT – REMOVED FOR NOW
-        return
+        val key = channelKeys[channel]
+        if (key == null) {
+            onFallback()
+            return
+        }
+
+        try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+
+            val iv = cipher.iv
+            val encryptedData = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
+            val payload = ByteArray(iv.size + encryptedData.size)
+            System.arraycopy(iv, 0, payload, 0, iv.size)
+            System.arraycopy(encryptedData, 0, payload, iv.size, encryptedData.size)
+
+            onEncryptedPayload(payload)
+        } catch (e: Exception) {
+            onFallback()
+        }
     }
     
     // MARK: - Channel Management
@@ -219,9 +269,12 @@ class ChannelManager(
     
     private fun saveChannelData() {
         dataManager.saveChannelData(state.getJoinedChannelsValue(), state.getPasswordProtectedChannelsValue())
+        dataManager.saveChannelKeyCommitments(channelKeyCommitments.toMap())
     }
     
     fun loadChannelData(): Pair<Set<String>, Set<String>> {
+        channelKeyCommitments.clear()
+        channelKeyCommitments.putAll(dataManager.loadChannelKeyCommitments())
         return dataManager.loadChannelData()
     }
     
@@ -233,19 +286,19 @@ class ChannelManager(
     }
 
     fun setChannelPassword(channel: String, password: String) {
+        if (password.isEmpty()) return
 
         channelPasswords[channel] = password
 
-        channelKeys[channel] = deriveChannelKey(password, channel)
+        val key = deriveChannelKey(password, channel)
+        channelKeys[channel] = key
+        channelKeyCommitments[channel] = calculateKeyCommitment(key)
 
         state.setPasswordProtectedChannels(
             state.getPasswordProtectedChannelsValue().toMutableSet().apply { add(channel) }
         )
 
-        dataManager.saveChannelData(
-            state.getJoinedChannelsValue(),
-            state.getPasswordProtectedChannelsValue()
-        )
+        saveChannelData()
     }
     
     // MARK: - Emergency Clear

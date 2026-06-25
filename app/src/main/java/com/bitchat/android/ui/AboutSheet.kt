@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
@@ -190,6 +191,56 @@ private fun SettingsToggleRow(
     }
 }
 
+@Composable
+private fun SettingsActionRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    Surface(
+        onClick = onClick,
+        color = Color.Transparent,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = colorScheme.primary,
+                modifier = Modifier.size(22.dp)
+            )
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface.copy(alpha = 0.6f),
+                    lineHeight = 16.sp
+                )
+            }
+        }
+    }
+}
+
 /**
  * Apple-like About/Settings Sheet with high-quality design
  * Professional UX optimized for checkout scenarios
@@ -200,6 +251,7 @@ fun AboutSheet(
     isPresented: Boolean,
     onDismiss: () -> Unit,
     onShowDebug: (() -> Unit)? = null,
+    onShowDogecoinWallet: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -322,7 +374,7 @@ fun AboutSheet(
                     item(key = "appearance") {
                         Column(modifier = Modifier.padding(horizontal = 20.dp)) {
                             Text(
-                                text = "THEME",
+                                text = stringResource(R.string.about_section_theme).uppercase(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colorScheme.onBackground.copy(alpha = 0.5f),
                                 letterSpacing = 0.5.sp,
@@ -376,7 +428,7 @@ fun AboutSheet(
 
                         Column(modifier = Modifier.padding(horizontal = 20.dp)) {
                             Text(
-                                text = "SETTINGS",
+                                text = stringResource(R.string.about_section_settings).uppercase(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colorScheme.onBackground.copy(alpha = 0.5f),
                                 letterSpacing = 0.5.sp,
@@ -427,7 +479,7 @@ fun AboutSheet(
                                     // Tor Toggle
                                     SettingsToggleRow(
                                         icon = Icons.Filled.Security,
-                                        title = "Tor Network",
+                                        title = stringResource(R.string.about_tor_network),
                                         subtitle = stringResource(R.string.about_tor_route),
                                         checked = torMode.value == TorMode.ON,
                                         onCheckedChange = { enabled ->
@@ -452,6 +504,20 @@ fun AboutSheet(
                                             }
                                         } else null
                                     )
+
+                                    if (onShowDogecoinWallet != null) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(start = 56.dp),
+                                            color = colorScheme.outline.copy(alpha = 0.12f)
+                                        )
+
+                                        SettingsActionRow(
+                                            icon = Icons.Filled.AccountBalanceWallet,
+                                            title = stringResource(R.string.about_dogecoin_wallet_title),
+                                            subtitle = stringResource(R.string.about_dogecoin_wallet_desc),
+                                            onClick = onShowDogecoinWallet
+                                        )
+                                    }
                                 }
                             }
                             
@@ -490,13 +556,17 @@ fun AboutSheet(
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text(
-                                                text = "Difficulty",
+                                                text = stringResource(R.string.about_pow_difficulty_label),
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
                                                 color = colorScheme.onSurface
                                             )
                                             Text(
-                                                text = "$powDifficulty bits • ${NostrProofOfWork.estimateMiningTime(powDifficulty)}",
+                                                text = stringResource(
+                                                    R.string.about_pow_difficulty_value,
+                                                    powDifficulty,
+                                                    NostrProofOfWork.estimateMiningTime(powDifficulty)
+                                                ),
                                                 style = MaterialTheme.typography.bodySmall,
                                                 fontFamily = FontFamily.Monospace,
                                                 color = colorScheme.onSurface.copy(alpha = 0.6f)
@@ -562,7 +632,11 @@ fun AboutSheet(
                                             }
                                             Surface(color = statusColor, shape = CircleShape, modifier = Modifier.size(10.dp)) {}
                                             Text(
-                                                text = if (torStatus.running) "Connected (${torStatus.bootstrapPercent}%)" else "Disconnected",
+                                                text = if (torStatus.running) {
+                                                    stringResource(R.string.about_tor_connected_percent, torStatus.bootstrapPercent)
+                                                } else {
+                                                    stringResource(R.string.about_tor_disconnected)
+                                                },
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
                                                 color = colorScheme.onSurface

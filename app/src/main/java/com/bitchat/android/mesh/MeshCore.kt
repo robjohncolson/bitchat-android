@@ -413,6 +413,35 @@ class MeshCore(
 
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
         if (content.isEmpty()) return
+        val payload = if (channel != null || mentions.isNotEmpty()) {
+            val message = BitchatMessage(
+                sender = delegate?.getNickname() ?: myPeerID,
+                content = content,
+                timestamp = java.util.Date(),
+                isRelay = false,
+                senderPeerID = myPeerID,
+                mentions = mentions.takeIf { it.isNotEmpty() },
+                channel = channel
+            )
+            message.toBinaryPayload() ?: run {
+                Log.e("MeshCore", "Failed to encode channel message payload for $channel")
+                return
+            }
+        } else {
+            content.toByteArray(Charsets.UTF_8)
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    fun sendChannelMessage(message: BitchatMessage) {
+        val payload = message.toBinaryPayload() ?: run {
+            Log.e("MeshCore", "Failed to encode channel message payload for ${message.channel}")
+            return
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    private fun sendBroadcastMessagePayload(payload: ByteArray) {
         scope.launch {
             val packet = BitchatPacket(
                 version = 1u,
@@ -420,7 +449,7 @@ class MeshCore(
                 senderID = MeshPacketUtils.hexStringToByteArray(myPeerID),
                 recipientID = SpecialRecipients.BROADCAST,
                 timestamp = System.currentTimeMillis().toULong(),
-                payload = content.toByteArray(Charsets.UTF_8),
+                payload = payload,
                 signature = null,
                 ttl = maxTtl
             )

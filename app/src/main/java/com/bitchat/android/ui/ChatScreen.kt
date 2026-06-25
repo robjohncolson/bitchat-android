@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
+import com.bitchat.android.features.dogecoin.DogecoinWalletSheet
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.ui.media.FullScreenImageViewer
 
@@ -38,7 +40,11 @@ import com.bitchat.android.ui.media.FullScreenImageViewer
  * - ChatUIUtils: Utility functions for formatting and colors
  */
 @Composable
-fun ChatScreen(viewModel: ChatViewModel) {
+fun ChatScreen(
+    viewModel: ChatViewModel,
+    externalDogecoinPaymentRequest: DogecoinPaymentRequest? = null,
+    onDogecoinPaymentRequestConsumed: () -> Unit = {}
+) {
     val colorScheme = MaterialTheme.colorScheme
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val connectedPeers by viewModel.connectedPeers.collectAsStateWithLifecycle()
@@ -74,6 +80,15 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var initialViewerIndex by remember { mutableStateOf(0) }
     var forceScrollToBottom by remember { mutableStateOf(false) }
     var isScrolledUp by remember { mutableStateOf(false) }
+    var showDogecoinWalletSheet by remember { mutableStateOf(false) }
+    var dogecoinPaymentRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+
+    LaunchedEffect(externalDogecoinPaymentRequest?.uri) {
+        val request = externalDogecoinPaymentRequest ?: return@LaunchedEffect
+        dogecoinPaymentRequest = request
+        showDogecoinWalletSheet = true
+        onDogecoinPaymentRequestConsumed()
+    }
 
     // Show password dialog when needed
     LaunchedEffect(showPasswordPrompt) {
@@ -137,6 +152,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 modifier = Modifier.weight(1f),
                 forceScrollToBottom = forceScrollToBottom,
                 onScrolledUpChanged = { isUp -> isScrolledUp = isUp },
+                onDogecoinUriClick = { uri ->
+                    DogecoinPaymentRequest.parse(uri)?.let { request ->
+                        dogecoinPaymentRequest = request
+                        showDogecoinWalletSheet = true
+                    }
+                },
                 onNicknameClick = { fullSenderName ->
                     // Single click - mention user in text input
                     val currentText = messageText.text
@@ -343,6 +364,16 @@ fun ChatScreen(viewModel: ChatViewModel) {
         onSecurityVerificationSheetDismiss = viewModel::hideSecurityVerificationSheet,
         showMeshPeerListSheet = showMeshPeerListSheet,
         onMeshPeerListDismiss = viewModel::hideMeshPeerList,
+        showDogecoinWalletSheet = showDogecoinWalletSheet,
+        dogecoinPaymentRequest = dogecoinPaymentRequest,
+        onShowDogecoinWallet = {
+            dogecoinPaymentRequest = null
+            showDogecoinWalletSheet = true
+        },
+        onDogecoinWalletDismiss = {
+            showDogecoinWalletSheet = false
+            dogecoinPaymentRequest = null
+        },
     )
 }
 
@@ -489,6 +520,10 @@ private fun ChatDialogs(
     onSecurityVerificationSheetDismiss: () -> Unit,
     showMeshPeerListSheet: Boolean,
     onMeshPeerListDismiss: () -> Unit,
+    showDogecoinWalletSheet: Boolean,
+    dogecoinPaymentRequest: DogecoinPaymentRequest?,
+    onShowDogecoinWallet: () -> Unit,
+    onDogecoinWalletDismiss: () -> Unit,
 ) {
     val privateChatSheetPeer by viewModel.privateChatSheetPeer.collectAsStateWithLifecycle()
 
@@ -507,8 +542,20 @@ private fun ChatDialogs(
     AboutSheet(
         isPresented = showAppInfo,
         onDismiss = onAppInfoDismiss,
-        onShowDebug = { showDebugSheet = true }
+        onShowDebug = { showDebugSheet = true },
+        onShowDogecoinWallet = onShowDogecoinWallet
     )
+    if (showDogecoinWalletSheet) {
+        DogecoinWalletSheet(
+            isPresented = showDogecoinWalletSheet,
+            onDismiss = onDogecoinWalletDismiss,
+            onShareToChat = { text ->
+                viewModel.sendMessage(text)
+                onDogecoinWalletDismiss()
+            },
+            paymentRequest = dogecoinPaymentRequest
+        )
+    }
     if (showDebugSheet) {
         com.bitchat.android.ui.debug.DebugSettingsSheet(
             isPresented = showDebugSheet,

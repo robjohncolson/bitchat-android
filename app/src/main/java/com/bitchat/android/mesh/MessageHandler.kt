@@ -396,8 +396,17 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         }
         
         try {
-            // Try file packet first (voice, image, etc.) and log outcome for FILE_TRANSFER
             val isFileTransfer = com.bitchat.android.protocol.MessageType.fromValue(packet.type) == com.bitchat.android.protocol.MessageType.FILE_TRANSFER
+
+            if (!isFileTransfer) {
+                val structuredMessage = decodeStructuredBroadcastMessage(packet, peerID)
+                if (structuredMessage.wasStructured) {
+                    structuredMessage.message?.let { delegate?.onMessageReceived(it) }
+                    return
+                }
+            }
+
+            // Try file packet first (voice, image, etc.) and log outcome for FILE_TRANSFER
             val file = com.bitchat.android.model.BitchatFilePacket.decode(packet.payload)
             if (file != null) {
                 if (isFileTransfer) {
@@ -431,6 +440,43 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         } catch (e: Exception) {
             Log.e(TAG, "Failed to process broadcast message: ${e.message}")
         }
+    }
+
+    private data class StructuredBroadcastMessage(
+        val wasStructured: Boolean,
+        val message: BitchatMessage?
+    )
+
+    private fun decodeStructuredBroadcastMessage(packet: BitchatPacket, peerID: String): StructuredBroadcastMessage {
+        val decoded = BitchatMessage.fromBinaryPayload(packet.payload)
+            ?: return StructuredBroadcastMessage(wasStructured = false, message = null)
+        val hasStructuredFields = decoded.channel != null ||
+                !decoded.mentions.isNullOrEmpty() ||
+                decoded.senderPeerID != null ||
+                decoded.isEncrypted
+        if (!hasStructuredFields) return StructuredBroadcastMessage(wasStructured = false, message = null)
+
+        val content = if (decoded.isEncrypted) {
+            val channel = decoded.channel
+                ?: return StructuredBroadcastMessage(wasStructured = true, message = null)
+            val encryptedContent = decoded.encryptedContent
+                ?: return StructuredBroadcastMessage(wasStructured = true, message = null)
+            delegate?.decryptChannelMessage(encryptedContent, channel) ?: run {
+                Log.w(TAG, "Unable to decrypt channel message for $channel from ${peerID.take(8)}")
+                return StructuredBroadcastMessage(wasStructured = true, message = null)
+            }
+        } else {
+            decoded.content
+        }
+
+        return StructuredBroadcastMessage(
+            wasStructured = true,
+            message = decoded.copy(
+                sender = delegate?.getPeerNickname(peerID) ?: decoded.sender.ifBlank { "unknown" },
+                content = content,
+                senderPeerID = peerID
+            )
+        )
     }
     
     /**
