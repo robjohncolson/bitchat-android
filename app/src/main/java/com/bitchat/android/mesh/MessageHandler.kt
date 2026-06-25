@@ -1,8 +1,11 @@
 package com.bitchat.android.mesh
 
 import android.util.Log
+import com.bitchat.android.features.dogecoin.DogecoinAddress
+import com.bitchat.android.features.dogecoin.DogecoinNetwork
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.BitchatMessageType
+import com.bitchat.android.model.DogecoinIdentityAddress
 import com.bitchat.android.model.IdentityAnnouncement
 import com.bitchat.android.model.RoutedPacket
 import com.bitchat.android.protocol.BitchatPacket
@@ -273,6 +276,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         val nickname = announcement.nickname
         val noisePublicKey = announcement.noisePublicKey
         val signingPublicKey = announcement.signingPublicKey
+        val verifiedDogecoinAddresses = validatedDogecoinAddresses(announcement.dogecoinAddresses)
         
         // Update peer info with verification status through new method
         val isFirstAnnounce = delegate?.updatePeerInfo(
@@ -290,6 +294,15 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
             publicKey = noisePublicKey,
             previousPeerID = null
         )
+
+        verifiedDogecoinAddresses.forEach { dogecoinAddress ->
+            delegate?.updatePeerDogecoinAddress(
+                peerID = peerID,
+                noisePublicKey = noisePublicKey,
+                networkId = dogecoinAddress.networkId,
+                address = dogecoinAddress.address
+            )
+        }
         
         // Update mesh graph from gossip neighbors (only if TLV present)
         try {
@@ -300,6 +313,31 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
 
         Log.d(TAG, "✅ Processed verified TLV announce: stored identity for $peerID")
         return isFirstAnnounce
+    }
+
+    private fun validatedDogecoinAddresses(addresses: List<DogecoinIdentityAddress>): List<DogecoinIdentityAddress> {
+        if (addresses.isEmpty()) return emptyList()
+
+        val verifiedAddresses = mutableListOf<DogecoinIdentityAddress>()
+        val seenNetworks = mutableSetOf<String>()
+        addresses.forEach { dogecoinAddress ->
+            val network = DogecoinNetwork.values().firstOrNull { it.id == dogecoinAddress.networkId } ?: return@forEach
+            if (!seenNetworks.add(network.id)) return@forEach
+
+            val cleanAddress = dogecoinAddress.address.trim()
+            if (!DogecoinAddress.isValidAddress(cleanAddress, network)) {
+                Log.w(TAG, "Ignoring invalid Dogecoin ${network.displayName} address in announce from ${dogecoinAddress.networkId}")
+                return@forEach
+            }
+
+            verifiedAddresses.add(
+                DogecoinIdentityAddress(
+                    networkId = network.id,
+                    address = cleanAddress
+                )
+            )
+        }
+        return verifiedAddresses
     }
     
     /**
@@ -651,6 +689,7 @@ interface MessageHandlerDelegate {
     fun getMyNickname(): String?
     fun getPeerInfo(peerID: String): PeerInfo?
     fun updatePeerInfo(peerID: String, nickname: String, noisePublicKey: ByteArray, signingPublicKey: ByteArray, isVerified: Boolean): Boolean
+    fun updatePeerDogecoinAddress(peerID: String, noisePublicKey: ByteArray, networkId: String, address: String)
     
     // Packet operations
     fun sendPacket(packet: BitchatPacket)

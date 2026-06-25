@@ -1,6 +1,9 @@
 package com.bitchat.android.mesh
 
 import android.os.Build
+import com.bitchat.android.features.dogecoin.DogecoinKeyGenerator
+import com.bitchat.android.features.dogecoin.DogecoinNetwork
+import com.bitchat.android.model.DogecoinIdentityAddress
 import com.bitchat.android.model.IdentityAnnouncement
 import com.bitchat.android.model.RoutedPacket
 import com.bitchat.android.protocol.BitchatPacket
@@ -90,14 +93,62 @@ class MessageHandlerTest {
         verify(delegate, never()).updatePeerIDBinding(any(), any(), any(), any())
     }
 
+    @Test
+    fun `handleAnnounce stores dogecoin address only after signature verifies`() = runBlocking {
+        val address = DogecoinKeyGenerator.generate(DogecoinNetwork.TESTNET).address
+        val packet = announcePacket(
+            ageMs = 0,
+            dogecoinAddresses = listOf(DogecoinIdentityAddress(DogecoinNetwork.TESTNET.id, address))
+        )
+
+        handler.handleAnnounce(RoutedPacket(packet, peerID, "direct-link"))
+
+        verify(delegate).updatePeerDogecoinAddress(
+            eq(peerID),
+            any(),
+            eq(DogecoinNetwork.TESTNET.id),
+            eq(address)
+        )
+    }
+
+    @Test
+    fun `handleAnnounce does not surface dogecoin address when signature fails`() = runBlocking {
+        whenever(delegate.verifyEd25519Signature(any(), any(), any())).thenReturn(false)
+        val address = DogecoinKeyGenerator.generate(DogecoinNetwork.TESTNET).address
+        val packet = announcePacket(
+            ageMs = 0,
+            dogecoinAddresses = listOf(DogecoinIdentityAddress(DogecoinNetwork.TESTNET.id, address))
+        )
+
+        val result = handler.handleAnnounce(RoutedPacket(packet, peerID, "direct-link"))
+
+        assertFalse("Unverified announce should be ignored", result)
+        verify(delegate, never()).updatePeerDogecoinAddress(any(), any(), any(), any())
+    }
+
+    @Test
+    fun `handleAnnounce ignores dogecoin address that is invalid for declared network`() = runBlocking {
+        val mainnetAddress = DogecoinKeyGenerator.generate(DogecoinNetwork.MAINNET).address
+        val packet = announcePacket(
+            ageMs = 0,
+            dogecoinAddresses = listOf(DogecoinIdentityAddress(DogecoinNetwork.TESTNET.id, mainnetAddress))
+        )
+
+        handler.handleAnnounce(RoutedPacket(packet, peerID, "direct-link"))
+
+        verify(delegate, never()).updatePeerDogecoinAddress(any(), any(), any(), any())
+    }
+
     private fun announcePacket(
         ageMs: Long,
-        ttl: UByte = (AppConstants.MESSAGE_TTL_HOPS.toInt() - 1).toUByte()
+        ttl: UByte = (AppConstants.MESSAGE_TTL_HOPS.toInt() - 1).toUByte(),
+        dogecoinAddresses: List<DogecoinIdentityAddress> = emptyList()
     ): BitchatPacket {
         val announcement = IdentityAnnouncement(
             nickname = nickname,
             noisePublicKey = noiseKey,
-            signingPublicKey = signingKey
+            signingPublicKey = signingKey,
+            dogecoinAddresses = dogecoinAddresses
         )
         return BitchatPacket(
             version = 1u,

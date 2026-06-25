@@ -235,6 +235,21 @@ class MeshCore(
                 return peerManager.updatePeerInfo(peerID, nickname, noisePublicKey, signingPublicKey, isVerified)
             }
 
+            override fun updatePeerDogecoinAddress(
+                peerID: String,
+                noisePublicKey: ByteArray,
+                networkId: String,
+                address: String
+            ) {
+                val fingerprint = runCatching { peerManager.storeFingerprintForPeer(peerID, noisePublicKey) }.getOrNull()
+                    ?: return
+                peerManager.updatePeerDogecoinAddress(peerID, networkId, address)
+                runCatching {
+                    com.bitchat.android.identity.SecureIdentityStateManager(context)
+                        .cachePeerDogecoinAddress(fingerprint, networkId, address)
+                }
+            }
+
             override fun sendPacket(packet: BitchatPacket) {
                 val signedPacket = signPacketBeforeBroadcast(packet)
                 dispatchGlobal(RoutedPacket(signedPacket))
@@ -629,7 +644,14 @@ class MeshCore(
                 Log.e("MeshCore", "No signing public key available for announcement")
                 return@launch
             }
-            val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+            val announcement = IdentityAnnouncement(
+                nickname = nickname,
+                noisePublicKey = staticKey,
+                signingPublicKey = signingKey,
+                dogecoinAddresses = listOfNotNull(
+                    com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+                )
+            )
             val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return@launch
             val announcePacket = BitchatPacket(
                 type = MessageType.ANNOUNCE.value,
@@ -650,7 +672,14 @@ class MeshCore(
             ?: myPeerID
         val staticKey = encryptionService.getStaticPublicKey() ?: return
         val signingKey = encryptionService.getSigningPublicKey() ?: return
-        val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = staticKey,
+            signingPublicKey = signingKey,
+            dogecoinAddresses = listOfNotNull(
+                com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+            )
+        )
         val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return
         val packet = BitchatPacket(
             type = MessageType.ANNOUNCE.value,

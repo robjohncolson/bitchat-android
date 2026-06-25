@@ -9,10 +9,17 @@ import com.bitchat.android.util.*
  * Compatible with iOS AnnouncementPacket TLV format
  */
 @Parcelize
+data class DogecoinIdentityAddress(
+    val networkId: String,
+    val address: String
+) : Parcelable
+
+@Parcelize
 data class IdentityAnnouncement(
     val nickname: String,
     val noisePublicKey: ByteArray,    // Noise static public key (Curve25519.KeyAgreement)
-    val signingPublicKey: ByteArray   // Ed25519 public key for signing
+    val signingPublicKey: ByteArray,  // Ed25519 public key for signing
+    val dogecoinAddresses: List<DogecoinIdentityAddress> = emptyList()
 ) : Parcelable {
 
     /**
@@ -21,7 +28,8 @@ data class IdentityAnnouncement(
     private enum class TLVType(val value: UByte) {
         NICKNAME(0x01u),
         NOISE_PUBLIC_KEY(0x02u),
-        SIGNING_PUBLIC_KEY(0x03u);  // NEW: Ed25519 signing public key
+        SIGNING_PUBLIC_KEY(0x03u),  // NEW: Ed25519 signing public key
+        DOGECOIN_ADDRESS(0x05u);
         
         companion object {
             fun fromValue(value: UByte): TLVType? {
@@ -35,6 +43,18 @@ data class IdentityAnnouncement(
      */
     fun encode(): ByteArray? {
         val nicknameData = nickname.toByteArray(Charsets.UTF_8)
+
+        val dogecoinAddressValues = mutableListOf<ByteArray>()
+        val seenDogecoinNetworks = mutableSetOf<String>()
+        dogecoinAddresses.forEach { dogecoinAddress ->
+            if (dogecoinAddressValues.size >= MAX_DOGECOIN_ADDRESS_TLVS) return@forEach
+
+            val networkId = dogecoinAddress.networkId.trim().lowercase()
+            if (!seenDogecoinNetworks.add(networkId)) return@forEach
+
+            val value = encodeDogecoinAddressValue(networkId, dogecoinAddress.address.trim()) ?: return null
+            dogecoinAddressValues.add(value)
+        }
         
         // Check size limits
         if (nicknameData.size > 255 || noisePublicKey.size > 255 || signingPublicKey.size > 255) {
@@ -57,11 +77,33 @@ data class IdentityAnnouncement(
         result.add(TLVType.SIGNING_PUBLIC_KEY.value.toByte())
         result.add(signingPublicKey.size.toByte())
         result.addAll(signingPublicKey.toList())
+
+        dogecoinAddressValues.forEach { value ->
+            result.add(TLVType.DOGECOIN_ADDRESS.value.toByte())
+            result.add(value.size.toByte())
+            result.addAll(value.toList())
+        }
         
         return result.toByteArray()
     }
+
+    private fun encodeDogecoinAddressValue(networkId: String, address: String): ByteArray? {
+        val networkData = networkId.toByteArray(Charsets.UTF_8)
+        val addressData = address.toByteArray(Charsets.UTF_8)
+        if (networkData.isEmpty() || networkData.size > MAX_DOGECOIN_NETWORK_ID_BYTES) return null
+        if (addressData.isEmpty() || addressData.size > MAX_DOGECOIN_ADDRESS_BYTES) return null
+
+        val valueSize = 1 + networkData.size + addressData.size
+        if (valueSize > 255) return null
+
+        return byteArrayOf(networkData.size.toByte()) + networkData + addressData
+    }
     
     companion object {
+        private const val MAX_DOGECOIN_ADDRESS_TLVS = 3
+        private const val MAX_DOGECOIN_NETWORK_ID_BYTES = 16
+        private const val MAX_DOGECOIN_ADDRESS_BYTES = 64
+
         /**
          * Decode from TLV binary data matching iOS implementation
          */
@@ -73,6 +115,7 @@ data class IdentityAnnouncement(
             var nickname: String? = null
             var noisePublicKey: ByteArray? = null
             var signingPublicKey: ByteArray? = null
+            val dogecoinAddresses = linkedMapOf<String, String>()
             
             while (offset + 2 <= dataCopy.size) {
                 // Read TLV type
@@ -102,6 +145,16 @@ data class IdentityAnnouncement(
                     TLVType.SIGNING_PUBLIC_KEY -> {
                         signingPublicKey = value
                     }
+                    TLVType.DOGECOIN_ADDRESS -> {
+                        decodeDogecoinAddressValue(value)?.let { dogecoinAddress ->
+                            if (
+                                dogecoinAddresses.size < MAX_DOGECOIN_ADDRESS_TLVS &&
+                                !dogecoinAddresses.containsKey(dogecoinAddress.networkId)
+                            ) {
+                                dogecoinAddresses[dogecoinAddress.networkId] = dogecoinAddress.address
+                            }
+                        }
+                    }
                     null -> {
                         // Unknown TLV; skip (tolerant decoder for forward compatibility)
                         continue
@@ -111,10 +164,39 @@ data class IdentityAnnouncement(
             
             // All three fields are required
             return if (nickname != null && noisePublicKey != null && signingPublicKey != null) {
-                IdentityAnnouncement(nickname, noisePublicKey, signingPublicKey)
+                IdentityAnnouncement(
+                    nickname = nickname,
+                    noisePublicKey = noisePublicKey,
+                    signingPublicKey = signingPublicKey,
+                    dogecoinAddresses = dogecoinAddresses.map { (networkId, address) ->
+                        DogecoinIdentityAddress(networkId, address)
+                    }
+                )
             } else {
                 null
             }
+        }
+
+        private fun decodeDogecoinAddressValue(value: ByteArray): DogecoinIdentityAddress? {
+            if (value.isEmpty()) return null
+
+            val networkLength = value[0].toUByte().toInt()
+            if (networkLength <= 0 || networkLength > MAX_DOGECOIN_NETWORK_ID_BYTES) return null
+            if (1 + networkLength >= value.size) return null
+
+            val networkId = String(value, 1, networkLength, Charsets.UTF_8).trim().lowercase()
+            val address = String(
+                value,
+                1 + networkLength,
+                value.size - 1 - networkLength,
+                Charsets.UTF_8
+            ).trim()
+
+            if (networkId.isBlank()) return null
+            if (address.isBlank()) return null
+            if (address.toByteArray(Charsets.UTF_8).size > MAX_DOGECOIN_ADDRESS_BYTES) return null
+
+            return DogecoinIdentityAddress(networkId, address)
         }
     }
     
@@ -128,6 +210,7 @@ data class IdentityAnnouncement(
         if (nickname != other.nickname) return false
         if (!noisePublicKey.contentEquals(other.noisePublicKey)) return false
         if (!signingPublicKey.contentEquals(other.signingPublicKey)) return false
+        if (dogecoinAddresses != other.dogecoinAddresses) return false
         
         return true
     }
@@ -136,10 +219,11 @@ data class IdentityAnnouncement(
         var result = nickname.hashCode()
         result = 31 * result + noisePublicKey.contentHashCode()
         result = 31 * result + signingPublicKey.contentHashCode()
+        result = 31 * result + dogecoinAddresses.hashCode()
         return result
     }
     
     override fun toString(): String {
-        return "IdentityAnnouncement(nickname='$nickname', noisePublicKey=${noisePublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., signingPublicKey=${signingPublicKey.joinToString("") { "%02x".format(it) }.take(16)}...)"
+        return "IdentityAnnouncement(nickname='$nickname', noisePublicKey=${noisePublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., signingPublicKey=${signingPublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., dogecoinAddresses=${dogecoinAddresses.map { it.networkId }})"
     }
 }

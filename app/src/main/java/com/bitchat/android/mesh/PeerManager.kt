@@ -17,7 +17,8 @@ data class PeerInfo(
     var noisePublicKey: ByteArray?,
     var signingPublicKey: ByteArray?,      // NEW: Ed25519 public key for verification
     var isVerifiedNickname: Boolean,       // NEW: Verification status flag
-    var lastSeen: Long  // Using Long instead of Date for simplicity
+    var lastSeen: Long,  // Using Long instead of Date for simplicity
+    var dogecoinAddresses: Map<String, String> = emptyMap()
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -39,6 +40,7 @@ data class PeerInfo(
         } else if (other.signingPublicKey != null) return false
         if (isVerifiedNickname != other.isVerifiedNickname) return false
         if (lastSeen != other.lastSeen) return false
+        if (dogecoinAddresses != other.dogecoinAddresses) return false
         
         return true
     }
@@ -52,6 +54,7 @@ data class PeerInfo(
         result = 31 * result + (signingPublicKey?.contentHashCode() ?: 0)
         result = 31 * result + isVerifiedNickname.hashCode()
         result = 31 * result + lastSeen.hashCode()
+        result = 31 * result + dogecoinAddresses.hashCode()
         return result
     }
 }
@@ -135,7 +138,8 @@ class PeerManager {
             noisePublicKey = noisePublicKey,
             signingPublicKey = signingPublicKey,
             isVerifiedNickname = isVerified,
-            lastSeen = now
+            lastSeen = now,
+            dogecoinAddresses = existingPeer?.dogecoinAddresses ?: emptyMap()
         )
         
         peers[peerID] = peerInfo
@@ -180,6 +184,28 @@ class PeerManager {
                 info
             }
         }
+    }
+
+    fun updatePeerDogecoinAddress(peerID: String, networkId: String, address: String): Boolean {
+        val cleanNetworkId = networkId.trim().lowercase()
+        val cleanAddress = address.trim()
+        if (peerID == "unknown" || cleanNetworkId.isBlank() || cleanAddress.isBlank()) return false
+
+        val existingPeer = peers[peerID] ?: return false
+        if (existingPeer.dogecoinAddresses[cleanNetworkId] == cleanAddress) return false
+
+        peers[peerID] = existingPeer.copy(
+            dogecoinAddresses = existingPeer.dogecoinAddresses + (cleanNetworkId to cleanAddress),
+            lastSeen = System.currentTimeMillis()
+        )
+        notifyPeerListUpdate()
+        return true
+    }
+
+    fun getPeerDogecoinAddress(peerID: String, networkId: String): String? {
+        val cleanNetworkId = networkId.trim().lowercase()
+        if (cleanNetworkId.isBlank()) return null
+        return peers[peerID]?.dogecoinAddresses?.get(cleanNetworkId)
     }
 
     /**
