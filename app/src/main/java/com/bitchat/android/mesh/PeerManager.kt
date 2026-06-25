@@ -18,7 +18,8 @@ data class PeerInfo(
     var signingPublicKey: ByteArray?,      // NEW: Ed25519 public key for verification
     var isVerifiedNickname: Boolean,       // NEW: Verification status flag
     var lastSeen: Long,  // Using Long instead of Date for simplicity
-    var dogecoinAddresses: Map<String, String> = emptyMap()
+    var dogecoinAddresses: Map<String, String> = emptyMap(),
+    var helperNetworks: Set<String> = emptySet()   // 3b: networks this peer will broadcast for (advertised, signature-verified)
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -41,7 +42,8 @@ data class PeerInfo(
         if (isVerifiedNickname != other.isVerifiedNickname) return false
         if (lastSeen != other.lastSeen) return false
         if (dogecoinAddresses != other.dogecoinAddresses) return false
-        
+        if (helperNetworks != other.helperNetworks) return false
+
         return true
     }
     
@@ -55,6 +57,7 @@ data class PeerInfo(
         result = 31 * result + isVerifiedNickname.hashCode()
         result = 31 * result + lastSeen.hashCode()
         result = 31 * result + dogecoinAddresses.hashCode()
+        result = 31 * result + helperNetworks.hashCode()
         return result
     }
 }
@@ -139,7 +142,8 @@ class PeerManager {
             signingPublicKey = signingPublicKey,
             isVerifiedNickname = isVerified,
             lastSeen = now,
-            dogecoinAddresses = existingPeer?.dogecoinAddresses ?: emptyMap()
+            dogecoinAddresses = existingPeer?.dogecoinAddresses ?: emptyMap(),
+            helperNetworks = existingPeer?.helperNetworks ?: emptySet()
         )
         
         peers[peerID] = peerInfo
@@ -206,6 +210,24 @@ class PeerManager {
         val cleanNetworkId = networkId.trim().lowercase()
         if (cleanNetworkId.isBlank()) return null
         return peers[peerID]?.dogecoinAddresses?.get(cleanNetworkId)
+    }
+
+    /** 3b: record (from a signature-verified announce) which networks [peerID] will broadcast for. */
+    fun updatePeerHelperNetworks(peerID: String, networks: Set<String>): Boolean {
+        val existingPeer = peers[peerID] ?: return false
+        if (existingPeer.helperNetworks == networks) return false
+        peers[peerID] = existingPeer.copy(
+            helperNetworks = networks,
+            lastSeen = System.currentTimeMillis()
+        )
+        return true
+    }
+
+    /** 3b: connected peers advertising themselves as broadcast helpers for [networkId]. */
+    fun getHelperPeers(networkId: String): List<String> {
+        val clean = networkId.trim().lowercase()
+        if (clean.isBlank()) return emptyList()
+        return peers.values.filter { clean in it.helperNetworks }.map { it.id }
     }
 
     /**

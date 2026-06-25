@@ -65,4 +65,48 @@ class IdentityAnnouncementTest {
         assertEquals(nickname, decoded?.nickname)
         assertEquals(listOf(DogecoinIdentityAddress("testnet", testnetAddress)), decoded?.dogecoinAddresses)
     }
+
+    @Test
+    fun `encode decode round trip preserves node helper tlv`() {
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = noiseKey,
+            signingPublicKey = signingKey,
+            dogecoinAddresses = listOf(DogecoinIdentityAddress("testnet", testnetAddress)),
+            helperNetworks = listOf("testnet", "mainnet")
+        )
+
+        val decoded = IdentityAnnouncement.decode(announcement.encode()!!)
+
+        assertEquals(announcement, decoded)
+        assertEquals(listOf("testnet", "mainnet"), decoded?.helperNetworks)
+        assertEquals(listOf(DogecoinIdentityAddress("testnet", testnetAddress)), decoded?.dogecoinAddresses)
+    }
+
+    @Test
+    fun `node helper networks are deduped and capped on encode`() {
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = noiseKey,
+            signingPublicKey = signingKey,
+            helperNetworks = listOf("testnet", "testnet", "mainnet", "regtest", "extra")
+        )
+
+        val decoded = IdentityAnnouncement.decode(announcement.encode()!!)
+
+        assertEquals(listOf("testnet", "mainnet", "regtest"), decoded?.helperNetworks)
+    }
+
+    @Test
+    fun `announcement without node helper tlv decodes empty`() {
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = noiseKey,
+            signingPublicKey = signingKey
+        )
+
+        val decoded = IdentityAnnouncement.decode(announcement.encode()!!)
+
+        assertEquals(emptyList<String>(), decoded?.helperNetworks)
+    }
 }

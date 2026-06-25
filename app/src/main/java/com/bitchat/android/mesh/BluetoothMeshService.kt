@@ -315,6 +315,10 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
                         .cachePeerDogecoinAddress(fingerprint, networkId, address)
                 }
             }
+
+            override fun updatePeerHelperNetworks(peerID: String, networks: Set<String>) {
+                peerManager.updatePeerHelperNetworks(peerID, networks)
+            }
             
             // Packet operations
             override fun sendPacket(packet: BitchatPacket) {
@@ -1174,7 +1178,8 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
                 signingPublicKey = signingKey,
                 dogecoinAddresses = listOfNotNull(
                     com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
-                )
+                ),
+                helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
             )
             var tlvPayload = announcement.encode()
             if (tlvPayload == null) {
@@ -1244,7 +1249,8 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             signingPublicKey = signingKey,
             dogecoinAddresses = listOfNotNull(
                 com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
-            )
+            ),
+            helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
         )
         var tlvPayload = announcement.encode()
         if (tlvPayload == null) {

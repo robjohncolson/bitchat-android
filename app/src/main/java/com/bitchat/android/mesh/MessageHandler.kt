@@ -311,6 +311,9 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                 address = dogecoinAddress.address
             )
         }
+
+        // 3b: record the peer's advertised broadcast-helper networks (verified by the announce signature).
+        delegate?.updatePeerHelperNetworks(peerID, validatedHelperNetworks(announcement.helperNetworks))
         
         // Update mesh graph from gossip neighbors (only if TLV present)
         try {
@@ -346,6 +349,16 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
             )
         }
         return verifiedAddresses
+    }
+
+    private fun validatedHelperNetworks(networks: List<String>): Set<String> {
+        if (networks.isEmpty()) return emptySet()
+        val valid = linkedSetOf<String>()
+        networks.forEach { networkId ->
+            val network = DogecoinNetwork.values().firstOrNull { it.id == networkId } ?: return@forEach
+            valid.add(network.id)
+        }
+        return valid
     }
     
     /**
@@ -698,6 +711,7 @@ interface MessageHandlerDelegate {
     fun getPeerInfo(peerID: String): PeerInfo?
     fun updatePeerInfo(peerID: String, nickname: String, noisePublicKey: ByteArray, signingPublicKey: ByteArray, isVerified: Boolean): Boolean
     fun updatePeerDogecoinAddress(peerID: String, noisePublicKey: ByteArray, networkId: String, address: String)
+    fun updatePeerHelperNetworks(peerID: String, networks: Set<String>)
     
     // Packet operations
     fun sendPacket(packet: BitchatPacket)

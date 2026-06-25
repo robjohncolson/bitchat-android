@@ -250,6 +250,10 @@ class MeshCore(
                 }
             }
 
+            override fun updatePeerHelperNetworks(peerID: String, networks: Set<String>) {
+                peerManager.updatePeerHelperNetworks(peerID, networks)
+            }
+
             override fun sendPacket(packet: BitchatPacket) {
                 val signedPacket = signPacketBeforeBroadcast(packet)
                 dispatchGlobal(RoutedPacket(signedPacket))
@@ -672,7 +676,8 @@ class MeshCore(
                 signingPublicKey = signingKey,
                 dogecoinAddresses = listOfNotNull(
                     com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
-                )
+                ),
+                helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
             )
             val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return@launch
             val announcePacket = BitchatPacket(
@@ -700,7 +705,8 @@ class MeshCore(
             signingPublicKey = signingKey,
             dogecoinAddresses = listOfNotNull(
                 com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
-            )
+            ),
+            helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
         )
         val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return
         val packet = BitchatPacket(

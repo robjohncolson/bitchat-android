@@ -1069,21 +1069,30 @@ class ChatViewModel(
     /** True if any connected peer could plausibly broadcast for us right now (drives the CTA). */
     fun hasBroadcastHelperCandidate(): Boolean = listBroadcastHelperCandidates(currentDogecoinNetwork()).isNotEmpty()
 
-    private fun listBroadcastHelperCandidates(@Suppress("UNUSED_PARAMETER") network: DogecoinNetwork): List<String> {
-        // MVP: connected mutual-favorite peers with an established session (the helper is favorites-only
-        // by default, so non-favorites would DECLINE). Task 9 broadens this via the NODE_HELPER advert.
+    private fun listBroadcastHelperCandidates(network: DogecoinNetwork): List<String> {
+        // Prefer peers who advertise (signature-verified) that they will broadcast for this network;
+        // also include mutual favorites (a favorites-only helper may not have advertised). Rank
+        // advertised helpers first, then mutual favorites. Non-helpers simply reply DECLINED.
         return try {
             state.getConnectedPeersValue()
                 .asSequence()
                 .filter { it != mesh.myPeerID }
                 .filter { mesh.hasEstablishedSession(it) }
                 .mapNotNull { peerID ->
-                    val noiseKey = mesh.getPeerInfo(peerID)?.noisePublicKey ?: return@mapNotNull null
-                    val mutual = runCatching {
-                        com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(noiseKey)?.isMutual == true
-                    }.getOrDefault(false)
-                    if (mutual) peerID else null
+                    val info = mesh.getPeerInfo(peerID) ?: return@mapNotNull null
+                    val advertisesHelp = network.id in info.helperNetworks
+                    val mutual = info.noisePublicKey?.let { key ->
+                        runCatching {
+                            com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(key)?.isMutual == true
+                        }.getOrDefault(false)
+                    } ?: false
+                    if (advertisesHelp || mutual) Triple(peerID, advertisesHelp, mutual) else null
                 }
+                .sortedWith(
+                    compareByDescending<Triple<String, Boolean, Boolean>> { it.second }
+                        .thenByDescending { it.third }
+                )
+                .map { it.first }
                 .toList()
         } catch (_: Exception) { emptyList() }
     }

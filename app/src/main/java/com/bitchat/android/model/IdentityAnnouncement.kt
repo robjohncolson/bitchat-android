@@ -19,7 +19,8 @@ data class IdentityAnnouncement(
     val nickname: String,
     val noisePublicKey: ByteArray,    // Noise static public key (Curve25519.KeyAgreement)
     val signingPublicKey: ByteArray,  // Ed25519 public key for signing
-    val dogecoinAddresses: List<DogecoinIdentityAddress> = emptyList()
+    val dogecoinAddresses: List<DogecoinIdentityAddress> = emptyList(),
+    val helperNetworks: List<String> = emptyList()
 ) : Parcelable {
 
     /**
@@ -29,7 +30,8 @@ data class IdentityAnnouncement(
         NICKNAME(0x01u),
         NOISE_PUBLIC_KEY(0x02u),
         SIGNING_PUBLIC_KEY(0x03u),  // NEW: Ed25519 signing public key
-        DOGECOIN_ADDRESS(0x05u);
+        DOGECOIN_ADDRESS(0x05u),
+        NODE_HELPER(0x06u);         // NEW (3b): a network id this peer will broadcast transactions for
         
         companion object {
             fun fromValue(value: UByte): TLVType? {
@@ -55,7 +57,18 @@ data class IdentityAnnouncement(
             val value = encodeDogecoinAddressValue(networkId, dogecoinAddress.address.trim()) ?: return null
             dogecoinAddressValues.add(value)
         }
-        
+
+        val helperNetworkValues = mutableListOf<ByteArray>()
+        val seenHelperNetworks = mutableSetOf<String>()
+        helperNetworks.forEach { network ->
+            if (helperNetworkValues.size >= MAX_DOGECOIN_ADDRESS_TLVS) return@forEach
+            val networkId = network.trim().lowercase()
+            val networkData = networkId.toByteArray(Charsets.UTF_8)
+            if (networkData.isEmpty() || networkData.size > MAX_DOGECOIN_NETWORK_ID_BYTES) return@forEach
+            if (!seenHelperNetworks.add(networkId)) return@forEach
+            helperNetworkValues.add(networkData)
+        }
+
         // Check size limits
         if (nicknameData.size > 255 || noisePublicKey.size > 255 || signingPublicKey.size > 255) {
             return null
@@ -83,7 +96,13 @@ data class IdentityAnnouncement(
             result.add(value.size.toByte())
             result.addAll(value.toList())
         }
-        
+
+        helperNetworkValues.forEach { value ->
+            result.add(TLVType.NODE_HELPER.value.toByte())
+            result.add(value.size.toByte())
+            result.addAll(value.toList())
+        }
+
         return result.toByteArray()
     }
 
@@ -116,6 +135,7 @@ data class IdentityAnnouncement(
             var noisePublicKey: ByteArray? = null
             var signingPublicKey: ByteArray? = null
             val dogecoinAddresses = linkedMapOf<String, String>()
+            val helperNetworks = linkedSetOf<String>()
             
             while (offset + 2 <= dataCopy.size) {
                 // Read TLV type
@@ -155,6 +175,12 @@ data class IdentityAnnouncement(
                             }
                         }
                     }
+                    TLVType.NODE_HELPER -> {
+                        if (helperNetworks.size < MAX_DOGECOIN_ADDRESS_TLVS) {
+                            val networkId = String(value, Charsets.UTF_8).trim().lowercase()
+                            if (networkId.isNotBlank()) helperNetworks.add(networkId)
+                        }
+                    }
                     null -> {
                         // Unknown TLV; skip (tolerant decoder for forward compatibility)
                         continue
@@ -170,7 +196,8 @@ data class IdentityAnnouncement(
                     signingPublicKey = signingPublicKey,
                     dogecoinAddresses = dogecoinAddresses.map { (networkId, address) ->
                         DogecoinIdentityAddress(networkId, address)
-                    }
+                    },
+                    helperNetworks = helperNetworks.toList()
                 )
             } else {
                 null
@@ -211,7 +238,8 @@ data class IdentityAnnouncement(
         if (!noisePublicKey.contentEquals(other.noisePublicKey)) return false
         if (!signingPublicKey.contentEquals(other.signingPublicKey)) return false
         if (dogecoinAddresses != other.dogecoinAddresses) return false
-        
+        if (helperNetworks != other.helperNetworks) return false
+
         return true
     }
     
@@ -220,10 +248,11 @@ data class IdentityAnnouncement(
         result = 31 * result + noisePublicKey.contentHashCode()
         result = 31 * result + signingPublicKey.contentHashCode()
         result = 31 * result + dogecoinAddresses.hashCode()
+        result = 31 * result + helperNetworks.hashCode()
         return result
     }
     
     override fun toString(): String {
-        return "IdentityAnnouncement(nickname='$nickname', noisePublicKey=${noisePublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., signingPublicKey=${signingPublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., dogecoinAddresses=${dogecoinAddresses.map { it.networkId }})"
+        return "IdentityAnnouncement(nickname='$nickname', noisePublicKey=${noisePublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., signingPublicKey=${signingPublicKey.joinToString("") { "%02x".format(it) }.take(16)}..., dogecoinAddresses=${dogecoinAddresses.map { it.networkId }}, helperNetworks=$helperNetworks)"
     }
 }
