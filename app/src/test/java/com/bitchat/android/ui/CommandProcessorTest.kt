@@ -193,6 +193,8 @@ class CommandProcessorTest() {
         override fun sendReadReceipt(messageID: String, recipientPeerID: String, readerNickname: String) = Unit
         override fun sendVerifyChallenge(peerID: String, noiseKeyHex: String, nonceA: ByteArray) = Unit
         override fun sendVerifyResponse(peerID: String, noiseKeyHex: String, nonceA: ByteArray) = Unit
+        override fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) = Unit
+        override fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) = Unit
         override fun sendFileBroadcast(file: BitchatFilePacket) = Unit
         override fun sendFilePrivate(recipientPeerID: String, file: BitchatFilePacket) = Unit
         override fun cancelFileTransfer(transferId: String): Boolean = false

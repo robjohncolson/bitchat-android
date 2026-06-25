@@ -23,6 +23,8 @@ interface MeshService {
     fun sendFavoriteNotification(peerID: String, isFavorite: Boolean) {}
     fun sendVerifyChallenge(peerID: String, noiseKeyHex: String, nonceA: ByteArray)
     fun sendVerifyResponse(peerID: String, noiseKeyHex: String, nonceA: ByteArray)
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray)
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray)
     fun sendFileBroadcast(file: BitchatFilePacket)
     fun sendFilePrivate(recipientPeerID: String, file: BitchatFilePacket)
     fun cancelFileTransfer(transferId: String): Boolean

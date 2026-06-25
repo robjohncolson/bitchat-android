@@ -170,6 +170,14 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                     Log.d(TAG, "🔐 Verify response received from $peerID (${noisePayload.data.size} bytes)")
                     delegate?.onVerifyResponseReceived(peerID, noisePayload.data, packet.timestamp.toLong())
                 }
+                com.bitchat.android.model.NoisePayloadType.PAYMENT_BROADCAST_REQUEST -> {
+                    Log.d(TAG, "💸 Payment broadcast request received from $peerID (${noisePayload.data.size} bytes)")
+                    delegate?.onPaymentBroadcastRequestReceived(peerID, noisePayload.data, packet.timestamp.toLong())
+                }
+                com.bitchat.android.model.NoisePayloadType.PAYMENT_BROADCAST_RESULT -> {
+                    Log.d(TAG, "💸 Payment broadcast result received from $peerID (${noisePayload.data.size} bytes)")
+                    delegate?.onPaymentBroadcastResultReceived(peerID, noisePayload.data, packet.timestamp.toLong())
+                }
             }
             
         } catch (e: Exception) {
@@ -719,4 +727,6 @@ interface MessageHandlerDelegate {
     fun onReadReceiptReceived(messageID: String, peerID: String)
     fun onVerifyChallengeReceived(peerID: String, payload: ByteArray, timestampMs: Long)
     fun onVerifyResponseReceived(peerID: String, payload: ByteArray, timestampMs: Long)
+    fun onPaymentBroadcastRequestReceived(peerID: String, payload: ByteArray, timestampMs: Long)
+    fun onPaymentBroadcastResultReceived(peerID: String, payload: ByteArray, timestampMs: Long)
 }

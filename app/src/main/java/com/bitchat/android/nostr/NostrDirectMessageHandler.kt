@@ -191,6 +191,12 @@ class NostrDirectMessageHandler(
             }
             NoisePayloadType.VERIFY_CHALLENGE,
             NoisePayloadType.VERIFY_RESPONSE -> Unit // Ignore verification payloads in Nostr direct messages
+            NoisePayloadType.PAYMENT_BROADCAST_REQUEST,
+            NoisePayloadType.PAYMENT_BROADCAST_RESULT -> {
+                // TODO(Task 10 - Nostr fallback): route broadcast-over-mesh payloads received via Nostr
+                // to the PaymentBroadcastCoordinator / BroadcastHelperService. Mesh is the MVP transport.
+                Log.d(TAG, "💸 Payment broadcast payload via Nostr from $convKey (Nostr fallback pending)")
+            }
         }
     }
 

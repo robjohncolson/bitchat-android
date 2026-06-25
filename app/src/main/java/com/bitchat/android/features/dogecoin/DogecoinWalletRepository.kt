@@ -195,6 +195,35 @@ class DogecoinWalletRepository(context: Context) {
             .apply()
     }
 
+    /**
+     * Whether this device will broadcast OTHER peers' signed transactions through its own Dogecoin
+     * node (Milestone 3b "helper"). Per-network and default false: mainnet must be enabled explicitly
+     * and independently of testnet/regtest, so running a testnet helper never silently relays mainnet.
+     */
+    fun loadHelperEnabled(network: DogecoinNetwork): Boolean {
+        return prefs.getBoolean(helperEnabledKey(network), false)
+    }
+
+    fun saveHelperEnabled(network: DogecoinNetwork, enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(helperEnabledKey(network), enabled)
+            .apply()
+    }
+
+    /**
+     * Whether the helper only serves mutual-favorite peers. Defaults to true (favorites-only) to keep
+     * the privacy-linkage and Sybil/amplification surface small for a privacy-first app.
+     */
+    fun loadHelperFavoritesOnly(): Boolean {
+        return prefs.getBoolean(KEY_HELPER_FAVORITES_ONLY, true)
+    }
+
+    fun saveHelperFavoritesOnly(favoritesOnly: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_HELPER_FAVORITES_ONLY, favoritesOnly)
+            .apply()
+    }
+
     fun loadSelectedNetwork(): DogecoinNetwork {
         val hasExistingWallet = prefs.contains(privateKeyKey(DogecoinNetwork.MAINNET)) ||
             prefs.contains(privateKeyKey(DogecoinNetwork.TESTNET)) ||
@@ -413,6 +442,7 @@ class DogecoinWalletRepository(context: Context) {
         const val KEY_LEGACY_PREFS_MIGRATED = "legacy_testnet_prefs_migrated"
         const val KEY_SELECTED_NETWORK = "selected_network"
         const val KEY_ADVERTISE_ADDRESS_ENABLED = "advertise_address_enabled"
+        const val KEY_HELPER_FAVORITES_ONLY = "helper_favorites_only"
         const val KEY_LEGACY_PRIVATE_KEY_HEX = "private_key_hex"
         const val KEY_LEGACY_RPC_URL = "rpc_url"
         const val KEY_LEGACY_RPC_USERNAME = "rpc_username"
@@ -420,6 +450,7 @@ class DogecoinWalletRepository(context: Context) {
         const val KEY_PRACTICE_NUDGE_DISMISSED = "practice_nudge_dismissed"
 
         fun privateKeyKey(network: DogecoinNetwork): String = "${network.id}_private_key_hex"
+        fun helperEnabledKey(network: DogecoinNetwork): String = "${network.id}_helper_enabled"
         fun compressedKey(network: DogecoinNetwork): String = "${network.id}_compressed"
         fun createdAtKey(network: DogecoinNetwork): String = "${network.id}_created_at"
         fun rpcUrlKey(network: DogecoinNetwork): String = "${network.id}_rpc_url"

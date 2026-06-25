@@ -122,6 +122,43 @@ class MessageRouter private constructor(
         }
     }
 
+    /**
+     * Route a broadcast-over-mesh REQUEST (already-encoded [com.bitchat.android.model.PaymentBroadcastRequest])
+     * to a candidate helper peer. Mesh-first, Nostr fallback for mutual-favorite off-mesh helpers.
+     * Returns true if it was dispatched on some transport; false if the helper is unreachable right now
+     * (the caller then tries another helper). Unlike [sendPrivate] there is NO outbox — a broadcast is
+     * time-bounded, so an unreachable helper is simply skipped.
+     */
+    fun sendPaymentBroadcastRequest(payload: ByteArray, toPeerID: String): Boolean {
+        if (isReady(mesh, toPeerID)) {
+            Log.d(TAG, "Routing payment-broadcast REQUEST via mesh to ${toPeerID.take(8)}…")
+            mesh.sendPaymentBroadcastRequest(toPeerID, payload)
+            return true
+        }
+        if (canSendViaNostr(toPeerID)) {
+            // TODO(Task 10 - Nostr fallback): nostr.sendPaymentBroadcastRequest(payload, toPeerID); return true
+            Log.d(TAG, "Helper ${toPeerID.take(8)}… is Nostr-reachable but Nostr broadcast relay is not wired yet")
+        }
+        return false
+    }
+
+    /**
+     * Route a broadcast-over-mesh RESULT (already-encoded [com.bitchat.android.model.PaymentBroadcastResult])
+     * back to the requesting peer. Same mesh-first/Nostr-fallback rules as [sendPaymentBroadcastRequest].
+     */
+    fun sendPaymentBroadcastResult(payload: ByteArray, toPeerID: String): Boolean {
+        if (isReady(mesh, toPeerID)) {
+            Log.d(TAG, "Routing payment-broadcast RESULT via mesh to ${toPeerID.take(8)}…")
+            mesh.sendPaymentBroadcastResult(toPeerID, payload)
+            return true
+        }
+        if (canSendViaNostr(toPeerID)) {
+            // TODO(Task 10 - Nostr fallback): nostr.sendPaymentBroadcastResult(payload, toPeerID); return true
+            Log.d(TAG, "Requester ${toPeerID.take(8)}… is Nostr-reachable but Nostr broadcast relay is not wired yet")
+        }
+        return false
+    }
+
     // Flush any queued messages for a specific peerID
     fun flushOutboxFor(peerID: String) {
         val queued = outbox[peerID] ?: return

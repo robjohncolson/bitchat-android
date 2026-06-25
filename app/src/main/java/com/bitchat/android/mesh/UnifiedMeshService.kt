@@ -119,6 +119,20 @@ class UnifiedMeshService(
         }
     }
 
+    override fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        when {
+            isBleReady(peerID) -> bluetooth.sendPaymentBroadcastRequest(peerID, payload)
+            isWifiReady(peerID) -> wifiService()?.sendPaymentBroadcastRequest(peerID, payload)
+        }
+    }
+
+    override fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        when {
+            isBleReady(peerID) -> bluetooth.sendPaymentBroadcastResult(peerID, payload)
+            isWifiReady(peerID) -> wifiService()?.sendPaymentBroadcastResult(peerID, payload)
+        }
+    }
+
     override fun sendFileBroadcast(file: BitchatFilePacket) {
         when {
             isBleEnabled() -> bluetooth.sendFileBroadcast(file)

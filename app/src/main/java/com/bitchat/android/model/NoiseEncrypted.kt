@@ -23,7 +23,9 @@ enum class NoisePayloadType(val value: UByte) {
     DELIVERED(0x03u),           // Message was delivered
     VERIFY_CHALLENGE(0x10u),    // Verification challenge
     VERIFY_RESPONSE(0x11u),     // Verification response
-    FILE_TRANSFER(0x20u);
+    FILE_TRANSFER(0x20u),
+    PAYMENT_BROADCAST_REQUEST(0x30u),   // 3b: sender -> helper, broadcast this signed raw Dogecoin tx
+    PAYMENT_BROADCAST_RESULT(0x31u);    // 3b: helper -> sender, node-verified txid or structured rejection
 
 
     companion object {

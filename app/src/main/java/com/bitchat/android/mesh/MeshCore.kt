@@ -336,6 +336,14 @@ class MeshCore(
             override fun onVerifyResponseReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
                 delegate?.didReceiveVerifyResponse(peerID, payload, timestampMs)
             }
+
+            override fun onPaymentBroadcastRequestReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastRequest(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastResultReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastResult(peerID, payload, timestampMs)
+            }
         }
 
         packetProcessor.delegate = object : PacketProcessorDelegate {
@@ -608,6 +616,20 @@ class MeshCore(
             data = tlv
         )
         sendNoisePayloadToPeer(payload, peerID)
+    }
+
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_REQUEST, data = payload),
+            peerID
+        )
+    }
+
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_RESULT, data = payload),
+            peerID
+        )
     }
 
     private fun sendNoisePayloadToPeer(payload: NoisePayload, recipientPeerID: String) {

@@ -474,6 +474,14 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             override fun onVerifyResponseReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
                 delegate?.didReceiveVerifyResponse(peerID, payload, timestampMs)
             }
+
+            override fun onPaymentBroadcastRequestReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastRequest(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastResultReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastResult(peerID, payload, timestampMs)
+            }
         }
         
         // PacketProcessor delegates
@@ -1095,6 +1103,22 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             data = tlv
         )
         sendNoisePayloadToPeer(payload, peerID, "verify response")
+    }
+
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_REQUEST, data = payload),
+            peerID,
+            "payment broadcast request"
+        )
+    }
+
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_RESULT, data = payload),
+            peerID,
+            "payment broadcast result"
+        )
     }
 
     private fun sendNoisePayloadToPeer(payload: NoisePayload, recipientPeerID: String, label: String) {

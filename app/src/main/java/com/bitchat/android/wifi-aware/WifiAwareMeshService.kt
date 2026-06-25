@@ -1382,6 +1382,14 @@ class WifiAwareMeshService(private val context: Context) : MeshService, Transpor
         meshCore.sendVerifyResponse(peerID, noiseKeyHex, nonceA)
     }
 
+    override fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        meshCore.sendPaymentBroadcastRequest(peerID, payload)
+    }
+
+    override fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        meshCore.sendPaymentBroadcastResult(peerID, payload)
+    }
+
     /**
      * Broadcasts a file (TLV payload) to all peers. Uses protocol version 2 to support
      * large payloads and generates a deterministic transferId (sha256 of payload) for UI/state.

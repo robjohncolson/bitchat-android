@@ -98,6 +98,25 @@ class ChatViewModel(
     private val dataManager = DataManager(application.applicationContext)
     private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
     private val dogecoinWalletRepository by lazy { DogecoinWalletRepository(getApplication()) }
+
+    // --- Milestone 3b: broadcast-over-mesh (node-optional sender + opt-in helper) ---
+    private val broadcastHelper by lazy {
+        com.bitchat.android.features.dogecoin.BroadcastHelperService.getInstance(getApplication())
+    }
+    private val paymentBroadcastCoordinator by lazy {
+        com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator(
+            listCandidateHelpers = { network -> listBroadcastHelperCandidates(network) },
+            sendRequestToPeer = { peerID, payload ->
+                com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
+                    .sendPaymentBroadcastRequest(payload, peerID)
+            }
+        )
+    }
+    private val _peerBroadcastState =
+        kotlinx.coroutines.flow.MutableStateFlow<com.bitchat.android.features.dogecoin.PeerBroadcastUiState>(
+            com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Idle
+        )
+    val peerBroadcastState: StateFlow<com.bitchat.android.features.dogecoin.PeerBroadcastUiState> = _peerBroadcastState
     private val messageManager = MessageManager(state)
     private val channelManager = ChannelManager(state, messageManager, dataManager, viewModelScope)
 
@@ -996,6 +1015,77 @@ class ChatViewModel(
 
     override fun didReceiveVerifyResponse(peerID: String, payload: ByteArray, timestampMs: Long) {
         verificationHandler.didReceiveVerifyResponse(peerID, payload)
+    }
+
+    override fun didReceivePaymentBroadcastRequest(peerID: String, payload: ByteArray, timestampMs: Long) {
+        viewModelScope.launch {
+            try {
+                val noiseKeyHex = mesh.getPeerInfo(peerID)?.noisePublicKey?.joinToString("") { "%02x".format(it) }
+                val resultBytes = broadcastHelper.handleRequest(peerID, noiseKeyHex, payload, System.currentTimeMillis())
+                if (resultBytes != null) {
+                    com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
+                        .sendPaymentBroadcastResult(resultBytes, peerID)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("ChatViewModel", "Broadcast helper failed for ${peerID.take(8)}…: ${e.message}")
+            }
+        }
+    }
+
+    override fun didReceivePaymentBroadcastResult(peerID: String, payload: ByteArray, timestampMs: Long) {
+        paymentBroadcastCoordinator.onResult(peerID, payload)
+    }
+
+    /**
+     * Sender side: relay a locally-signed transaction to opt-in helper peers when the local node
+     * cannot broadcast. Drives [peerBroadcastState] (Pending -> Confirmed/Failed) for the wallet UI.
+     */
+    fun requestPeerBroadcast(signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction) {
+        _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Pending
+        viewModelScope.launch {
+            val network = currentDogecoinNetwork()
+            val outcome = try {
+                paymentBroadcastCoordinator.broadcast(
+                    rawTransactionHex = signedTransaction.rawTransactionHex,
+                    expectedTxid = signedTransaction.txid,
+                    network = network
+                )
+            } catch (e: Exception) {
+                com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed(e.message ?: "Broadcast failed.")
+            }
+            _peerBroadcastState.value = when (outcome) {
+                is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Confirmed ->
+                    com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(outcome.txid)
+                is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed ->
+                    com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed(outcome.reason)
+            }
+        }
+    }
+
+    fun clearPeerBroadcastState() {
+        _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Idle
+    }
+
+    /** True if any connected peer could plausibly broadcast for us right now (drives the CTA). */
+    fun hasBroadcastHelperCandidate(): Boolean = listBroadcastHelperCandidates(currentDogecoinNetwork()).isNotEmpty()
+
+    private fun listBroadcastHelperCandidates(@Suppress("UNUSED_PARAMETER") network: DogecoinNetwork): List<String> {
+        // MVP: connected mutual-favorite peers with an established session (the helper is favorites-only
+        // by default, so non-favorites would DECLINE). Task 9 broadens this via the NODE_HELPER advert.
+        return try {
+            state.getConnectedPeersValue()
+                .asSequence()
+                .filter { it != mesh.myPeerID }
+                .filter { mesh.hasEstablishedSession(it) }
+                .mapNotNull { peerID ->
+                    val noiseKey = mesh.getPeerInfo(peerID)?.noisePublicKey ?: return@mapNotNull null
+                    val mutual = runCatching {
+                        com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(noiseKey)?.isMutual == true
+                    }.getOrDefault(false)
+                    if (mutual) peerID else null
+                }
+                .toList()
+        } catch (_: Exception) { emptyList() }
     }
     
     override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
