@@ -47,6 +47,15 @@ class PaymentBroadcastPacketTest {
     }
 
     @Test
+    fun `decode rejects a wrapping 4-byte length without throwing`() {
+        // type 0x00, length 0x7FFFFFFF: positive (passes a naive len<0 check) but offset+len would
+        // overflow a 32-bit Int negative. decode() must return null, never throw.
+        val crafted = byteArrayOf(0x00, 0x7F, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x01)
+        assertNull(PaymentBroadcastRequest.decode(crafted))
+        assertNull(PaymentBroadcastResult.decode(crafted))
+    }
+
+    @Test
     fun `unknown tlv is skipped for forward compatibility`() {
         val base = PaymentBroadcastRequest(uuid(5), "testnet", rawHex, txid).encode()!!
         val unknown = byteArrayOf(0x7f, 0, 0, 0, 2, 1, 2) // type 0x7f, len 2

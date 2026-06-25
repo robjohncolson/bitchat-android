@@ -4,9 +4,11 @@ import com.bitchat.android.model.PaymentBroadcastRejectCode
 import com.bitchat.android.model.PaymentBroadcastRequest
 import com.bitchat.android.model.PaymentBroadcastResult
 import com.bitchat.android.model.PaymentBroadcastStatus
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
 
@@ -58,57 +60,79 @@ class PaymentBroadcastCoordinator(
      * await acceptance. Must be called within the signed transaction's validity window; the total wall
      * time is bounded by [MAX_ATTEMPTS] * [ATTEMPT_TIMEOUT_MS] (90s), well under the 10-minute window.
      */
-    suspend fun broadcast(rawTransactionHex: String, expectedTxid: String, network: DogecoinNetwork): Outcome {
+    suspend fun broadcast(rawTransactionHex: String, expectedTxid: String, network: DogecoinNetwork): Outcome = coroutineScope {
         val uuid = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val request = PaymentBroadcastRequest(uuid, network.id, rawTransactionHex, expectedTxid)
-        val payload = request.encode() ?: return Outcome.Failed("Could not encode the broadcast request.")
+        val payload = request.encode() ?: return@coroutineScope Outcome.Failed("Could not encode the broadcast request.")
 
         val candidates = listCandidateHelpers(network)
         if (candidates.isEmpty()) {
-            return Outcome.Failed("No reachable peer can broadcast this transaction right now.")
+            return@coroutineScope Outcome.Failed("No reachable peer can broadcast this transaction right now.")
         }
 
-        val used = LinkedHashSet<String>()
-        val terminalSeen = HashMap<PaymentBroadcastRejectCode, MutableSet<String>>()
-        var lastReason = "No connected peer accepted the transaction."
+        // One long-lived collector for the whole broadcast: `results` is a replay=0 SharedFlow, so a
+        // reply emitted while no collector is subscribed is dropped. Subscribing once (before any
+        // request is dispatched) and keeping it alive across all attempts means a reply matching this
+        // uuid is never observed with zero subscribers — fixes the inter-attempt gap that could
+        // surface a false Outcome.Failed for a payment a helper actually accepted.
+        val incoming = Channel<Pair<String, PaymentBroadcastResult>>(Channel.UNLIMITED)
+        val collector = launch {
+            results.filter { it.second.requestUuid.contentEquals(uuid) }.collect { incoming.trySend(it) }
+        }
 
-        repeat(MAX_ATTEMPTS) {
-            val batch = candidates.filterNot { it in used }.take(FANOUT)
-            if (batch.isEmpty()) return@repeat
-            used.addAll(batch)
-            val dispatched = batch.count { sendRequestToPeer(it, payload) }
-            if (dispatched == 0) return@repeat
+        try {
+            val used = LinkedHashSet<String>()
+            val terminalSeen = HashMap<PaymentBroadcastRejectCode, MutableSet<String>>()
+            var lastReason = "No connected peer accepted the transaction."
 
-            val decisive: Pair<String, PaymentBroadcastResult>? = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
-                results
-                    .filter { it.second.requestUuid.contentEquals(uuid) }
-                    .firstOrNull { (peerID, res) ->
+            repeat(MAX_ATTEMPTS) {
+                val batch = candidates.filterNot { it in used }.take(FANOUT)
+                if (batch.isEmpty()) return@repeat
+                used.addAll(batch)
+                val dispatched = batch.count { sendRequestToPeer(it, payload) }
+                if (dispatched == 0) return@repeat
+
+                val decisive: PaymentBroadcastResult? = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
+                    while (true) {
+                        val (peerID, res) = incoming.receive()
                         when {
-                            res.status == PaymentBroadcastStatus.ACCEPTED && res.txid == expectedTxid -> true
+                            // NOTE (3b.1 follow-up): a single ACCEPTED is the helper's CLAIM — its node
+                            // returned this node-verified txid, but a dishonest helper could echo
+                            // expectedTxid without broadcasting, and a node-less sender can't independently
+                            // verify chain inclusion. No funds are lost (an unbroadcast tx stays spendable),
+                            // and favorites-only-default limits this to trusted peers. Stronger corroboration
+                            // (second ACCEPTED) or an on-chain txid poll is tracked for 3b.1.
+                            res.status == PaymentBroadcastStatus.ACCEPTED && res.txid == expectedTxid ->
+                                return@withTimeoutOrNull res
                             res.status == PaymentBroadcastStatus.REJECTED &&
-                                res.rejectCode == PaymentBroadcastRejectCode.ALREADY_KNOWN -> true
+                                res.rejectCode == PaymentBroadcastRejectCode.ALREADY_KNOWN ->
+                                return@withTimeoutOrNull res
                             res.status == PaymentBroadcastStatus.REJECTED &&
                                 res.rejectCode?.isTerminalForTransaction == true -> {
                                 lastReason = humanReason(res)
                                 val peers = terminalSeen.getOrPut(res.rejectCode!!) { mutableSetOf() }
                                 peers.add(peerID)
-                                peers.size >= TERMINAL_REPRODUCTIONS // require a second independent helper
+                                if (peers.size >= TERMINAL_REPRODUCTIONS) return@withTimeoutOrNull res
                             }
-                            else -> { lastReason = humanReason(res); false }
+                            else -> lastReason = humanReason(res)
                         }
                     }
-            }
+                    @Suppress("UNREACHABLE_CODE")
+                    null
+                }
 
-            if (decisive != null) {
-                val res = decisive.second
-                return when {
-                    res.status == PaymentBroadcastStatus.ACCEPTED -> Outcome.Confirmed(res.txid ?: expectedTxid)
-                    res.rejectCode == PaymentBroadcastRejectCode.ALREADY_KNOWN -> Outcome.Confirmed(expectedTxid)
-                    else -> Outcome.Failed(humanReason(res)) // terminal reason reproduced by two helpers
+                if (decisive != null) {
+                    return@coroutineScope when {
+                        decisive.status == PaymentBroadcastStatus.ACCEPTED -> Outcome.Confirmed(decisive.txid ?: expectedTxid)
+                        decisive.rejectCode == PaymentBroadcastRejectCode.ALREADY_KNOWN -> Outcome.Confirmed(expectedTxid)
+                        else -> Outcome.Failed(humanReason(decisive)) // terminal reason reproduced by two helpers
+                    }
                 }
             }
+            Outcome.Failed(lastReason)
+        } finally {
+            collector.cancel()
         }
-        return Outcome.Failed(lastReason)
     }
 
     /** Fixed, app-controlled failure text. Never renders the attacker-controlled REJECT_DETAIL. */

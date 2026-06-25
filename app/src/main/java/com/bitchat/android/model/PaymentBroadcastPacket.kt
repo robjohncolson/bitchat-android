@@ -102,16 +102,18 @@ private fun parseTlvs(data: ByteArray): Map<Int, ByteArray>? {
     while (offset < data.size) {
         if (offset + 5 > data.size) return null
         val type = data[offset].toInt() and 0xff
-        val len = ((data[offset + 1].toInt() and 0xff) shl 24) or
-            ((data[offset + 2].toInt() and 0xff) shl 16) or
-            ((data[offset + 3].toInt() and 0xff) shl 8) or
-            (data[offset + 4].toInt() and 0xff)
+        // Read the length as a Long so the bounds arithmetic can never wrap a 32-bit Int: a crafted
+        // 0x40000000..0x7FFFFFFF length is positive yet would overflow `offset + len` negative and slip
+        // past an Int overrun check. The Long compare + the MAX_PACKET_BYTES cap reject it cleanly so
+        // decode() honors its "null on malformed" contract (no throw, no oversized allocation).
+        val len = ((data[offset + 1].toLong() and 0xff) shl 24) or
+            ((data[offset + 2].toLong() and 0xff) shl 16) or
+            ((data[offset + 3].toLong() and 0xff) shl 8) or
+            (data[offset + 4].toLong() and 0xff)
         offset += 5
-        // len is a signed Int; a value with the high bit set reads negative and is rejected here,
-        // and any len that overruns the buffer is rejected, so no oversized allocation occurs.
-        if (len < 0 || offset + len > data.size) return null
-        val value = data.copyOfRange(offset, offset + len)
-        offset += len
+        if (len < 0L || len > MAX_PACKET_BYTES.toLong() || offset.toLong() + len > data.size.toLong()) return null
+        val value = data.copyOfRange(offset, offset + len.toInt())
+        offset += len.toInt()
         out.putIfAbsent(type, value)
     }
     return out

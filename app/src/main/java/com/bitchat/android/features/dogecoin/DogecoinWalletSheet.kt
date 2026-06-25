@@ -396,6 +396,8 @@ fun DogecoinWalletSheet(
         scanningWifQr = false
         qrScanError = null
         wifScanError = null
+        peerBroadcastAck = false
+        onClearPeerBroadcast()
         onAdvertisedAddressChanged()
     }
 
@@ -1114,6 +1116,8 @@ fun DogecoinWalletSheet(
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
         exportingRawTransaction = false
+        peerBroadcastAck = false
+        onClearPeerBroadcast()
     }
 
     fun clearManualSendRequestMetadata() {
@@ -2628,6 +2632,10 @@ fun DogecoinWalletSheet(
         LaunchedEffect(peerBroadcastState) {
             val confirmed = peerBroadcastState as? PeerBroadcastUiState.Confirmed ?: return@LaunchedEffect
             if (selectedNetwork != transaction.network) return@LaunchedEffect
+            // Money-safety: only consume a Confirmed that belongs to THIS transaction. Otherwise a stale
+            // peer-broadcast result (dialog dismissed while pending, then a different tx opened on the
+            // same network) could pair another tx's txid with this tx's amounts and mark it "sent".
+            if (confirmed.txid != transaction.txid) return@LaunchedEffect
             sentReceipt = DogecoinBroadcastReceipt(
                 txid = confirmed.txid,
                 network = transaction.network,
@@ -3049,6 +3057,8 @@ fun DogecoinWalletSheet(
                         mainnetBroadcastAcknowledged = false
                         highFeeAcknowledged = false
                         policyUnavailableAcknowledged = false
+                        peerBroadcastAck = false
+                        onClearPeerBroadcast()
                     },
                     enabled = !sending
                 ) {
