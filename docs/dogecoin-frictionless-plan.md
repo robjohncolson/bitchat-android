@@ -73,6 +73,7 @@ mesh identity protocol — handle with care.
 
 **Acceptance:** switching wallet network re-announces the right address; peer's signed address decodes into `PeerInfo`; "Send DOGE" from peer list/chat/verification prefills correctly; tampered/unsigned address TLVs are rejected.
 **Risks (must mitigate):** **(a)** signature-verification dependency — if bypassed, an attacker injects a payee address (mandatory verify); **(b)** address-reuse privacy — one fixed address per peer breaks rotation (consider rotating/derived addresses or a "fresh address" option); **(c)** TLV size growth and **backward compat** — use a tolerant TLV decoder (skip unknown types) so old clients don't break.
+**Privacy note:** Milestone 2 advertises one fixed receive address for the selected Dogecoin network. That makes pay-@nickname simple, but it is address reuse; address rotation/fresh per-peer requests are future work.
 **Open Qs:** allow manual override of the advertised address? auto-announce on key reset? multi-network UI (dropdown vs current-network).
 
 ---

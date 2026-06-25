@@ -325,10 +325,11 @@ class SecureIdentityStateManager private constructor(
     }
 
     fun getPeerDogecoinAddress(peerIDOrFingerprint: String, networkId: String): String? {
-        val fingerprint = when {
-            isValidFingerprint(peerIDOrFingerprint) -> peerIDOrFingerprint.lowercase()
-            else -> getCachedPeerFingerprint(peerIDOrFingerprint)?.lowercase()
-        } ?: return null
+        val key = peerIDOrFingerprint.lowercase()
+        val fingerprint = getCachedPeerFingerprint(key)?.lowercase()
+            ?: getCachedNoiseFingerprint(key)?.lowercase()
+            ?: key.takeIf { isValidFingerprint(it) }
+            ?: return null
 
         return getCachedPeerDogecoinAddress(fingerprint, networkId)
     }

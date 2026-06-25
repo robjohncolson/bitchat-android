@@ -127,6 +127,7 @@ fun DogecoinWalletSheet(
     isPresented: Boolean,
     onDismiss: () -> Unit,
     onShareToChat: (String) -> Unit,
+    onAdvertisedAddressChanged: () -> Unit = {},
     paymentRequest: DogecoinPaymentRequest? = null,
     modifier: Modifier = Modifier
 ) {
@@ -385,6 +386,7 @@ fun DogecoinWalletSheet(
         scanningWifQr = false
         qrScanError = null
         wifScanError = null
+        onAdvertisedAddressChanged()
     }
 
     fun clearWalletRuntimeState() {
@@ -3041,6 +3043,7 @@ fun DogecoinWalletSheet(
                             context.getString(R.string.dogecoin_wallet_reset),
                             Toast.LENGTH_SHORT
                         ).show()
+                        onAdvertisedAddressChanged()
                     }
                 ) {
                     Text(stringResource(R.string.dogecoin_confirm_reset_action))
@@ -3260,6 +3263,7 @@ fun DogecoinWalletSheet(
                             context.getString(R.string.dogecoin_import_wif_complete),
                             Toast.LENGTH_SHORT
                         ).show()
+                        onAdvertisedAddressChanged()
                     },
                     enabled = canImportWif
                 ) {

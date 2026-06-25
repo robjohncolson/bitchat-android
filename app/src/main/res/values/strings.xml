@@ -225,6 +225,12 @@
   <string name="dogecoin_payment_request_bubble_label">Label: %1$s</string>
   <string name="dogecoin_payment_request_bubble_message">Message: %1$s</string>
   <string name="dogecoin_payment_request_bubble_pay">Pay</string>
+  <string name="dogecoin_send_doge">Send DOGE</string>
+  <string name="dogecoin_send_doge_to">Send DOGE to %1$s</string>
+  <string name="dogecoin_peer_verified_address_title">Verified Dogecoin address</string>
+  <string name="dogecoin_peer_verified_address_network">Verified %1$s address</string>
+  <string name="dogecoin_peer_address_reuse_note">This peer advertises a fixed receive address. Address rotation is future work.</string>
+  <string name="cd_send_doge">Send DOGE</string>
   <string name="dogecoin_request_share_text">Dogecoin %1$s payment request:\n%2$s</string>
   <string name="dogecoin_request_qr_description">Dogecoin payment request QR code</string>
   <string name="dogecoin_amount_label">Amount in DOGE</string>

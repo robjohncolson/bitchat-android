@@ -589,6 +589,9 @@ private fun ChatDialogs(
                 viewModel.sendMessage(text)
                 onDogecoinWalletDismiss()
             },
+            onAdvertisedAddressChanged = {
+                viewModel.reannounceDogecoinReceiveAddress()
+            },
             paymentRequest = dogecoinPaymentRequest
         )
     }
@@ -636,7 +639,8 @@ private fun ChatDialogs(
             onShowVerification = {
                 onMeshPeerListDismiss()
                 viewModel.showVerificationSheet(fromSidebar = true)
-            }
+            },
+            onDogecoinUriClick = onDogecoinUriClick
         )
     }
 
@@ -644,7 +648,8 @@ private fun ChatDialogs(
         VerificationSheet(
             isPresented = showVerificationSheet,
             onDismiss = onVerificationSheetDismiss,
-            viewModel = viewModel
+            viewModel = viewModel,
+            onDogecoinUriClick = onDogecoinUriClick
         )
     }
 

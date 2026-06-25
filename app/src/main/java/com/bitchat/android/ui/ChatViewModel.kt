@@ -6,6 +6,10 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.bitchat.android.favorites.FavoritesPersistenceService
+import com.bitchat.android.features.dogecoin.DogecoinAddress
+import com.bitchat.android.features.dogecoin.DogecoinNetwork
+import com.bitchat.android.features.dogecoin.DogecoinProtocol
+import com.bitchat.android.features.dogecoin.DogecoinWalletRepository
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -93,6 +97,7 @@ class ChatViewModel(
     // Specialized managers
     private val dataManager = DataManager(application.applicationContext)
     private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
+    private val dogecoinWalletRepository by lazy { DogecoinWalletRepository(getApplication()) }
     private val messageManager = MessageManager(state)
     private val channelManager = ChannelManager(state, messageManager, dataManager, viewModelScope)
 
@@ -176,6 +181,7 @@ class ChatViewModel(
     val favoritePeers: StateFlow<Set<String>> = state.favoritePeers
     val peerSessionStates: StateFlow<Map<String, String>> = state.peerSessionStates
     val peerFingerprints: StateFlow<Map<String, String>> = state.peerFingerprints
+    val peerDogecoinAddresses: StateFlow<Map<String, Map<String, String>>> = state.peerDogecoinAddresses
     val peerNicknames: StateFlow<Map<String, String>> = state.peerNicknames
     val peerRSSI: StateFlow<Map<String, Int>> = state.peerRSSI
     val peerDirect: StateFlow<Map<String, Boolean>> = state.peerDirect
@@ -200,6 +206,35 @@ class ChatViewModel(
 
     fun initiateMeshHandshake(peerID: String) {
         mesh.initiateNoiseHandshake(peerID)
+    }
+
+    fun currentDogecoinNetwork(): DogecoinNetwork {
+        return dogecoinWalletRepository.loadSelectedNetwork()
+    }
+
+    fun getPeerDogecoinAddress(
+        peerIDOrFingerprint: String,
+        network: DogecoinNetwork = currentDogecoinNetwork()
+    ): String? {
+        val activeAddress = runCatching {
+            mesh.getPeerInfo(peerIDOrFingerprint)?.dogecoinAddresses?.get(network.id)
+        }.getOrNull()
+        val cachedAddress = activeAddress ?: identityManager.getPeerDogecoinAddress(peerIDOrFingerprint, network.id)
+        return cachedAddress
+            ?.trim()
+            ?.takeIf { DogecoinAddress.isValidAddress(it, network) }
+    }
+
+    fun getPeerDogecoinPaymentUri(peerIDOrFingerprint: String): String? {
+        val network = currentDogecoinNetwork()
+        val address = getPeerDogecoinAddress(peerIDOrFingerprint, network) ?: return null
+        return runCatching {
+            DogecoinProtocol.createPaymentUri(network, address)
+        }.getOrNull()
+    }
+
+    fun reannounceDogecoinReceiveAddress() {
+        mesh.sendBroadcastAnnounce()
     }
 
     init {
@@ -774,7 +809,16 @@ class ChatViewModel(
             info?.nickname?.takeIf { it.isNotBlank() }?.let { nickname ->
                 identityManager.cacheFingerprintNickname(fingerprint, nickname)
             }
+            info?.dogecoinAddresses?.forEach { (networkId, address) ->
+                identityManager.cachePeerDogecoinAddress(fingerprint, networkId, address)
+            }
         }
+
+        val dogecoinAddresses = currentPeers.mapNotNull { peerID ->
+            val addresses = try { mesh.getPeerInfo(peerID)?.dogecoinAddresses.orEmpty() } catch (_: Exception) { emptyMap() }
+            if (addresses.isEmpty()) null else peerID to addresses
+        }.toMap()
+        state.setPeerDogecoinAddresses(dogecoinAddresses)
 
         state.setPeerNicknames(mesh.getPeerNicknames())
 

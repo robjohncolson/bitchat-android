@@ -19,6 +19,7 @@ class SecureIdentityStateManagerDogecoinTest {
     private lateinit var manager: SecureIdentityStateManager
 
     private val fingerprint = "a".repeat(64)
+    private val noiseKeyHex = "b".repeat(64)
     private val oldPeerID = "aaaabbbbccccdddd"
     private val newPeerID = "ddddccccbbbbaaaa"
 
@@ -42,10 +43,12 @@ class SecureIdentityStateManagerDogecoinTest {
         val regtestAddress = DogecoinKeyGenerator.generate(DogecoinNetwork.REGTEST).address
 
         manager.cachePeerFingerprint(oldPeerID, fingerprint)
+        manager.cacheNoiseFingerprint(noiseKeyHex, fingerprint)
         manager.cachePeerDogecoinAddress(fingerprint, DogecoinNetwork.TESTNET.id, testnetAddress)
         manager.cachePeerDogecoinAddress(fingerprint, DogecoinNetwork.REGTEST.id, regtestAddress)
 
         assertEquals(testnetAddress, manager.getPeerDogecoinAddress(oldPeerID, DogecoinNetwork.TESTNET.id))
+        assertEquals(testnetAddress, manager.getPeerDogecoinAddress(noiseKeyHex, DogecoinNetwork.TESTNET.id))
         assertEquals(regtestAddress, manager.getPeerDogecoinAddress(oldPeerID, DogecoinNetwork.REGTEST.id))
 
         manager.cachePeerFingerprint(newPeerID, fingerprint)

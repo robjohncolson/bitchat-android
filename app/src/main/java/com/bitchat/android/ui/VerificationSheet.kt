@@ -32,6 +32,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Paid
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,6 +41,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
@@ -95,6 +98,7 @@ fun VerificationSheet(
     isPresented: Boolean,
     onDismiss: () -> Unit,
     viewModel: ChatViewModel,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (!isPresented) return
@@ -192,8 +196,30 @@ fun VerificationSheet(
                 }
             }
             
-            // Unverify Action
             val peerID by viewModel.selectedPrivateChatPeer.collectAsStateWithLifecycle()
+            val peerDogecoinAddresses by viewModel.peerDogecoinAddresses.collectAsStateWithLifecycle()
+            val currentDogecoinNetwork = viewModel.currentDogecoinNetwork()
+            val peerDogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerID?.let { viewModel.getPeerDogecoinAddress(it, currentDogecoinNetwork) }
+            }
+
+            if (peerID != null && peerDogecoinAddress != null && onDogecoinUriClick != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                VerifiedDogecoinAddressCard(
+                    networkName = currentDogecoinNetwork.displayName,
+                    address = peerDogecoinAddress,
+                    accent = accent,
+                    onSendDoge = {
+                        viewModel.getPeerDogecoinPaymentUri(peerID!!)?.let { uri ->
+                            onDismiss()
+                            onDogecoinUriClick(uri)
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
+            // Unverify Action
             val fingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
             
             if (peerID != null) {
@@ -240,6 +266,75 @@ private fun VerificationHeader(
             color = accent
         )
         CloseButton(onClick = onClose)
+    }
+}
+
+@Composable
+private fun VerifiedDogecoinAddressCard(
+    networkName: String,
+    address: String,
+    accent: Color,
+    onSendDoge: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Verified,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = accent
+                )
+                Text(
+                    text = stringResource(R.string.dogecoin_peer_verified_address_network, networkName),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Text(
+                text = address,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Text(
+                text = stringResource(R.string.dogecoin_peer_address_reuse_note),
+                style = MaterialTheme.typography.bodySmall,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+
+            Button(
+                onClick = onSendDoge,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Paid,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    text = stringResource(R.string.dogecoin_send_doge),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp
+                )
+            }
+        }
     }
 }
 
