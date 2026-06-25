@@ -47,7 +47,8 @@ Milestones shipped on this branch (newest first):
    on the iOS client before shipping. Cannot verify from this repo; tolerant decode keeps it
    Android↔iOS-safe meanwhile.
 4. **Funded mainnet broadcast** — still user-gated (irreversible real-money action via the on-device UI).
-5. **On-device verification** of the peer-broadcast flow (needs two meshed instances; see below).
+5. **Full live peer-broadcast round-trip** (send→helper→result) NOT yet run — needs the node opened
+   to the LAN + a funded sender (see "Two-phone test" below). Everything up to it is verified.
 
 ## Local Dogecoin Node (synced)
 
@@ -74,7 +75,10 @@ Dogecoin Core runs locally; the testnet node is **fully synced**:
 ## Android / Device State
 
 - SDK `C:\Users\rober\AppData\Local\Android\Sdk`; `adb` at `…\Sdk\platform-tools\adb`.
-- Physical device: Galaxy S24, serial `RFCX81GNBRE`.
+- Two physical devices for the mesh test: **Galaxy S24** (Android 16) serial `RFCX81GNBRE` = **helper**;
+  **Pixel 3** (Android 12, arm64) serial `89VX0HPX1` = **sender**. Both have the current debug build;
+  Pixel 3 was granted BLE/location perms via `pm grant`. (S24 has a secure lock screen — needs the user
+  to unlock; blind adb coordinate-taps proved flaky, so have a human navigate the wallet sheet.)
 - **Debug app id is `com.bitchat.droid.debug`** (`applicationIdSuffix = ".debug"`), so it coexists with a
   Play-installed `com.bitchat.droid`. The custom force-finish permission is namespaced
   `${applicationId}.permission.FORCE_FINISH`. The REGTEST network selector is exposed only when
@@ -90,10 +94,23 @@ Driving Compose via adb: `uiautomator dump` works; `adb pull /sdcard/...` needs 
 (Git Bash mangles `/sdcard`). Estimate tap coords from the dump's `bounds`, not scaled screenshots. The
 wallet bottom-sheet dismisses on a downward swipe at its top — navigate with upward finger-swipes.
 
-**Peer-broadcast (M3b) on-device test needs TWO meshed instances**: one as helper (wallet → "Broadcast
-for peers" card → enable for testnet + favorites-only; node reachable), one as sender with no reachable
-node (so `broadcastNodeReady` is false) → the send-review dialog shows "Ask a peer to broadcast". A
-single phone can only smoke-test that the new UI renders and the app is stable.
+**Two-phone test status (2026-06-25):**
+- ✅ VERIFIED on hardware: app installs + launches crash-free on both (S24 Android 16, Pixel 3 Android 12);
+  the S24 wallet sheet + the new helper opt-in card render correctly (enable switch OFF by default,
+  "Only help my mutual favorites" ON by default); the two phones form a **BLE mesh** and Ed25519-**verify**
+  each other's signed announce (logcat `MessageHandler: ✅ Verified announce from <peerID>`); enabling the
+  S24 helper grew its signed announce **88 → 97 bytes** (the `NODE_HELPER` TLV: type+len+"regtest") and the
+  Pixel **re-verified** the larger announce — **capability advert proven live**.
+- ⏳ NOT yet run: the full send→helper→result round-trip. Recipe: (1) open the testnet node to the LAN
+  (dogecoin.conf: `rpcbind=0.0.0.0` + `rpcallowip=10.0.0.0/24`, restart `dogecoin-qt -testnet`), both phones
+  point at `http://10.0.0.24:44555`; (2) set both phones to testnet, enable the S24 helper for testnet
+  (favorites-only OFF for simplicity); (3) import the funded WIF (`dumpprivkey nceDC…`) into the Pixel via
+  wallet → Import WIF so it has UTXOs; (4) on the Pixel build a small Review send. To force the "Ask a peer
+  to broadcast" CTA the sender's node must be read-OK but broadcast-unavailable:
+  `dogecoin-cli -testnet setnetworkactive false` makes `canBroadcastFor=false` while `listUnspent` still
+  works. With ONE shared node the helper's broadcast then returns `NODE_NOT_READY` (proves the round-trip);
+  a *successful* on-chain peer-broadcast needs a second relay-up node for the helper — but the
+  `sendrawtransaction` step itself is already proven via `DogecoinLiveNodeIntegrationTest` (txid `673fdcd5…`).
 
 ## Key Files
 
