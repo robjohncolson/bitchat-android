@@ -49,6 +49,21 @@ class DogecoinUriTest {
     }
 
     @Test
+    fun `wholeMessagePaymentUri accepts exact dogecoin uri with surrounding whitespace`() {
+        val uri = "dogecoin:D8Bz2qkQy6VnY9uQkgQH7M7q6XkVQp7sWa?amount=1&label=coffee"
+
+        assertEquals(uri, DogecoinUri.wholeMessagePaymentUri("  $uri\n"))
+    }
+
+    @Test
+    fun `wholeMessagePaymentUri rejects inline dogecoin uri in prose`() {
+        val uri = "dogecoin:D8Bz2qkQy6VnY9uQkgQH7M7q6XkVQp7sWa?amount=1"
+
+        assertEquals(null, DogecoinUri.wholeMessagePaymentUri("please pay $uri"))
+        assertEquals(null, DogecoinUri.wholeMessagePaymentUri("$uri thanks"))
+    }
+
+    @Test
     fun `click resolver keeps dogecoin uri for wallet handoff`() {
         val resolved = ClickableUriResolver.resolve("dogecoin:D8Bz2qkQy6VnY9uQkgQH7M7q6XkVQp7sWa?amount=1.25")
 

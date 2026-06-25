@@ -353,6 +353,22 @@ fun MessageItem(
 
     // Check if this message should be animated during PoW mining
     val shouldAnimate = shouldAnimateMessage(message.id)
+
+    DogecoinUri.wholeMessagePaymentUri(message.content)?.let { dogecoinUri ->
+        DogecoinPaymentRequestBubble(
+            message = message,
+            uri = dogecoinUri,
+            currentUserNickname = currentUserNickname,
+            meshService = meshService,
+            colorScheme = colorScheme,
+            timeFormatter = timeFormatter,
+            onPayClick = onDogecoinUriClick,
+            onNicknameClick = onNicknameClick,
+            onMessageLongPress = onMessageLongPress,
+            modifier = modifier
+        )
+        return
+    }
     
     // If animation is needed, use the matrix animation component for content only
     if (shouldAnimate) {

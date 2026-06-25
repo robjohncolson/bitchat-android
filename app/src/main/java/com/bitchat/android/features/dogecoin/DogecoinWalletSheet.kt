@@ -1,11 +1,13 @@
 package com.bitchat.android.features.dogecoin
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.core.CameraSelector
@@ -41,10 +43,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -52,6 +57,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -79,12 +85,14 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -144,6 +152,7 @@ fun DogecoinWalletSheet(
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
     var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
     var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
+    var savedAddresses by remember { mutableStateOf(repository.loadSavedAddresses(snapshot.key.network)) }
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
     var rpcUsername by remember { mutableStateOf(snapshot.rpcConfig.username) }
     var rpcPassword by remember { mutableStateOf(snapshot.rpcConfig.password) }
@@ -184,6 +193,7 @@ fun DogecoinWalletSheet(
     var pendingRescanNetwork by remember { mutableStateOf<DogecoinNetwork?>(null) }
     var rescanStartHeightInput by remember { mutableStateOf("") }
     var importWif by remember { mutableStateOf("") }
+    var importWifRevealed by remember { mutableStateOf(false) }
     var importWifError by remember { mutableStateOf<String?>(null) }
     var pendingImportKey by remember { mutableStateOf<DogecoinWalletKey?>(null) }
     var mainnetWifImportAcknowledged by remember { mutableStateOf(false) }
@@ -193,7 +203,9 @@ fun DogecoinWalletSheet(
     var calculatingMaxSend by remember { mutableStateOf(false) }
     var exportingRawTransaction by remember { mutableStateOf(false) }
     var scanningPaymentQr by remember { mutableStateOf(false) }
+    var scanningWifQr by remember { mutableStateOf(false) }
     var qrScanError by remember { mutableStateOf<String?>(null) }
+    var wifScanError by remember { mutableStateOf<String?>(null) }
     var showNodeHelp by remember { mutableStateOf(false) }
     val rpcUrlBlank = rpcUrl.trim().isEmpty()
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
@@ -218,6 +230,8 @@ fun DogecoinWalletSheet(
     )
     val minimumSendOutputKoinu = dogecoinEffectiveStandardOutputKoinu(usableNodeStatus?.softDustLimitKoinu)
     val wifCopyRecorded = wifCopyState.matches(snapshot.key)
+
+    SecureWindowFlagEffect(enabled = pendingWifCopy != null || importWifRevealed)
     val sendFeePresets = remember(
         minimumSendFeePerKbKoinu,
         usableNodeStatus?.incrementalFeePerKbKoinu
@@ -324,6 +338,7 @@ fun DogecoinWalletSheet(
         snapshot = nextSnapshot
         wifCopyState = repository.loadWifCopyState(nextSnapshot.key)
         practiceNudgeDismissed = repository.loadPracticeNudgeDismissed()
+        savedAddresses = repository.loadSavedAddresses(network)
         rpcUrl = nextSnapshot.rpcConfig.url
         rpcUsername = nextSnapshot.rpcConfig.username
         rpcPassword = nextSnapshot.rpcConfig.password
@@ -357,6 +372,7 @@ fun DogecoinWalletSheet(
         pendingRescanNetwork = null
         rescanStartHeightInput = ""
         importWif = ""
+        importWifRevealed = false
         importWifError = null
         pendingImportKey = null
         mainnetWifImportAcknowledged = false
@@ -366,7 +382,9 @@ fun DogecoinWalletSheet(
         calculatingMaxSend = false
         exportingRawTransaction = false
         scanningPaymentQr = false
+        scanningWifQr = false
         qrScanError = null
+        wifScanError = null
     }
 
     fun clearWalletRuntimeState() {
@@ -392,13 +410,16 @@ fun DogecoinWalletSheet(
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
         rescanStartHeightInput = ""
+        importWifRevealed = false
         paymentRequestLabel = null
         paymentRequestMessage = null
         sending = false
         calculatingMaxSend = false
         exportingRawTransaction = false
         scanningPaymentQr = false
+        scanningWifQr = false
         qrScanError = null
+        wifScanError = null
     }
 
     suspend fun refreshAddressWatchStatusFromNode(
@@ -429,16 +450,18 @@ fun DogecoinWalletSheet(
         }
     }
 
-    fun reviewImportWif() {
+    fun reviewImportWif(rawWif: String = importWif, onInvalid: (String) -> Unit = { importWifError = it }) {
+        val cleanWif = rawWif.trim()
         importWifError = null
         pendingImportKey = null
         mainnetWifImportAcknowledged = false
         runCatching {
-            DogecoinKeyGenerator.fromWif(importWif, expectedNetwork = selectedNetwork)
+            DogecoinKeyGenerator.fromWif(cleanWif, expectedNetwork = selectedNetwork)
         }.onSuccess {
+            importWif = cleanWif
             pendingImportKey = it
         }.onFailure {
-            importWifError = it.message ?: context.getString(R.string.dogecoin_import_wif_invalid)
+            onInvalid(it.message ?: context.getString(R.string.dogecoin_import_wif_invalid))
         }
     }
 
@@ -1223,6 +1246,24 @@ fun DogecoinWalletSheet(
         ).show()
     }
 
+    fun saveRecipientAddress(address: String, label: String = "") {
+        savedAddresses = repository.upsertSavedAddress(selectedNetwork, address, label)
+        Toast.makeText(
+            context,
+            context.getString(R.string.dogecoin_saved_recipient_added),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    fun removeRecipientAddress(address: String) {
+        savedAddresses = repository.removeSavedAddress(selectedNetwork, address)
+        Toast.makeText(
+            context,
+            context.getString(R.string.dogecoin_saved_recipient_removed),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
     LaunchedEffect(sendFeePreset, selectedFeePresetRateKoinu, showAdvancedFee) {
         if (!showAdvancedFee) {
             sendFeeRate = DogecoinAmount.formatKoinu(selectedFeePresetRateKoinu)
@@ -1942,6 +1983,67 @@ fun DogecoinWalletSheet(
                             isError = sendAddress.isNotBlank() &&
                                 !DogecoinAddress.isValidAddress(sendAddress.trim(), selectedNetwork)
                         )
+                        if (
+                            sendAddress.isNotBlank() &&
+                            DogecoinAddress.isValidAddress(sendAddress.trim(), selectedNetwork)
+                        ) {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_send_valid_address,
+                                    selectedNetwork.displayName
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        if (savedAddresses.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_saved_recipients_title),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                                savedAddresses.forEach { savedAddress ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = { updateSendAddressInput(savedAddress.address) },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Column(
+                                                horizontalAlignment = Alignment.Start,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text(
+                                                    text = savedAddress.label.takeIf { it.isNotBlank() }
+                                                        ?: shortDogecoinAddress(savedAddress.address),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    maxLines = 1
+                                                )
+                                                Text(
+                                                    text = savedAddress.address,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                        IconButton(onClick = { removeRecipientAddress(savedAddress.address) }) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription = stringResource(
+                                                    R.string.dogecoin_saved_recipient_remove
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         OutlinedTextField(
                             value = sendAmount,
                             onValueChange = { updateSendAmountInput(it) },
@@ -2129,6 +2231,9 @@ fun DogecoinWalletSheet(
                             )
                         }
                         sentReceipt?.let { receipt ->
+                            val receiptRecipientSaved = savedAddresses.any {
+                                it.address == receipt.recipientAddress
+                            }
                             val receiptText = stringResource(
                                 R.string.dogecoin_send_receipt,
                                 receipt.network.displayName,
@@ -2198,6 +2303,20 @@ fun DogecoinWalletSheet(
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(stringResource(R.string.dogecoin_share_receipt_to_chat))
                                 }
+                                if (!receiptRecipientSaved) {
+                                    TextButton(
+                                        onClick = {
+                                            saveRecipientAddress(
+                                                receipt.recipientAddress,
+                                                receipt.requestLabel.orEmpty()
+                                            )
+                                        }
+                                    ) {
+                                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(stringResource(R.string.dogecoin_save_recipient))
+                                    }
+                                }
                             }
                         }
                         Button(
@@ -2240,7 +2359,29 @@ fun DogecoinWalletSheet(
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             label = { Text(stringResource(R.string.dogecoin_import_wif_label)) },
-                            visualTransformation = PasswordVisualTransformation(),
+                            visualTransformation = if (importWifRevealed) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                IconButton(onClick = { importWifRevealed = !importWifRevealed }) {
+                                    Icon(
+                                        imageVector = if (importWifRevealed) {
+                                            Icons.Filled.VisibilityOff
+                                        } else {
+                                            Icons.Filled.Visibility
+                                        },
+                                        contentDescription = stringResource(
+                                            if (importWifRevealed) {
+                                                R.string.dogecoin_hide_wif
+                                            } else {
+                                                R.string.dogecoin_reveal_wif
+                                            }
+                                        )
+                                    )
+                                }
+                            },
                             isError = importWifError != null
                         )
                         importWifError?.let {
@@ -2251,14 +2392,38 @@ fun DogecoinWalletSheet(
                                 lineHeight = 18.sp
                             )
                         }
-                        OutlinedButton(
-                            onClick = { reviewImportWif() },
-                            enabled = importWif.isNotBlank(),
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.dogecoin_import_wif_review))
+                            OutlinedButton(
+                                onClick = {
+                                    wifScanError = null
+                                    scanningWifQr = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Outlined.QrCodeScanner,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.dogecoin_scan_wif_qr))
+                            }
+                            OutlinedButton(
+                                onClick = { reviewImportWif() },
+                                enabled = importWif.isNotBlank(),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Filled.AccountBalanceWallet,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.dogecoin_import_wif_review))
+                            }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                         OutlinedButton(
@@ -2284,6 +2449,8 @@ fun DogecoinWalletSheet(
 
     if (scanningPaymentQr) {
         DogecoinPaymentQrScannerDialog(
+            title = stringResource(R.string.dogecoin_scan_payment_qr_title),
+            prompt = stringResource(R.string.dogecoin_scan_payment_qr_prompt),
             error = qrScanError,
             onDismiss = {
                 scanningPaymentQr = false
@@ -2305,6 +2472,27 @@ fun DogecoinWalletSheet(
                         ),
                         Toast.LENGTH_SHORT
                     ).show()
+                }
+            }
+        )
+    }
+
+    if (scanningWifQr) {
+        DogecoinPaymentQrScannerDialog(
+            title = stringResource(R.string.dogecoin_scan_wif_qr_title),
+            prompt = stringResource(R.string.dogecoin_scan_wif_qr_prompt),
+            error = wifScanError,
+            onDismiss = {
+                scanningWifQr = false
+                wifScanError = null
+            },
+            onScan = { raw ->
+                reviewImportWif(raw) { message ->
+                    wifScanError = message
+                }
+                if (pendingImportKey != null) {
+                    scanningWifQr = false
+                    wifScanError = null
                 }
             }
         )
@@ -2684,12 +2872,14 @@ fun DogecoinWalletSheet(
     }
 
     pendingWifCopy?.let { key ->
+        var wifQrRevealed by remember(key.address, key.network) { mutableStateOf(false) }
         val needsBackupAcknowledgement = key.network == DogecoinNetwork.MAINNET
         val canRecordWifBackup = !needsBackupAcknowledgement || mainnetWifBackupAcknowledged
         AlertDialog(
             onDismissRequest = {
                 pendingWifCopy = null
                 mainnetWifBackupAcknowledged = false
+                wifQrRevealed = false
             },
             title = {
                 Text(
@@ -2730,6 +2920,54 @@ fun DogecoinWalletSheet(
                             )
                         }
                     }
+                    Text(
+                        text = stringResource(R.string.dogecoin_wif_qr_secret_warning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        lineHeight = 18.sp
+                    )
+                    OutlinedButton(
+                        onClick = { wifQrRevealed = !wifQrRevealed },
+                        enabled = canRecordWifBackup,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = if (wifQrRevealed) {
+                                Icons.Filled.VisibilityOff
+                            } else {
+                                Icons.Filled.Visibility
+                            },
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            stringResource(
+                                if (wifQrRevealed) {
+                                    R.string.dogecoin_hide_wif_qr
+                                } else {
+                                    R.string.dogecoin_reveal_wif_qr
+                                }
+                            )
+                        )
+                    }
+                    if (wifQrRevealed) {
+                        DogecoinQrCodeImage(
+                            data = key.wif,
+                            contentDescription = stringResource(R.string.dogecoin_wif_qr_description),
+                            size = 180.dp,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = key.wif,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -2742,6 +2980,7 @@ fun DogecoinWalletSheet(
                         }
                         pendingWifCopy = null
                         mainnetWifBackupAcknowledged = false
+                        wifQrRevealed = false
                     },
                     enabled = canRecordWifBackup
                 ) {
@@ -2753,6 +2992,7 @@ fun DogecoinWalletSheet(
                     onClick = {
                         pendingWifCopy = null
                         mainnetWifBackupAcknowledged = false
+                        wifQrRevealed = false
                     }
                 ) {
                     Text(stringResource(R.string.cancel))
@@ -2788,9 +3028,11 @@ fun DogecoinWalletSheet(
                         val resetSnapshot = repository.resetWallet(network)
                         snapshot = resetSnapshot
                         wifCopyState = repository.loadWifCopyState(resetSnapshot.key)
+                        savedAddresses = repository.loadSavedAddresses(network)
                         amount = ""
                         requestMessage = ""
                         importWif = ""
+                        importWifRevealed = false
                         importWifError = null
                         pendingResetNetwork = null
                         clearWalletRuntimeState()
@@ -3008,6 +3250,7 @@ fun DogecoinWalletSheet(
                         snapshot = importedSnapshot
                         wifCopyState = repository.loadWifCopyState(importedSnapshot.key)
                         importWif = ""
+                        importWifRevealed = false
                         importWifError = null
                         pendingImportKey = null
                         mainnetWifImportAcknowledged = false
@@ -3049,6 +3292,25 @@ private fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
             content = content
         )
+    }
+}
+
+@Composable
+private fun SecureWindowFlagEffect(enabled: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(enabled, view) {
+        if (!enabled) return@DisposableEffect onDispose { }
+
+        val window = (view.context as? Activity)?.window
+        val windowFlags = window?.attributes?.flags ?: 0
+        val hadSecureFlag = (windowFlags and WindowManager.LayoutParams.FLAG_SECURE) != 0
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+
+        onDispose {
+            if (window != null && !hadSecureFlag) {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
     }
 }
 
@@ -3272,6 +3534,8 @@ private fun DogecoinActivitySection(
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 private fun DogecoinPaymentQrScannerDialog(
+    title: String,
+    prompt: String,
     error: String?,
     onDismiss: () -> Unit,
     onScan: (String) -> Unit
@@ -3280,7 +3544,7 @@ private fun DogecoinPaymentQrScannerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.dogecoin_scan_payment_qr_title)) },
+        title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (permissionState.status.isGranted) {
@@ -3303,7 +3567,7 @@ private fun DogecoinPaymentQrScannerDialog(
                                 )
                         )
                         Text(
-                            text = stringResource(R.string.dogecoin_scan_payment_qr_prompt),
+                            text = prompt,
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White,
                             modifier = Modifier
@@ -3462,6 +3726,10 @@ private fun previewDogecoinHex(value: String, maxChars: Int = 96): String {
 
 private fun shortDogecoinTxid(txid: String): String {
     return if (txid.length <= 18) txid else txid.take(8) + "..." + txid.takeLast(8)
+}
+
+private fun shortDogecoinAddress(address: String): String {
+    return if (address.length <= 18) address else address.take(8) + "..." + address.takeLast(8)
 }
 
 private fun formatSignedDogecoin(koinu: Long): String {

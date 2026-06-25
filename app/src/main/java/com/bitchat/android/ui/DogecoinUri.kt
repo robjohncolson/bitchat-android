@@ -61,6 +61,17 @@ object DogecoinUri {
         return normalize(raw) != null
     }
 
+    fun wholeMessagePaymentUri(text: String): String? {
+        val firstContentIndex = text.indexOfFirst { !it.isWhitespace() }
+        if (firstContentIndex < 0) return null
+
+        val lastContentIndex = text.indexOfLast { !it.isWhitespace() }
+        val trimmed = text.substring(firstContentIndex, lastContentIndex + 1)
+        val match = findPaymentUris(trimmed).singleOrNull() ?: return null
+        if (match.start != 0 || match.endExclusive != trimmed.length) return null
+        return match.uri
+    }
+
     private fun isTokenPrefix(char: Char): Boolean {
         return char.isLetterOrDigit() || char == '_' || char == '-'
     }

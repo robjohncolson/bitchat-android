@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class DogecoinRpcConfig(
     val url: String = "",
@@ -107,6 +109,12 @@ data class DogecoinWifCopyState(
         return copiedAtMillis > 0L && address == key.address
     }
 }
+
+data class DogecoinSavedAddress(
+    val address: String,
+    val label: String,
+    val savedAtMillis: Long
+)
 
 class DogecoinWalletRepository(context: Context) {
     private val appContext = context.applicationContext
@@ -220,6 +228,50 @@ class DogecoinWalletRepository(context: Context) {
         return DogecoinWifCopyState(key.address, copiedAtMillis)
     }
 
+    fun loadSavedAddresses(network: DogecoinNetwork): List<DogecoinSavedAddress> {
+        val raw = prefs.getString(addressBookKey(network), null) ?: return emptyList()
+        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        val savedAddresses = mutableListOf<DogecoinSavedAddress>()
+        val seenAddresses = mutableSetOf<String>()
+
+        for (index in 0 until array.length()) {
+            val savedAddress = savedAddressFromJson(array.optJSONObject(index), network) ?: continue
+            if (!seenAddresses.add(savedAddress.address)) continue
+            savedAddresses.add(savedAddress)
+        }
+
+        return savedAddresses
+    }
+
+    fun upsertSavedAddress(
+        network: DogecoinNetwork,
+        address: String,
+        label: String = "",
+        savedAtMillis: Long = System.currentTimeMillis()
+    ): List<DogecoinSavedAddress> {
+        val cleanAddress = address.trim()
+        require(DogecoinAddress.isValidAddress(cleanAddress, network)) {
+            "Invalid Dogecoin ${network.displayName} address"
+        }
+
+        val savedAddress = DogecoinSavedAddress(
+            address = cleanAddress,
+            label = label.trim(),
+            savedAtMillis = savedAtMillis
+        )
+        val updatedAddresses = listOf(savedAddress) +
+            loadSavedAddresses(network).filterNot { it.address == cleanAddress }
+        saveSavedAddresses(network, updatedAddresses)
+        return updatedAddresses
+    }
+
+    fun removeSavedAddress(network: DogecoinNetwork, address: String): List<DogecoinSavedAddress> {
+        val cleanAddress = address.trim()
+        val updatedAddresses = loadSavedAddresses(network).filterNot { it.address == cleanAddress }
+        saveSavedAddresses(network, updatedAddresses)
+        return updatedAddresses
+    }
+
     fun resetWallet(network: DogecoinNetwork): DogecoinWalletSnapshot {
         val editor = prefs.edit()
             .remove(privateKeyKey(network))
@@ -227,6 +279,7 @@ class DogecoinWalletRepository(context: Context) {
             .remove(createdAtKey(network))
             .remove(wifCopyAddressKey(network))
             .remove(wifCopyAtKey(network))
+            .remove(addressBookKey(network))
         if (network == DogecoinNetwork.TESTNET) {
             editor.remove(KEY_LEGACY_PRIVATE_KEY_HEX)
         }
@@ -313,6 +366,37 @@ class DogecoinWalletRepository(context: Context) {
         editor.putBoolean(KEY_LEGACY_PREFS_MIGRATED, true).apply()
     }
 
+    private fun saveSavedAddresses(network: DogecoinNetwork, savedAddresses: List<DogecoinSavedAddress>) {
+        val array = JSONArray()
+        savedAddresses.forEach { savedAddress ->
+            array.put(
+                JSONObject()
+                    .put("address", savedAddress.address)
+                    .put("label", savedAddress.label)
+                    .put("savedAtMillis", savedAddress.savedAtMillis)
+            )
+        }
+        prefs.edit()
+            .putString(addressBookKey(network), array.toString())
+            .apply()
+    }
+
+    private fun savedAddressFromJson(
+        json: JSONObject?,
+        network: DogecoinNetwork
+    ): DogecoinSavedAddress? {
+        if (json == null) return null
+
+        val address = json.optString("address").trim()
+        if (!DogecoinAddress.isValidAddress(address, network)) return null
+
+        return DogecoinSavedAddress(
+            address = address,
+            label = json.optString("label").trim(),
+            savedAtMillis = json.optLong("savedAtMillis", 0L)
+        )
+    }
+
     private companion object {
         const val PREFS_NAME = "dogecoin_wallet"
         const val LEGACY_PREFS_NAME = "dogecoin_testnet_wallet"
@@ -333,6 +417,7 @@ class DogecoinWalletRepository(context: Context) {
         fun rpcWalletNameKey(network: DogecoinNetwork): String = "${network.id}_rpc_wallet_name"
         fun wifCopyAddressKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_address"
         fun wifCopyAtKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_at"
+        fun addressBookKey(network: DogecoinNetwork): String = "${network.id}_address_book"
     }
 
     private fun loadIsCompressed(network: DogecoinNetwork): Boolean {

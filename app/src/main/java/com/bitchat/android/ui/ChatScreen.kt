@@ -82,6 +82,20 @@ fun ChatScreen(
     var isScrolledUp by remember { mutableStateOf(false) }
     var showDogecoinWalletSheet by remember { mutableStateOf(false) }
     var dogecoinPaymentRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+    var showRequestDogeDialog by remember { mutableStateOf(false) }
+    var requestDogeRequiresPublicConfirmation by remember { mutableStateOf(true) }
+
+    fun openDogecoinPaymentUri(uri: String) {
+        DogecoinPaymentRequest.parse(uri)?.let { request ->
+            dogecoinPaymentRequest = request
+            showDogecoinWalletSheet = true
+        }
+    }
+
+    fun openRequestDogeDialog(requiresPublicConfirmation: Boolean) {
+        requestDogeRequiresPublicConfirmation = requiresPublicConfirmation
+        showRequestDogeDialog = true
+    }
 
     LaunchedEffect(externalDogecoinPaymentRequest?.uri) {
         val request = externalDogecoinPaymentRequest ?: return@LaunchedEffect
@@ -152,12 +166,7 @@ fun ChatScreen(
                 modifier = Modifier.weight(1f),
                 forceScrollToBottom = forceScrollToBottom,
                 onScrolledUpChanged = { isUp -> isScrolledUp = isUp },
-                onDogecoinUriClick = { uri ->
-                    DogecoinPaymentRequest.parse(uri)?.let { request ->
-                        dogecoinPaymentRequest = request
-                        showDogecoinWalletSheet = true
-                    }
-                },
+                onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
                 onNicknameClick = { fullSenderName ->
                     // Single click - mention user in text input
                     val currentText = messageText.text
@@ -257,8 +266,19 @@ fun ChatScreen(
                 currentChannel = currentChannel,
                 nickname = nickname,
                 colorScheme = colorScheme,
-                showMediaButtons = showMediaButtons
+                showMediaButtons = showMediaButtons,
+                onRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = true) }
             )
+            if (showRequestDogeDialog) {
+                RequestDogeDialog(
+                    requiresPublicConfirmation = requestDogeRequiresPublicConfirmation,
+                    onDismiss = { showRequestDogeDialog = false },
+                    onPostRequest = { uri ->
+                        viewModel.sendMessage(uri)
+                        forceScrollToBottom = !forceScrollToBottom
+                    }
+                )
+            }
         }
 
         // Floating header - positioned absolutely at top, ignores keyboard
@@ -370,6 +390,8 @@ fun ChatScreen(
             dogecoinPaymentRequest = null
             showDogecoinWalletSheet = true
         },
+        onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
+        onPrivateRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = false) },
         onDogecoinWalletDismiss = {
             showDogecoinWalletSheet = false
             dogecoinPaymentRequest = null
@@ -395,7 +417,8 @@ fun ChatInputSection(
     currentChannel: String?,
     nickname: String,
     colorScheme: ColorScheme,
-    showMediaButtons: Boolean
+    showMediaButtons: Boolean,
+    onRequestDoge: (() -> Unit)? = null
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -432,6 +455,7 @@ fun ChatInputSection(
                 currentChannel = currentChannel,
                 nickname = nickname,
                 showMediaButtons = showMediaButtons,
+                onRequestDoge = onRequestDoge,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -523,6 +547,8 @@ private fun ChatDialogs(
     showDogecoinWalletSheet: Boolean,
     dogecoinPaymentRequest: DogecoinPaymentRequest?,
     onShowDogecoinWallet: () -> Unit,
+    onDogecoinUriClick: (String) -> Unit,
+    onPrivateRequestDoge: () -> Unit,
     onDogecoinWalletDismiss: () -> Unit,
 ) {
     val privateChatSheetPeer by viewModel.privateChatSheetPeer.collectAsStateWithLifecycle()
@@ -625,6 +651,8 @@ private fun ChatDialogs(
             isPresented = true,
             peerID = privateChatSheetPeer!!,
             viewModel = viewModel,
+            onDogecoinUriClick = onDogecoinUriClick,
+            onRequestDoge = onPrivateRequestDoge,
             onDismiss = {
                 viewModel.hidePrivateChatSheet()
                 viewModel.endPrivateChat()

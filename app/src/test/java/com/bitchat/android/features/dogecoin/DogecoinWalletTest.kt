@@ -278,6 +278,21 @@ class DogecoinWalletTest {
     }
 
     @Test
+    fun `payment request parser detects regtest request network`() {
+        val wallet = DogecoinKeyGenerator.fromPrivateKeyHex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            DogecoinNetwork.REGTEST
+        )
+
+        val request = DogecoinPaymentRequest.parse("dogecoin:${wallet.address}?amount=1")
+
+        requireNotNull(request)
+        assertEquals(DogecoinNetwork.REGTEST, request.network)
+        assertEquals(wallet.address, request.address)
+        assertEquals("1", request.amount)
+    }
+
+    @Test
     fun `payment request parser accepts mainnet p2sh requests`() {
         val address = p2shAddress(DogecoinNetwork.MAINNET)
 

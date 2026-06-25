@@ -774,6 +774,8 @@ fun PrivateChatSheet(
     isPresented: Boolean,
     peerID: String,
     viewModel: ChatViewModel,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
+    onRequestDoge: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -864,7 +866,8 @@ fun PrivateChatSheet(
                         onNicknameClick = { /* handle mention */ },
                         onMessageLongPress = { /* handle long press */ },
                         onCancelTransfer = { msg -> viewModel.cancelMediaSend(msg.id) },
-                        onImageClick = { _, _, _ -> /* handle image click */ }
+                        onImageClick = { _, _, _ -> /* handle image click */ },
+                        onDogecoinUriClick = onDogecoinUriClick
                     )
 
                     HorizontalDivider(color = colorScheme.outline.copy(alpha = 0.3f))
@@ -910,7 +913,8 @@ fun PrivateChatSheet(
                         currentChannel = null,
                         nickname = nickname,
                         colorScheme = colorScheme,
-                        showMediaButtons = true
+                        showMediaButtons = true,
+                        onRequestDoge = onRequestDoge
                     )
                 }
 

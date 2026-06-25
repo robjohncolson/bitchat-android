@@ -111,6 +111,7 @@ data class DogecoinPaymentRequest(
             return when {
                 DogecoinAddress.isValidAddress(address, DogecoinNetwork.MAINNET) -> DogecoinNetwork.MAINNET
                 DogecoinAddress.isValidAddress(address, DogecoinNetwork.TESTNET) -> DogecoinNetwork.TESTNET
+                DogecoinAddress.isValidAddress(address, DogecoinNetwork.REGTEST) -> DogecoinNetwork.REGTEST
                 else -> null
             }
         }
