@@ -229,7 +229,10 @@
   <string name="dogecoin_send_doge_to">Send DOGE to %1$s</string>
   <string name="dogecoin_peer_verified_address_title">Verified Dogecoin address</string>
   <string name="dogecoin_peer_verified_address_network">Verified %1$s address</string>
+  <string name="dogecoin_peer_signed_address_network">Signed %1$s address</string>
   <string name="dogecoin_peer_address_reuse_note">This peer advertises a fixed receive address. Address rotation is future work.</string>
+  <string name="dogecoin_advertise_address_title">Let mesh peers pay you by @nickname</string>
+  <string name="dogecoin_advertise_address_warning">Off by default. When on, your fixed %1$s receive address is broadcast to mesh peers so they can pay you. This is a reusable, identity-linked address — peers who already saved it keep it even after you turn this off.</string>
   <string name="cd_send_doge">Send DOGE</string>
   <string name="dogecoin_request_share_text">Dogecoin %1$s payment request:\n%2$s</string>
   <string name="dogecoin_request_qr_description">Dogecoin payment request QR code</string>

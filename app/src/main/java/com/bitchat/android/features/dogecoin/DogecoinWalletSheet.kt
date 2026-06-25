@@ -65,6 +65,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -153,6 +154,7 @@ fun DogecoinWalletSheet(
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
     var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
     var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
+    var advertiseAddressEnabled by remember { mutableStateOf(repository.loadAdvertiseAddressEnabled()) }
     var savedAddresses by remember { mutableStateOf(repository.loadSavedAddresses(snapshot.key.network)) }
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
     var rpcUsername by remember { mutableStateOf(snapshot.rpcConfig.username) }
@@ -1667,6 +1669,37 @@ fun DogecoinWalletSheet(
                             },
                             lineHeight = 18.sp
                         )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_advertise_address_title),
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_advertise_address_warning,
+                                        selectedNetwork.displayName
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                    lineHeight = 16.sp
+                                )
+                            }
+                            Switch(
+                                checked = advertiseAddressEnabled,
+                                onCheckedChange = { enabled ->
+                                    advertiseAddressEnabled = enabled
+                                    repository.saveAdvertiseAddressEnabled(enabled)
+                                    onAdvertisedAddressChanged()
+                                }
+                            )
+                        }
                     }
                 }
 

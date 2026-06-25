@@ -3,6 +3,8 @@ package com.bitchat.android.features.dogecoin
 import android.content.Context
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -111,6 +113,61 @@ class DogecoinWalletRepositoryTest {
         assertEquals(mainnetAddress, parsed[0].address)
         assertEquals("first", parsed[0].label)
         assertEquals(5L, parsed[0].savedAtMillis)
+    }
+
+    @Test
+    fun `advertise address flag defaults off and persists across instances`() {
+        var repository = DogecoinWalletRepository(context)
+        assertFalse(repository.loadAdvertiseAddressEnabled())
+
+        repository.saveAdvertiseAddressEnabled(true)
+        repository = DogecoinWalletRepository(context)
+        assertTrue(repository.loadAdvertiseAddressEnabled())
+
+        repository.saveAdvertiseAddressEnabled(false)
+        repository = DogecoinWalletRepository(context)
+        assertFalse(repository.loadAdvertiseAddressEnabled())
+    }
+
+    @Test
+    fun `loadWalletIfPresent is read-only and never generates a key`() {
+        val repository = DogecoinWalletRepository(context)
+
+        // No key yet: returns null, and repeated reads do not create one as a side effect.
+        assertNull(repository.loadWalletIfPresent(DogecoinNetwork.MAINNET))
+        assertNull(repository.loadWalletIfPresent(DogecoinNetwork.MAINNET))
+
+        // Once a wallet exists, the read-only loader returns the same key.
+        val created = repository.loadOrCreateWallet(DogecoinNetwork.MAINNET)
+        assertEquals(created.key.address, repository.loadWalletIfPresent(DogecoinNetwork.MAINNET)?.key?.address)
+    }
+
+    @Test
+    fun `currentReceiveAddress is opt-in off by default and read-only`() {
+        val repository = DogecoinWalletRepository(context)
+        repository.saveSelectedNetwork(DogecoinNetwork.TESTNET)
+        val snapshot = repository.loadOrCreateWallet(DogecoinNetwork.TESTNET)
+
+        // Advertising is off by default: nothing is advertised even though a wallet exists.
+        assertFalse(repository.loadAdvertiseAddressEnabled())
+        assertNull(DogecoinIdentityAnnouncement.currentReceiveAddress(context))
+
+        // Enabled + wallet exists: advertises the selected-network address.
+        repository.saveAdvertiseAddressEnabled(true)
+        val advertised = DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+        assertEquals(DogecoinNetwork.TESTNET.id, advertised?.networkId)
+        assertEquals(snapshot.key.address, advertised?.address)
+    }
+
+    @Test
+    fun `currentReceiveAddress never creates a wallet key for an absent network`() {
+        val repository = DogecoinWalletRepository(context)
+        repository.saveSelectedNetwork(DogecoinNetwork.MAINNET)
+        repository.saveAdvertiseAddressEnabled(true)
+
+        // Advertising is enabled but no mainnet key exists: must return null without generating one.
+        assertNull(DogecoinIdentityAnnouncement.currentReceiveAddress(context))
+        assertNull(repository.loadWalletIfPresent(DogecoinNetwork.MAINNET))
     }
 
     private fun clearDogecoinPrefs() {

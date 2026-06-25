@@ -158,6 +158,43 @@ class DogecoinWalletRepository(context: Context) {
         )
     }
 
+    /**
+     * Read-only variant of [loadOrCreateWallet]: returns the persisted wallet for [network] if a
+     * private key already exists, or null otherwise. Unlike [loadOrCreateWallet] this NEVER
+     * generates or persists key material, so it is safe to call from background paths (e.g. the
+     * mesh announce loop) without silently creating a wallet for a user who never opened the feature.
+     */
+    fun loadWalletIfPresent(network: DogecoinNetwork = loadSelectedNetwork()): DogecoinWalletSnapshot? {
+        val existingPrivateKeyHex = prefs.getString(privateKeyKey(network), null)
+            ?: if (network == DogecoinNetwork.TESTNET) prefs.getString(KEY_LEGACY_PRIVATE_KEY_HEX, null) else null
+        if (existingPrivateKeyHex.isNullOrBlank()) return null
+
+        val key = DogecoinKeyGenerator.fromPrivateKeyHex(
+            existingPrivateKeyHex,
+            network,
+            compressed = loadIsCompressed(network)
+        )
+        return DogecoinWalletSnapshot(
+            key = key,
+            rpcConfig = loadRpcConfig(network)
+        )
+    }
+
+    /**
+     * Whether the user has opted in to advertising their Dogecoin receive address to mesh peers
+     * (so peers can "pay @nickname"). Defaults to false: nothing is advertised until the user
+     * explicitly enables it in the wallet UI.
+     */
+    fun loadAdvertiseAddressEnabled(): Boolean {
+        return prefs.getBoolean(KEY_ADVERTISE_ADDRESS_ENABLED, false)
+    }
+
+    fun saveAdvertiseAddressEnabled(enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_ADVERTISE_ADDRESS_ENABLED, enabled)
+            .apply()
+    }
+
     fun loadSelectedNetwork(): DogecoinNetwork {
         val hasExistingWallet = prefs.contains(privateKeyKey(DogecoinNetwork.MAINNET)) ||
             prefs.contains(privateKeyKey(DogecoinNetwork.TESTNET)) ||
@@ -375,6 +412,7 @@ class DogecoinWalletRepository(context: Context) {
         const val LEGACY_PREFS_NAME = "dogecoin_testnet_wallet"
         const val KEY_LEGACY_PREFS_MIGRATED = "legacy_testnet_prefs_migrated"
         const val KEY_SELECTED_NETWORK = "selected_network"
+        const val KEY_ADVERTISE_ADDRESS_ENABLED = "advertise_address_enabled"
         const val KEY_LEGACY_PRIVATE_KEY_HEX = "private_key_hex"
         const val KEY_LEGACY_RPC_URL = "rpc_url"
         const val KEY_LEGACY_RPC_USERNAME = "rpc_username"

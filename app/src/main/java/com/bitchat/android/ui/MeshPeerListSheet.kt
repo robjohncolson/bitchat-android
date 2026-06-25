@@ -421,9 +421,13 @@ fun PeopleSection(
 
             val directMap by viewModel.peerDirect.collectAsStateWithLifecycle()
             val isDirectLive = directMap[peerID] ?: try { viewModel.getMeshPeerInfo(peerID)?.isDirectConnection == true } catch (_: Exception) { false }
-            val activeDogecoinAddress = peerDogecoinAddresses[peerID]?.get(currentDogecoinNetwork.id)
-            val hasDogecoinAddress = onDogecoinUriClick != null &&
-                (activeDogecoinAddress != null || viewModel.getPeerDogecoinAddress(peerID, currentDogecoinNetwork) != null)
+            // Memoized so the cached-address lookup (which decrypts EncryptedSharedPreferences when
+            // the peer has no live announced address) does not re-run on every unrelated recompose.
+            val dogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerDogecoinAddresses[peerID]?.get(currentDogecoinNetwork.id)
+                    ?: viewModel.getPeerDogecoinAddress(peerID, currentDogecoinNetwork)
+            }
+            val hasDogecoinAddress = onDogecoinUriClick != null && dogecoinAddress != null
             PeerItem(
                 peerID = peerID,
                 displayName = displayName,
@@ -486,9 +490,11 @@ fun PeopleSection(
             val showHash = (baseNameCounts[bName] ?: 0) > 1
 
             val isVerified = viewModel.isNoisePublicKeyVerified(fav.peerNoisePublicKey, verifiedFingerprints)
-            val activeDogecoinAddress = peerDogecoinAddresses[favPeerID]?.get(currentDogecoinNetwork.id)
-            val hasDogecoinAddress = onDogecoinUriClick != null &&
-                (activeDogecoinAddress != null || viewModel.getPeerDogecoinAddress(favPeerID, currentDogecoinNetwork) != null)
+            val dogecoinAddress = remember(favPeerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerDogecoinAddresses[favPeerID]?.get(currentDogecoinNetwork.id)
+                    ?: viewModel.getPeerDogecoinAddress(favPeerID, currentDogecoinNetwork)
+            }
+            val hasDogecoinAddress = onDogecoinUriClick != null && dogecoinAddress != null
 
             // Compute unreadCount from either noise conversation or Nostr conversation
             val unreadCount = (

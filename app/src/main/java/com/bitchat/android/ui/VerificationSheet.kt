@@ -198,10 +198,16 @@ fun VerificationSheet(
             
             val peerID by viewModel.selectedPrivateChatPeer.collectAsStateWithLifecycle()
             val peerDogecoinAddresses by viewModel.peerDogecoinAddresses.collectAsStateWithLifecycle()
+            val fingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
             val currentDogecoinNetwork = viewModel.currentDogecoinNetwork()
             val peerDogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
                 peerID?.let { viewModel.getPeerDogecoinAddress(it, currentDogecoinNetwork) }
             }
+            val peerFingerprint = peerID?.let { viewModel.getMeshPeerFingerprint(it) }
+            // The address was only Ed25519 signature-checked at announce time, which is weaker than
+            // the user having verified this peer's identity. Only show the identity-verified styling
+            // when the peer is actually identity-verified; otherwise present it as merely "signed".
+            val isPeerIdentityVerified = peerFingerprint != null && fingerprints.contains(peerFingerprint)
 
             if (peerID != null && peerDogecoinAddress != null && onDogecoinUriClick != null) {
                 Spacer(modifier = Modifier.height(16.dp))
@@ -209,6 +215,7 @@ fun VerificationSheet(
                     networkName = currentDogecoinNetwork.displayName,
                     address = peerDogecoinAddress,
                     accent = accent,
+                    identityVerified = isPeerIdentityVerified,
                     onSendDoge = {
                         viewModel.getPeerDogecoinPaymentUri(peerID!!)?.let { uri ->
                             onDismiss()
@@ -220,11 +227,8 @@ fun VerificationSheet(
             }
 
             // Unverify Action
-            val fingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
-            
             if (peerID != null) {
-                val fingerprint = viewModel.getMeshPeerFingerprint(peerID!!)
-                if (fingerprint != null && fingerprints.contains(fingerprint)) {
+                if (peerFingerprint != null && fingerprints.contains(peerFingerprint)) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = { viewModel.unverifyFingerprint(peerID!!) },
@@ -274,6 +278,7 @@ private fun VerifiedDogecoinAddressCard(
     networkName: String,
     address: String,
     accent: Color,
+    identityVerified: Boolean,
     onSendDoge: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -290,14 +295,20 @@ private fun VerifiedDogecoinAddressCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Only reuse the identity-verified green check when the peer is actually
+                // identity-verified; otherwise the address is merely signature-checked ("signed").
                 Icon(
-                    imageVector = Icons.Filled.Verified,
+                    imageVector = if (identityVerified) Icons.Filled.Verified else Icons.Filled.Paid,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
-                    tint = accent
+                    tint = if (identityVerified) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Text(
-                    text = stringResource(R.string.dogecoin_peer_verified_address_network, networkName),
+                    text = stringResource(
+                        if (identityVerified) R.string.dogecoin_peer_verified_address_network
+                        else R.string.dogecoin_peer_signed_address_network,
+                        networkName
+                    ),
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurface
