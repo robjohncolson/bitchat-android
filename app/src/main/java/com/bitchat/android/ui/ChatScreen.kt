@@ -274,8 +274,18 @@ fun ChatScreen(
                     requiresPublicConfirmation = requestDogeRequiresPublicConfirmation,
                     onDismiss = { showRequestDogeDialog = false },
                     onPostRequest = { uri ->
-                        viewModel.sendMessage(uri)
-                        forceScrollToBottom = !forceScrollToBottom
+                        // A request opened from the private sheet (requiresPublicConfirmation = false)
+                        // must never silently fall back to a public/channel send that would expose the
+                        // receive address. If no private chat is active, drop it instead of leaking.
+                        val willReachPublicAudience = selectedPrivatePeer == null
+                        if (willReachPublicAudience && !requestDogeRequiresPublicConfirmation) {
+                            // no active private chat for a private-intent request: do not post publicly
+                        } else {
+                            viewModel.sendMessage(uri)
+                            // Note: when triggered from the private sheet this scrolls the main list;
+                            // the private sheet keeps its own scroll state.
+                            forceScrollToBottom = !forceScrollToBottom
+                        }
                     }
                 )
             }

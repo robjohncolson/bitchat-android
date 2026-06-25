@@ -229,18 +229,7 @@ class DogecoinWalletRepository(context: Context) {
     }
 
     fun loadSavedAddresses(network: DogecoinNetwork): List<DogecoinSavedAddress> {
-        val raw = prefs.getString(addressBookKey(network), null) ?: return emptyList()
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
-        val savedAddresses = mutableListOf<DogecoinSavedAddress>()
-        val seenAddresses = mutableSetOf<String>()
-
-        for (index in 0 until array.length()) {
-            val savedAddress = savedAddressFromJson(array.optJSONObject(index), network) ?: continue
-            if (!seenAddresses.add(savedAddress.address)) continue
-            savedAddresses.add(savedAddress)
-        }
-
-        return savedAddresses
+        return dogecoinSavedAddressesFromJson(prefs.getString(addressBookKey(network), null), network)
     }
 
     fun upsertSavedAddress(
@@ -381,22 +370,6 @@ class DogecoinWalletRepository(context: Context) {
             .apply()
     }
 
-    private fun savedAddressFromJson(
-        json: JSONObject?,
-        network: DogecoinNetwork
-    ): DogecoinSavedAddress? {
-        if (json == null) return null
-
-        val address = json.optString("address").trim()
-        if (!DogecoinAddress.isValidAddress(address, network)) return null
-
-        return DogecoinSavedAddress(
-            address = address,
-            label = json.optString("label").trim(),
-            savedAtMillis = json.optLong("savedAtMillis", 0L)
-        )
-    }
-
     private companion object {
         const val PREFS_NAME = "dogecoin_wallet"
         const val LEGACY_PREFS_NAME = "dogecoin_testnet_wallet"
@@ -439,4 +412,33 @@ internal fun dogecoinNetworkForStoredSelection(
     // practice without real funds. An existing wallet keeps the historical mainnet default so an
     // upgrade never silently moves a user off their (possibly funded) mainnet wallet.
     return if (hasExistingWallet) DogecoinNetwork.DEFAULT else DogecoinNetwork.TESTNET
+}
+
+/**
+ * Parse a persisted address-book JSON array. Tolerant of null/blank/corrupt input (returns an empty
+ * list rather than throwing), skips non-object/invalid/wrong-network entries, and dedupes by address
+ * keeping the first occurrence.
+ */
+internal fun dogecoinSavedAddressesFromJson(
+    raw: String?,
+    network: DogecoinNetwork
+): List<DogecoinSavedAddress> {
+    if (raw.isNullOrBlank()) return emptyList()
+    val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+    val savedAddresses = mutableListOf<DogecoinSavedAddress>()
+    val seenAddresses = mutableSetOf<String>()
+    for (index in 0 until array.length()) {
+        val json = array.optJSONObject(index) ?: continue
+        val address = json.optString("address").trim()
+        if (!DogecoinAddress.isValidAddress(address, network)) continue
+        if (!seenAddresses.add(address)) continue
+        savedAddresses.add(
+            DogecoinSavedAddress(
+                address = address,
+                label = json.optString("label").trim(),
+                savedAtMillis = json.optLong("savedAtMillis", 0L)
+            )
+        )
+    }
+    return savedAddresses
 }

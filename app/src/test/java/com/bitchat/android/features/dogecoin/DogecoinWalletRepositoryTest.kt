@@ -77,6 +77,42 @@ class DogecoinWalletRepositoryTest {
         )
     }
 
+    @Test
+    fun `saved address json parsing tolerates malformed invalid and duplicate entries`() {
+        val network = DogecoinNetwork.MAINNET
+        val mainnetAddress = DogecoinKeyGenerator.fromPrivateKeyHex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            network
+        ).address
+        val testnetAddress = DogecoinKeyGenerator.fromPrivateKeyHex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            DogecoinNetwork.TESTNET
+        ).address
+
+        // null / blank / non-array JSON inputs return an empty list and never throw.
+        assertTrue(dogecoinSavedAddressesFromJson(null, network).isEmpty())
+        assertTrue(dogecoinSavedAddressesFromJson("", network).isEmpty())
+        assertTrue(dogecoinSavedAddressesFromJson("{ not json", network).isEmpty())
+        assertTrue(dogecoinSavedAddressesFromJson("not even close", network).isEmpty())
+        assertTrue(dogecoinSavedAddressesFromJson("{\"address\":\"$mainnetAddress\"}", network).isEmpty())
+
+        // An array with junk entries: non-object, missing/invalid address, and wrong-network
+        // address are all skipped; the duplicate of the valid address is deduped (first wins).
+        val raw = "[" +
+            "\"string-not-object\"," +
+            "{\"label\":\"no address\"}," +
+            "{\"address\":\"not-a-valid-address\",\"label\":\"bad\"}," +
+            "{\"address\":\"$testnetAddress\",\"label\":\"wrong network\"}," +
+            "{\"address\":\"$mainnetAddress\",\"label\":\"first\",\"savedAtMillis\":5}," +
+            "{\"address\":\"$mainnetAddress\",\"label\":\"dupe\",\"savedAtMillis\":9}" +
+            "]"
+        val parsed = dogecoinSavedAddressesFromJson(raw, network)
+        assertEquals(1, parsed.size)
+        assertEquals(mainnetAddress, parsed[0].address)
+        assertEquals("first", parsed[0].label)
+        assertEquals(5L, parsed[0].savedAtMillis)
+    }
+
     private fun clearDogecoinPrefs() {
         context.getSharedPreferences("dogecoin_wallet", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("dogecoin_testnet_wallet", Context.MODE_PRIVATE).edit().clear().commit()

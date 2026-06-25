@@ -111,6 +111,9 @@ data class DogecoinPaymentRequest(
             return when {
                 DogecoinAddress.isValidAddress(address, DogecoinNetwork.MAINNET) -> DogecoinNetwork.MAINNET
                 DogecoinAddress.isValidAddress(address, DogecoinNetwork.TESTNET) -> DogecoinNetwork.TESTNET
+                // Note: testnet and regtest share the same P2SH version byte (196), so a regtest P2SH
+                // address is reported as TESTNET. Regtest P2PKH (111) is distinct from testnet (113),
+                // and regtest is a dev-only network, so this ambiguity is accepted, not guessed.
                 DogecoinAddress.isValidAddress(address, DogecoinNetwork.REGTEST) -> DogecoinNetwork.REGTEST
                 else -> null
             }
