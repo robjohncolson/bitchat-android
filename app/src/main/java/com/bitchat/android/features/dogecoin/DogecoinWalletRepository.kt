@@ -151,7 +151,13 @@ class DogecoinWalletRepository(context: Context) {
     }
 
     fun loadSelectedNetwork(): DogecoinNetwork {
-        return dogecoinNetworkForStoredSelection(prefs.getString(KEY_SELECTED_NETWORK, null))
+        val hasExistingWallet = prefs.contains(privateKeyKey(DogecoinNetwork.MAINNET)) ||
+            prefs.contains(privateKeyKey(DogecoinNetwork.TESTNET)) ||
+            prefs.contains(KEY_LEGACY_PRIVATE_KEY_HEX)
+        return dogecoinNetworkForStoredSelection(
+            prefs.getString(KEY_SELECTED_NETWORK, null),
+            hasExistingWallet
+        )
     }
 
     fun saveSelectedNetwork(network: DogecoinNetwork) {
@@ -339,7 +345,13 @@ class DogecoinWalletRepository(context: Context) {
     }
 }
 
-internal fun dogecoinNetworkForStoredSelection(id: String?): DogecoinNetwork {
-    if (id.isNullOrBlank()) return DogecoinNetwork.TESTNET
-    return DogecoinNetwork.fromId(id)
+internal fun dogecoinNetworkForStoredSelection(
+    storedSelection: String?,
+    hasExistingWallet: Boolean
+): DogecoinNetwork {
+    if (!storedSelection.isNullOrBlank()) return DogecoinNetwork.fromId(storedSelection)
+    // A genuine first run (no stored selection AND no wallet yet) defaults to testnet so users can
+    // practice without real funds. An existing wallet keeps the historical mainnet default so an
+    // upgrade never silently moves a user off their (possibly funded) mainnet wallet.
+    return if (hasExistingWallet) DogecoinNetwork.DEFAULT else DogecoinNetwork.TESTNET
 }

@@ -1233,7 +1233,12 @@ fun DogecoinWalletSheet(
         if (rpcConfigNeedsRecheck) {
             delay(DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS)
         }
-        if (rpcUrlBlank || !rpcUrlValid) return@LaunchedEffect
+        if (rpcUrlBlank || !rpcUrlValid) {
+            // Nothing to revalidate against a blank/invalid URL; clear the pending-recheck hint
+            // so the "revalidating" balance/node notice does not stick when the URL is cleared.
+            rpcConfigNeedsRecheck = false
+            return@LaunchedEffect
+        }
         refreshNodeStatus()
     }
 
@@ -1946,9 +1951,19 @@ fun DogecoinWalletSheet(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             isError = sendAmount.isNotBlank() && !isValidSelectedSendAmount(sendAmount)
                         )
+                        val presetFeeEstimates = remember(
+                            sendAmount,
+                            walletBalance,
+                            selectedNetwork,
+                            snapshot.key,
+                            sendFeePresets,
+                            minimumSendOutputKoinu
+                        ) {
+                            sendFeePresets.map { estimateSendFee(it.feePerKbKoinu) }
+                        }
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             sendFeePresets.forEachIndexed { index, option ->
-                                val estimatedFee = estimateSendFee(option.feePerKbKoinu)
+                                val estimatedFee = presetFeeEstimates.getOrNull(index)
                                 SegmentedButton(
                                     selected = !showAdvancedFee && sendFeePreset == option.preset,
                                     onClick = { selectSendFeePreset(option.preset) },
@@ -1960,9 +1975,9 @@ fun DogecoinWalletSheet(
                                     Text(
                                         text = stringResource(
                                             option.preset.labelResId,
-                                            DogecoinAmount.formatKoinu(
-                                                estimatedFee ?: DogecoinProtocol.MIN_TX_FEE_KOINU
-                                            )
+                                            // Show an em dash rather than a misleadingly low fee when the
+                                            // estimate is unavailable (e.g. a pathological overflow rate).
+                                            estimatedFee?.let { DogecoinAmount.formatKoinu(it) } ?: "—"
                                         )
                                     )
                                 }

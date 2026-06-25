@@ -725,10 +725,17 @@ class DogecoinWalletTest {
     fun `stored network selection defaults first run to testnet while fromId fallback stays mainnet`() {
         assertEquals(DogecoinNetwork.MAINNET, DogecoinNetwork.DEFAULT)
         assertEquals(DogecoinNetwork.MAINNET, DogecoinNetwork.fromId(null))
-        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection(null))
-        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection(""))
-        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("mainnet"))
-        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("unknown"))
+        // Genuine first run (no selection AND no existing wallet) defaults to testnet.
+        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection(null, hasExistingWallet = false))
+        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection("", hasExistingWallet = false))
+        // An existing wallet with no explicit selection keeps the historical mainnet default
+        // (no silent flip to testnet on upgrade).
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection(null, hasExistingWallet = true))
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("", hasExistingWallet = true))
+        // An explicit stored selection always wins, regardless of wallet presence.
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("mainnet", hasExistingWallet = false))
+        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection("testnet", hasExistingWallet = true))
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("unknown", hasExistingWallet = false))
     }
 
     @Test
