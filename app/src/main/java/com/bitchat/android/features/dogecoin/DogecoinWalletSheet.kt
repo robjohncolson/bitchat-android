@@ -129,6 +129,10 @@ fun DogecoinWalletSheet(
     onDismiss: () -> Unit,
     onShareToChat: (String) -> Unit,
     onAdvertisedAddressChanged: () -> Unit = {},
+    onRequestPeerBroadcast: (DogecoinSignedTransaction) -> Unit = {},
+    peerBroadcastState: PeerBroadcastUiState = PeerBroadcastUiState.Idle,
+    hasHelperCandidate: Boolean = false,
+    onClearPeerBroadcast: () -> Unit = {},
     paymentRequest: DogecoinPaymentRequest? = null,
     modifier: Modifier = Modifier
 ) {
@@ -155,6 +159,10 @@ fun DogecoinWalletSheet(
     var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
     var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
     var advertiseAddressEnabled by remember { mutableStateOf(repository.loadAdvertiseAddressEnabled()) }
+    var helperEnabled by remember(selectedNetwork) { mutableStateOf(repository.loadHelperEnabled(selectedNetwork)) }
+    var helperFavoritesOnly by remember { mutableStateOf(repository.loadHelperFavoritesOnly()) }
+    var helperMainnetConsent by remember(selectedNetwork) { mutableStateOf(false) }
+    var peerBroadcastAck by remember { mutableStateOf(false) }
     var savedAddresses by remember { mutableStateOf(repository.loadSavedAddresses(snapshot.key.network)) }
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
     var rpcUsername by remember { mutableStateOf(snapshot.rpcConfig.username) }
@@ -2372,6 +2380,74 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                item(key = "helper") {
+                    WalletCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_helper_title),
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = helperEnabled,
+                                enabled = helperEnabled ||
+                                    selectedNetwork != DogecoinNetwork.MAINNET ||
+                                    helperMainnetConsent,
+                                onCheckedChange = { enabled ->
+                                    helperEnabled = enabled
+                                    repository.saveHelperEnabled(selectedNetwork, enabled)
+                                }
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.dogecoin_helper_description, selectedNetwork.displayName),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 16.sp
+                        )
+                        if (selectedNetwork == DogecoinNetwork.MAINNET && !helperEnabled) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Checkbox(
+                                    checked = helperMainnetConsent,
+                                    onCheckedChange = { helperMainnetConsent = it }
+                                )
+                                Text(
+                                    text = stringResource(R.string.dogecoin_helper_mainnet_consent),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    lineHeight = 16.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_helper_favorites_only),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = helperFavoritesOnly,
+                                onCheckedChange = { enabled ->
+                                    helperFavoritesOnly = enabled
+                                    repository.saveHelperFavoritesOnly(enabled)
+                                }
+                            )
+                        }
+                    }
+                }
+
                 item(key = "danger") {
                     WalletCard {
                         Text(
@@ -2546,6 +2622,30 @@ fun DogecoinWalletSheet(
                 delay(remainingMillis.coerceIn(1_000L, 60_000L))
             }
             reviewNowMillis = System.currentTimeMillis()
+        }
+
+        // Peer-broadcast (3b): when a helper confirms, populate the same receipt the local path uses.
+        LaunchedEffect(peerBroadcastState) {
+            val confirmed = peerBroadcastState as? PeerBroadcastUiState.Confirmed ?: return@LaunchedEffect
+            if (selectedNetwork != transaction.network) return@LaunchedEffect
+            sentReceipt = DogecoinBroadcastReceipt(
+                txid = confirmed.txid,
+                network = transaction.network,
+                recipientAddress = transaction.recipientAddress,
+                sendAmountKoinu = transaction.sendAmountKoinu,
+                feeKoinu = transaction.feeKoinu,
+                changeKoinu = transaction.changeKoinu,
+                changeAddress = transaction.changeAddress,
+                requestLabel = transaction.requestLabel,
+                requestMessage = transaction.requestMessage
+            )
+            sendAmount = ""
+            pendingTransaction = null
+            mainnetBroadcastAcknowledged = false
+            highFeeAcknowledged = false
+            policyUnavailableAcknowledged = false
+            peerBroadcastAck = false
+            onClearPeerBroadcast()
         }
 
         val transactionReviewExpired = transaction.isExpired(
@@ -2869,6 +2969,58 @@ fun DogecoinWalletSheet(
                         Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(stringResource(R.string.dogecoin_share_raw_transaction))
+                    }
+                    if (!transactionReviewExpired && !canBroadcastThroughConfiguredNode && hasHelperCandidate) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                        Text(
+                            text = stringResource(R.string.dogecoin_peer_broadcast_explainer),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            lineHeight = 18.sp
+                        )
+                        when (val pbState = peerBroadcastState) {
+                            is PeerBroadcastUiState.Pending -> Text(
+                                text = stringResource(R.string.dogecoin_peer_broadcast_pending),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                lineHeight = 18.sp
+                            )
+                            is PeerBroadcastUiState.Failed -> Text(
+                                text = pbState.reason,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                            else -> Unit
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Checkbox(
+                                checked = peerBroadcastAck,
+                                onCheckedChange = { peerBroadcastAck = it },
+                                enabled = peerBroadcastState !is PeerBroadcastUiState.Pending
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_peer_broadcast_ack),
+                                style = MaterialTheme.typography.bodySmall,
+                                lineHeight = 18.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Button(
+                            onClick = { onRequestPeerBroadcast(transaction) },
+                            enabled = !sending &&
+                                canExportOrBroadcastAfterAcknowledgements &&
+                                peerBroadcastAck &&
+                                peerBroadcastState !is PeerBroadcastUiState.Pending,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.dogecoin_peer_broadcast_cta))
+                        }
                     }
                 }
             },

@@ -582,6 +582,7 @@ private fun ChatDialogs(
         onShowDogecoinWallet = onShowDogecoinWallet
     )
     if (showDogecoinWalletSheet) {
+        val peerBroadcastState by viewModel.peerBroadcastState.collectAsStateWithLifecycle()
         DogecoinWalletSheet(
             isPresented = showDogecoinWalletSheet,
             onDismiss = onDogecoinWalletDismiss,
@@ -592,6 +593,10 @@ private fun ChatDialogs(
             onAdvertisedAddressChanged = {
                 viewModel.reannounceDogecoinReceiveAddress()
             },
+            onRequestPeerBroadcast = { signedTx -> viewModel.requestPeerBroadcast(signedTx) },
+            peerBroadcastState = peerBroadcastState,
+            hasHelperCandidate = viewModel.hasBroadcastHelperCandidate(),
+            onClearPeerBroadcast = { viewModel.clearPeerBroadcastState() },
             paymentRequest = dogecoinPaymentRequest
         )
     }
