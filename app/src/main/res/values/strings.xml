@@ -241,6 +241,7 @@
   <string name="dogecoin_peer_broadcast_ack">A peer will see and broadcast this transaction.</string>
   <string name="dogecoin_peer_broadcast_cta">Ask a peer to broadcast</string>
   <string name="dogecoin_peer_broadcast_pending">Asking a peer to broadcast…</string>
+  <string name="dogecoin_send_receipt_via_peer">Relayed by a peer\'s node — not independently confirmed on-chain by this device. Verify the txid before treating it as settled.</string>
   <string name="cd_send_doge">Send DOGE</string>
   <string name="dogecoin_request_share_text">Dogecoin %1$s payment request:\n%2$s</string>
   <string name="dogecoin_request_qr_description">Dogecoin payment request QR code</string>

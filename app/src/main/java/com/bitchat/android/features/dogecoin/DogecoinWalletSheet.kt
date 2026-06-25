@@ -2298,6 +2298,14 @@ fun DogecoinWalletSheet(
                                 "\n" + stringResource(R.string.dogecoin_send_receipt_message, message)
                             }.orEmpty()
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (receipt.viaPeer) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_send_receipt_via_peer),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 SelectionContainer {
                                     Text(
                                         text = receiptText,
@@ -2645,7 +2653,8 @@ fun DogecoinWalletSheet(
                 changeKoinu = transaction.changeKoinu,
                 changeAddress = transaction.changeAddress,
                 requestLabel = transaction.requestLabel,
-                requestMessage = transaction.requestMessage
+                requestMessage = transaction.requestMessage,
+                viaPeer = true
             )
             sendAmount = ""
             pendingTransaction = null
@@ -3962,7 +3971,8 @@ private data class DogecoinBroadcastReceipt(
     val changeKoinu: Long,
     val changeAddress: String?,
     val requestLabel: String?,
-    val requestMessage: String?
+    val requestMessage: String?,
+    val viaPeer: Boolean = false   // 3b: broadcast was relayed by a peer's node, not this device's node
 ) {
     val totalDebitKoinu: Long
         get() = dogecoinSaturatingAddKoinu(sendAmountKoinu, feeKoinu)
