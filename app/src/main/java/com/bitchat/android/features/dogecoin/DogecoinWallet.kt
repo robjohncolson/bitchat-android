@@ -26,7 +26,8 @@ enum class DogecoinNetwork(
     val p2pkhAddressHeader: Int,
     val p2shAddressHeader: Int,
     val wifPrivateKeyHeader: Int,
-    val defaultRpcUrl: String,
+    val rpcPort: Int,
+    val emulatorRpcUrl: String,
     val chainName: String
 ) {
     MAINNET(
@@ -35,7 +36,8 @@ enum class DogecoinNetwork(
         p2pkhAddressHeader = 30,
         p2shAddressHeader = 22,
         wifPrivateKeyHeader = 158,
-        defaultRpcUrl = "http://10.0.2.2:22555",
+        rpcPort = 22555,
+        emulatorRpcUrl = "http://10.0.2.2:22555",
         chainName = "main"
     ),
     TESTNET(
@@ -44,7 +46,8 @@ enum class DogecoinNetwork(
         p2pkhAddressHeader = 113,
         p2shAddressHeader = 196,
         wifPrivateKeyHeader = 241,
-        defaultRpcUrl = "http://10.0.2.2:44555",
+        rpcPort = 44555,
+        emulatorRpcUrl = "http://10.0.2.2:44555",
         chainName = "test"
     ),
 
@@ -60,7 +63,8 @@ enum class DogecoinNetwork(
         p2pkhAddressHeader = 111,
         p2shAddressHeader = 196,
         wifPrivateKeyHeader = 239,
-        defaultRpcUrl = "http://10.0.2.2:18332",
+        rpcPort = 18332,
+        emulatorRpcUrl = "http://10.0.2.2:18332",
         chainName = "regtest"
     );
 

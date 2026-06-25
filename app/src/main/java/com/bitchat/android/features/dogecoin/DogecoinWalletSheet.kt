@@ -143,11 +143,13 @@ fun DogecoinWalletSheet(
     var snapshot by remember { mutableStateOf(repository.loadOrCreateWallet()) }
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
     var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
+    var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
     var rpcUsername by remember { mutableStateOf(snapshot.rpcConfig.username) }
     var rpcPassword by remember { mutableStateOf(snapshot.rpcConfig.password) }
     var rpcWalletName by remember { mutableStateOf(snapshot.rpcConfig.walletName) }
     var rpcConfigRevision by remember { mutableStateOf(0) }
+    var rpcConfigNeedsRecheck by remember { mutableStateOf(false) }
     var amount by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("bitchat") }
     var requestMessage by remember { mutableStateOf("") }
@@ -167,6 +169,8 @@ fun DogecoinWalletSheet(
     var sendFeeRate by remember {
         mutableStateOf(DogecoinAmount.formatKoinu(DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU))
     }
+    var sendFeePreset by remember { mutableStateOf(DogecoinFeePreset.NORMAL) }
+    var showAdvancedFee by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var sentReceipt by remember { mutableStateOf<DogecoinBroadcastReceipt?>(null) }
     var pendingTransaction by remember { mutableStateOf<DogecoinSignedTransaction?>(null) }
@@ -190,8 +194,10 @@ fun DogecoinWalletSheet(
     var exportingRawTransaction by remember { mutableStateOf(false) }
     var scanningPaymentQr by remember { mutableStateOf(false) }
     var qrScanError by remember { mutableStateOf<String?>(null) }
+    var showNodeHelp by remember { mutableStateOf(false) }
+    val rpcUrlBlank = rpcUrl.trim().isEmpty()
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
-        DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
+        !rpcUrlBlank && DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
     }
     val nodeReady = nodeStatus?.isReadyFor(selectedNetwork) == true
     val broadcastNodeReady = nodeStatus?.canBroadcastFor(selectedNetwork) == true
@@ -212,8 +218,18 @@ fun DogecoinWalletSheet(
     )
     val minimumSendOutputKoinu = dogecoinEffectiveStandardOutputKoinu(usableNodeStatus?.softDustLimitKoinu)
     val wifCopyRecorded = wifCopyState.matches(snapshot.key)
-    val mainnetReceiveBackupRequired = selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyRecorded
-    val canExposeReceiveDetails = !mainnetReceiveBackupRequired
+    val sendFeePresets = remember(
+        minimumSendFeePerKbKoinu,
+        usableNodeStatus?.incrementalFeePerKbKoinu
+    ) {
+        dogecoinFeePresetOptions(
+            minimumFeePerKbKoinu = minimumSendFeePerKbKoinu,
+            incrementalFeePerKbKoinu = usableNodeStatus?.incrementalFeePerKbKoinu
+        )
+    }
+    val selectedFeePresetRateKoinu = sendFeePresets.firstOrNull { it.preset == sendFeePreset }
+        ?.feePerKbKoinu
+        ?: minimumSendFeePerKbKoinu
 
     fun currentRpcConfig(): DogecoinRpcConfig {
         return DogecoinRpcConfig(
@@ -222,6 +238,10 @@ fun DogecoinWalletSheet(
             password = rpcPassword,
             walletName = rpcWalletName
         ).normalized(selectedNetwork)
+    }
+
+    fun persistRpcConfig() {
+        repository.saveRpcConfig(selectedNetwork, currentRpcConfig())
     }
 
     fun isValidSelectedFeeRate(value: String): Boolean {
@@ -236,13 +256,12 @@ fun DogecoinWalletSheet(
 
     fun invalidateRpcRuntimeState() {
         rpcConfigRevision += 1
+        rpcConfigNeedsRecheck = true
         nodeStatus = null
         refreshing = false
-        walletBalance = null
         walletBalanceError = null
         addressWatchStatus = null
         addressWatchStatusError = null
-        walletActivity = emptyList()
         walletActivityError = null
         refreshingBalance = false
         rescanning = false
@@ -262,6 +281,7 @@ fun DogecoinWalletSheet(
         if (rpcUrl == value) return
         rpcUrl = value
         invalidateRpcRuntimeState()
+        persistRpcConfig()
     }
 
     fun updateRpcUsername(value: String) {
@@ -274,18 +294,21 @@ fun DogecoinWalletSheet(
             rpcPassword = parsedAuth.second
         }
         invalidateRpcRuntimeState()
+        persistRpcConfig()
     }
 
     fun updateRpcPassword(value: String) {
         if (rpcPassword == value) return
         rpcPassword = value
         invalidateRpcRuntimeState()
+        persistRpcConfig()
     }
 
     fun updateRpcWalletName(value: String) {
         if (rpcWalletName == value) return
         rpcWalletName = value
         invalidateRpcRuntimeState()
+        persistRpcConfig()
     }
 
     fun switchNetwork(network: DogecoinNetwork) {
@@ -295,10 +318,12 @@ fun DogecoinWalletSheet(
         repository.saveSelectedNetwork(network)
         selectedNetwork = network
         rpcConfigRevision += 1
+        rpcConfigNeedsRecheck = false
 
         val nextSnapshot = repository.loadOrCreateWallet(network)
         snapshot = nextSnapshot
         wifCopyState = repository.loadWifCopyState(nextSnapshot.key)
+        practiceNudgeDismissed = repository.loadPracticeNudgeDismissed()
         rpcUrl = nextSnapshot.rpcConfig.url
         rpcUsername = nextSnapshot.rpcConfig.username
         rpcPassword = nextSnapshot.rpcConfig.password
@@ -317,6 +342,8 @@ fun DogecoinWalletSheet(
         sendAddress = ""
         sendAmount = ""
         sendFeeRate = DogecoinAmount.formatKoinu(DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU)
+        sendFeePreset = DogecoinFeePreset.NORMAL
+        showAdvancedFee = false
         sendError = null
         sentReceipt = null
         pendingTransaction = null
@@ -344,6 +371,7 @@ fun DogecoinWalletSheet(
 
     fun clearWalletRuntimeState() {
         nodeStatus = null
+        rpcConfigNeedsRecheck = false
         refreshing = false
         walletBalance = null
         walletBalanceError = null
@@ -355,6 +383,8 @@ fun DogecoinWalletSheet(
         sendAddress = ""
         sendAmount = ""
         sendFeeRate = DogecoinAmount.formatKoinu(DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU)
+        sendFeePreset = DogecoinFeePreset.NORMAL
+        showAdvancedFee = false
         sendError = null
         sentReceipt = null
         pendingTransaction = null
@@ -413,6 +443,11 @@ fun DogecoinWalletSheet(
     }
 
     fun refreshNodeStatus() {
+        if (rpcUrlBlank) {
+            nodeStatus = null
+            refreshing = false
+            return
+        }
         if (!rpcUrlValid) {
             nodeStatus = DogecoinNodeStatus(
                 connected = false,
@@ -437,6 +472,7 @@ fun DogecoinWalletSheet(
             }
             if (selectedNetwork == network && rpcConfigRevision == configRevision) {
                 nodeStatus = status
+                rpcConfigNeedsRecheck = false
                 if (snapshot.key.address == address) {
                     addressWatchStatus = watchStatusResult?.getOrNull()
                     addressWatchStatusError = watchStatusResult?.exceptionOrNull()?.message
@@ -1058,6 +1094,13 @@ fun DogecoinWalletSheet(
         selectedNetwork.displayName,
         receiveUri
     )
+    val nodeConfigSnippet = remember(selectedNetwork, rpcUsername, rpcPassword) {
+        dogecoinConfSnippet(
+            network = selectedNetwork,
+            username = rpcUsername,
+            password = rpcPassword
+        )
+    }
 
     val paymentUri = remember(selectedNetwork, snapshot.key.address, amount, label, requestMessage) {
         runCatching {
@@ -1116,8 +1159,49 @@ fun DogecoinWalletSheet(
 
     fun updateSendFeeRateInput(value: String) {
         sendFeeRate = value
+        showAdvancedFee = true
         sendError = null
         clearReviewedSendState()
+    }
+
+    fun selectSendFeePreset(preset: DogecoinFeePreset) {
+        sendFeePreset = preset
+        showAdvancedFee = false
+        sendFeeRate = DogecoinAmount.formatKoinu(
+            sendFeePresets.firstOrNull { it.preset == preset }?.feePerKbKoinu ?: minimumSendFeePerKbKoinu
+        )
+        sendError = null
+        clearReviewedSendState()
+    }
+
+    fun estimateSendFee(feePerKbKoinu: Long): Long? {
+        val balance = walletBalance
+        val sendAmountKoinu = if (isValidSelectedSendAmount(sendAmount)) {
+            DogecoinAmount.toKoinu(sendAmount)
+        } else {
+            null
+        }
+        if (balance != null && sendAmountKoinu != null) {
+            runCatching {
+                DogecoinTransactionBuilder.estimateFeeForSelection(
+                    wallet = snapshot.key,
+                    utxos = balance.utxos,
+                    sendAmountKoinu = sendAmountKoinu,
+                    network = selectedNetwork,
+                    feePerKbKoinu = feePerKbKoinu,
+                    minimumOutputKoinu = minimumSendOutputKoinu
+                )
+            }.getOrNull()?.let { return it }
+        }
+
+        return runCatching {
+            DogecoinTransactionBuilder.estimateFeeForSelection(
+                wallet = snapshot.key,
+                inputCount = 1,
+                outputCount = 2,
+                feePerKbKoinu = feePerKbKoinu
+            )
+        }.getOrNull()
     }
 
     fun pastePaymentRequestFromClipboard() {
@@ -1139,7 +1223,17 @@ fun DogecoinWalletSheet(
         ).show()
     }
 
-    LaunchedEffect(selectedNetwork) {
+    LaunchedEffect(sendFeePreset, selectedFeePresetRateKoinu, showAdvancedFee) {
+        if (!showAdvancedFee) {
+            sendFeeRate = DogecoinAmount.formatKoinu(selectedFeePresetRateKoinu)
+        }
+    }
+
+    LaunchedEffect(selectedNetwork, snapshot.key.address, rpcConfigRevision) {
+        if (rpcConfigNeedsRecheck) {
+            delay(DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS)
+        }
+        if (rpcUrlBlank || !rpcUrlValid) return@LaunchedEffect
         refreshNodeStatus()
     }
 
@@ -1207,10 +1301,10 @@ fun DogecoinWalletSheet(
                                 ) {
                                     Text(
                                         text = stringResource(
-                                            if (network == DogecoinNetwork.MAINNET) {
-                                                R.string.dogecoin_network_mainnet
-                                            } else {
-                                                R.string.dogecoin_network_testnet
+                                            when (network) {
+                                                DogecoinNetwork.MAINNET -> R.string.dogecoin_network_mainnet
+                                                DogecoinNetwork.TESTNET -> R.string.dogecoin_network_testnet
+                                                DogecoinNetwork.REGTEST -> R.string.dogecoin_network_regtest
                                             }
                                         )
                                     )
@@ -1234,6 +1328,188 @@ fun DogecoinWalletSheet(
                                 lineHeight = 18.sp
                             )
                         }
+                        if (selectedNetwork == DogecoinNetwork.TESTNET && !practiceNudgeDismissed) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                            Text(
+                                text = stringResource(R.string.dogecoin_practice_nudge),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                lineHeight = 18.sp
+                            )
+                            TextButton(
+                                onClick = {
+                                    repository.dismissPracticeNudge()
+                                    practiceNudgeDismissed = true
+                                }
+                            ) {
+                                Text(stringResource(R.string.dismiss))
+                            }
+                        }
+                    }
+                }
+
+                item(key = "node") {
+                    WalletCard {
+                        Text(
+                            text = stringResource(R.string.dogecoin_node_title),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        OutlinedTextField(
+                            value = rpcUrl,
+                            onValueChange = { updateRpcUrl(it) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(stringResource(R.string.dogecoin_rpc_url_label)) },
+                            placeholder = {
+                                Text(
+                                    stringResource(
+                                        R.string.dogecoin_rpc_url_placeholder,
+                                        selectedNetwork.rpcPort
+                                    )
+                                )
+                            },
+                            isError = rpcUrl.isNotBlank() && !rpcUrlValid
+                        )
+                        when {
+                            rpcUrlBlank -> Text(
+                                text = stringResource(
+                                    R.string.dogecoin_rpc_empty_hint,
+                                    selectedNetwork.displayName
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 18.sp
+                            )
+                            !rpcUrlValid -> Text(
+                                text = stringResource(R.string.dogecoin_rpc_url_invalid),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.dogecoin_rpc_device_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 18.sp
+                        )
+                        if (com.bitchat.android.BuildConfig.DEBUG) {
+                            OutlinedButton(
+                                onClick = { updateRpcUrl(selectedNetwork.emulatorRpcUrl) },
+                                enabled = rpcUrl.trim() != selectedNetwork.emulatorRpcUrl,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.dogecoin_rpc_use_emulator))
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = rpcUsername,
+                                onValueChange = { updateRpcUsername(it) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text(stringResource(R.string.dogecoin_rpc_user_label)) }
+                            )
+                            OutlinedTextField(
+                                value = rpcPassword,
+                                onValueChange = { updateRpcPassword(it) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text(stringResource(R.string.dogecoin_rpc_password_label)) },
+                                visualTransformation = PasswordVisualTransformation()
+                            )
+                        }
+                        OutlinedTextField(
+                            value = rpcWalletName,
+                            onValueChange = { updateRpcWalletName(it) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(stringResource(R.string.dogecoin_rpc_wallet_label)) }
+                        )
+                        Text(
+                            text = stringResource(R.string.dogecoin_rpc_wallet_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 18.sp
+                        )
+                        Text(
+                            text = stringResource(R.string.dogecoin_rpc_auth_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 18.sp
+                        )
+                        TextButton(onClick = { showNodeHelp = !showNodeHelp }) {
+                            Text(
+                                stringResource(
+                                    if (showNodeHelp) {
+                                        R.string.dogecoin_node_help_hide
+                                    } else {
+                                        R.string.dogecoin_node_help_show
+                                    }
+                                )
+                            )
+                        }
+                        if (showNodeHelp) {
+                            SelectionContainer {
+                                Text(
+                                    text = nodeConfigSnippet,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f)
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    copy(
+                                        nodeConfigSnippet,
+                                        context.getString(R.string.dogecoin_node_conf_copied)
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.dogecoin_node_conf_copy))
+                            }
+                        }
+                        NodeStatusRow(
+                            status = nodeStatus,
+                            refreshing = refreshing,
+                            network = selectedNetwork
+                        )
+                        when {
+                            refreshing -> Text(
+                                text = stringResource(R.string.dogecoin_node_auto_rechecking),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 18.sp
+                            )
+                            rpcConfigNeedsRecheck && !rpcUrlBlank && rpcUrlValid -> Text(
+                                text = stringResource(R.string.dogecoin_node_revalidating),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                lineHeight = 18.sp
+                            )
+                            nodeStatus == null && !rpcUrlBlank -> Text(
+                                text = stringResource(R.string.dogecoin_node_recheck_required),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 18.sp
+                            )
+                        }
+                        Button(
+                            onClick = { refreshNodeStatus() },
+                            enabled = !refreshing && rpcUrlValid,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.refresh_node_status))
+                        }
                     }
                 }
 
@@ -1244,39 +1520,20 @@ fun DogecoinWalletSheet(
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
-                        if (canExposeReceiveDetails) {
-                            SelectionContainer {
-                                Text(
-                                    text = snapshot.key.address,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 15.sp,
-                                    lineHeight = 20.sp
-                                )
-                            }
-                        } else {
+                        SelectionContainer {
                             Text(
                                 text = snapshot.key.address,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 15.sp,
-                                lineHeight = 20.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                                lineHeight = 20.sp
                             )
                         }
-                        if (canExposeReceiveDetails) {
-                            DogecoinQrCodeImage(
-                                data = receiveUri,
-                                contentDescription = stringResource(R.string.dogecoin_address_qr_description),
-                                size = 160.dp,
-                                modifier = Modifier.align(Alignment.CenterHorizontally)
-                            )
-                        } else {
-                            Text(
-                                text = stringResource(R.string.dogecoin_receive_backup_required),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                lineHeight = 18.sp
-                            )
-                        }
+                        DogecoinQrCodeImage(
+                            data = receiveUri,
+                            contentDescription = stringResource(R.string.dogecoin_address_qr_description),
+                            size = 160.dp,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
@@ -1288,7 +1545,6 @@ fun DogecoinWalletSheet(
                                         context.getString(R.string.dogecoin_address_copied)
                                     )
                                 },
-                                enabled = canExposeReceiveDetails,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1302,7 +1558,6 @@ fun DogecoinWalletSheet(
                                         context.getString(R.string.dogecoin_receive_uri_copied)
                                     )
                                 },
-                                enabled = canExposeReceiveDetails,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1318,7 +1573,6 @@ fun DogecoinWalletSheet(
                                     context.getString(R.string.dogecoin_address_share_failed)
                                 )
                             },
-                            enabled = canExposeReceiveDetails,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1334,7 +1588,6 @@ fun DogecoinWalletSheet(
                                     Toast.LENGTH_SHORT
                                 ).show()
                             },
-                            enabled = canExposeReceiveDetails,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1421,6 +1674,14 @@ fun DogecoinWalletSheet(
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                                 lineHeight = 18.sp
                             )
+                            if (rpcConfigNeedsRecheck || refreshing) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_balance_revalidating),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                    lineHeight = 18.sp
+                                )
+                            }
                             maxSpendEstimate?.let { maxSpend ->
                                 Text(
                                     text = stringResource(
@@ -1527,7 +1788,7 @@ fun DogecoinWalletSheet(
                                     stringResource(R.string.dogecoin_rescan_refresh_order_hint)
                                 },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
+                                color = MaterialTheme.colorScheme.tertiary,
                                 lineHeight = 18.sp
                             )
                         }
@@ -1538,7 +1799,7 @@ fun DogecoinWalletSheet(
                                     addressWatchStatusError ?: ""
                                 ),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
+                                color = MaterialTheme.colorScheme.tertiary,
                                 lineHeight = 18.sp
                             )
                         }
@@ -1546,7 +1807,7 @@ fun DogecoinWalletSheet(
                             Text(
                                 text = it,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
+                                color = MaterialTheme.colorScheme.tertiary,
                                 lineHeight = 18.sp
                             )
                         }
@@ -1583,29 +1844,20 @@ fun DogecoinWalletSheet(
                             singleLine = true,
                             label = { Text(stringResource(R.string.dogecoin_message_label)) }
                         )
-                        if (canExposeReceiveDetails) {
-                            SelectionContainer {
-                                Text(
-                                    text = paymentUri ?: stringResource(R.string.dogecoin_invalid_request),
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 13.sp,
-                                    lineHeight = 18.sp,
-                                    color = if (paymentUri == null) {
-                                        MaterialTheme.colorScheme.error
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
-                                    }
-                                )
-                            }
-                        } else {
+                        SelectionContainer {
                             Text(
-                                text = stringResource(R.string.dogecoin_request_backup_required),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                lineHeight = 18.sp
+                                text = paymentUri ?: stringResource(R.string.dogecoin_invalid_request),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                color = if (paymentUri == null) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                }
                             )
                         }
-                        if (canExposeReceiveDetails && paymentUri != null) {
+                        if (paymentUri != null) {
                             DogecoinQrCodeImage(
                                 data = paymentUri,
                                 contentDescription = stringResource(R.string.dogecoin_request_qr_description),
@@ -1623,7 +1875,7 @@ fun DogecoinWalletSheet(
                                         copy(it, context.getString(R.string.dogecoin_request_copied))
                                     }
                                 },
-                                enabled = canExposeReceiveDetails && paymentUri != null,
+                                enabled = paymentUri != null,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1640,7 +1892,7 @@ fun DogecoinWalletSheet(
                                         )
                                     }
                                 },
-                                enabled = canExposeReceiveDetails && paymentShareText != null,
+                                enabled = paymentShareText != null,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1659,7 +1911,7 @@ fun DogecoinWalletSheet(
                                     ).show()
                                 }
                             },
-                            enabled = canExposeReceiveDetails && paymentShareText != null,
+                            enabled = paymentShareText != null,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1694,16 +1946,59 @@ fun DogecoinWalletSheet(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             isError = sendAmount.isNotBlank() && !isValidSelectedSendAmount(sendAmount)
                         )
-                        OutlinedTextField(
-                            value = sendFeeRate,
-                            onValueChange = { updateSendFeeRateInput(it) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            label = { Text(stringResource(R.string.dogecoin_send_fee_rate_label)) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            isError = sendFeeRate.isNotBlank() &&
-                                !isValidSelectedFeeRate(sendFeeRate)
-                        )
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            sendFeePresets.forEachIndexed { index, option ->
+                                val estimatedFee = estimateSendFee(option.feePerKbKoinu)
+                                SegmentedButton(
+                                    selected = !showAdvancedFee && sendFeePreset == option.preset,
+                                    onClick = { selectSendFeePreset(option.preset) },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index,
+                                        count = sendFeePresets.size
+                                    )
+                                ) {
+                                    Text(
+                                        text = stringResource(
+                                            option.preset.labelResId,
+                                            DogecoinAmount.formatKoinu(
+                                                estimatedFee ?: DogecoinProtocol.MIN_TX_FEE_KOINU
+                                            )
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Checkbox(
+                                checked = showAdvancedFee,
+                                onCheckedChange = {
+                                    showAdvancedFee = it
+                                    if (!it) {
+                                        selectSendFeePreset(sendFeePreset)
+                                    }
+                                }
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_send_fee_advanced),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                            )
+                        }
+                        if (showAdvancedFee) {
+                            OutlinedTextField(
+                                value = sendFeeRate,
+                                onValueChange = { updateSendFeeRateInput(it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text(stringResource(R.string.dogecoin_send_fee_rate_label)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                isError = sendFeeRate.isNotBlank() &&
+                                    !isValidSelectedFeeRate(sendFeeRate)
+                            )
+                        }
                         Text(
                             text = stringResource(
                                 R.string.dogecoin_send_fee_rate_hint,
@@ -1761,7 +2056,7 @@ fun DogecoinWalletSheet(
                                     }
                                 ),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
+                                color = MaterialTheme.colorScheme.tertiary,
                                 lineHeight = 18.sp
                             )
                         }
@@ -1904,115 +2199,6 @@ fun DogecoinWalletSheet(
                                     stringResource(R.string.dogecoin_send_review)
                                 }
                             )
-                        }
-                    }
-                }
-
-                item(key = "node") {
-                    WalletCard {
-                        Text(
-                            text = stringResource(R.string.dogecoin_node_title),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                        OutlinedTextField(
-                            value = rpcUrl,
-                            onValueChange = { updateRpcUrl(it) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            label = { Text(stringResource(R.string.dogecoin_rpc_url_label)) },
-                            isError = !rpcUrlValid
-                        )
-                        if (!rpcUrlValid) {
-                            Text(
-                                text = stringResource(R.string.dogecoin_rpc_url_invalid),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                lineHeight = 18.sp
-                            )
-                        }
-                        Text(
-                            text = stringResource(
-                                R.string.dogecoin_rpc_default_hint,
-                                selectedNetwork.displayName,
-                                selectedNetwork.defaultRpcUrl
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                            lineHeight = 18.sp
-                        )
-                        Text(
-                            text = stringResource(R.string.dogecoin_rpc_device_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                            lineHeight = 18.sp
-                        )
-                        OutlinedButton(
-                            onClick = { updateRpcUrl(selectedNetwork.defaultRpcUrl) },
-                            enabled = rpcUrl.trim() != selectedNetwork.defaultRpcUrl,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.dogecoin_rpc_use_default))
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                value = rpcUsername,
-                                onValueChange = { updateRpcUsername(it) },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                                label = { Text(stringResource(R.string.dogecoin_rpc_user_label)) }
-                            )
-                            OutlinedTextField(
-                                value = rpcPassword,
-                                onValueChange = { updateRpcPassword(it) },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                                label = { Text(stringResource(R.string.dogecoin_rpc_password_label)) },
-                                visualTransformation = PasswordVisualTransformation()
-                            )
-                        }
-                        OutlinedTextField(
-                            value = rpcWalletName,
-                            onValueChange = { updateRpcWalletName(it) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            label = { Text(stringResource(R.string.dogecoin_rpc_wallet_label)) }
-                        )
-                        Text(
-                            text = stringResource(R.string.dogecoin_rpc_wallet_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                            lineHeight = 18.sp
-                        )
-                        Text(
-                            text = stringResource(R.string.dogecoin_rpc_auth_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                            lineHeight = 18.sp
-                        )
-                        NodeStatusRow(
-                            status = nodeStatus,
-                            refreshing = refreshing,
-                            network = selectedNetwork
-                        )
-                        if (nodeStatus == null && !refreshing) {
-                            Text(
-                                text = stringResource(R.string.dogecoin_node_recheck_required),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                                lineHeight = 18.sp
-                            )
-                        }
-                        Button(
-                            onClick = { refreshNodeStatus() },
-                            enabled = !refreshing && rpcUrlValid,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.refresh_node_status))
                         }
                     }
                 }
@@ -2934,7 +3120,7 @@ private fun NodeStatusRow(
             color = if (status?.policyCheckAvailable == true) {
                 colorScheme.onSurface.copy(alpha = 0.65f)
             } else {
-                colorScheme.error
+                colorScheme.tertiary
             },
             lineHeight = 18.sp
         )
@@ -2943,7 +3129,7 @@ private fun NodeStatusRow(
         Text(
             text = it,
             style = MaterialTheme.typography.bodySmall,
-            color = colorScheme.error,
+            color = colorScheme.tertiary,
             lineHeight = 18.sp
         )
     }
@@ -3311,11 +3497,78 @@ private enum class DogecoinRawTransactionExportAction {
     SHARE
 }
 
+private enum class DogecoinFeePreset(val labelResId: Int) {
+    SLOW(R.string.dogecoin_send_fee_preset_slow),
+    NORMAL(R.string.dogecoin_send_fee_preset_normal),
+    FAST(R.string.dogecoin_send_fee_preset_fast)
+}
+
+private data class DogecoinFeePresetOption(
+    val preset: DogecoinFeePreset,
+    val feePerKbKoinu: Long
+)
+
+private fun dogecoinFeePresetOptions(
+    minimumFeePerKbKoinu: Long,
+    incrementalFeePerKbKoinu: Long?
+): List<DogecoinFeePresetOption> {
+    val slow = maxOf(DogecoinProtocol.MIN_TX_FEE_KOINU, minimumFeePerKbKoinu)
+    val feeStep = incrementalFeePerKbKoinu
+        ?.takeIf { it > 0L }
+        ?: slow
+    val normal = dogecoinSaturatingAddKoinu(slow, feeStep)
+    val fast = dogecoinSaturatingAddKoinu(slow, dogecoinSaturatingMultiplyKoinu(feeStep, 2L))
+    return listOf(
+        DogecoinFeePresetOption(DogecoinFeePreset.SLOW, slow),
+        DogecoinFeePresetOption(DogecoinFeePreset.NORMAL, maxOf(slow, normal)),
+        DogecoinFeePresetOption(DogecoinFeePreset.FAST, maxOf(normal, fast))
+    )
+}
+
+private fun dogecoinSaturatingMultiplyKoinu(left: Long, right: Long): Long {
+    require(left >= 0L && right >= 0L) { "Dogecoin amounts must be non-negative" }
+    return try {
+        Math.multiplyExact(left, right)
+    } catch (_: ArithmeticException) {
+        Long.MAX_VALUE
+    }
+}
+
+private fun dogecoinConfSnippet(
+    network: DogecoinNetwork,
+    username: String,
+    password: String
+): String {
+    val rpcUser = dogecoinConfValue(username, "bitchat")
+    val rpcPassword = dogecoinConfValue(password, "choose-a-long-password")
+    val networkLine = when (network) {
+        DogecoinNetwork.MAINNET -> null
+        DogecoinNetwork.TESTNET -> "testnet=1"
+        DogecoinNetwork.REGTEST -> "regtest=1"
+    }
+    return buildList {
+        networkLine?.let { add(it) }
+        add("server=1")
+        add("rpcuser=$rpcUser")
+        add("rpcpassword=$rpcPassword")
+        add("rpcbind=0.0.0.0")
+        add("rpcallowip=10.0.0.0/8")
+        add("rpcallowip=172.16.0.0/12")
+        add("rpcallowip=192.168.0.0/16")
+        add("rpcport=${network.rpcPort}")
+    }.joinToString("\n")
+}
+
+private fun dogecoinConfValue(value: String, fallback: String): String {
+    return value.trim().replace(Regex("\\s+"), "-").ifEmpty { fallback }
+}
+
 private const val DOGECOIN_UTXO_PREVIEW_LIMIT = 5
 private const val DOGECOIN_CONFIRM_UTXO_PREVIEW_LIMIT = 3
 private const val DOGECOIN_ACTIVITY_PREVIEW_LIMIT = 5
-private const val DOGECOIN_SEND_ITEM_INDEX = 5
+private const val DOGECOIN_SEND_ITEM_INDEX = 6
 private const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
+private const val DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS = 650L
 
 private class DogecoinQrCodeAnalyzer(
     private val onCode: (String) -> Unit

@@ -7,7 +7,7 @@ import androidx.security.crypto.MasterKey
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 data class DogecoinRpcConfig(
-    val url: String = DogecoinNetwork.DEFAULT.defaultRpcUrl,
+    val url: String = "",
     val username: String = "",
     val password: String = "",
     val walletName: String = ""
@@ -23,7 +23,7 @@ data class DogecoinRpcConfig(
     }
 
     fun normalizedUrl(network: DogecoinNetwork): String {
-        return url.trim().ifEmpty { network.defaultRpcUrl }
+        return url.trim()
     }
 
     fun walletEndpointUrl(): String {
@@ -151,7 +151,7 @@ class DogecoinWalletRepository(context: Context) {
     }
 
     fun loadSelectedNetwork(): DogecoinNetwork {
-        return DogecoinNetwork.fromId(prefs.getString(KEY_SELECTED_NETWORK, null))
+        return dogecoinNetworkForStoredSelection(prefs.getString(KEY_SELECTED_NETWORK, null))
     }
 
     fun saveSelectedNetwork(network: DogecoinNetwork) {
@@ -164,7 +164,7 @@ class DogecoinWalletRepository(context: Context) {
         return DogecoinRpcConfig(
             url = prefs.getString(rpcUrlKey(network), null)
                 ?: legacyTestnetString(network, KEY_LEGACY_RPC_URL)
-                ?: network.defaultRpcUrl,
+                ?: "",
             username = prefs.getString(rpcUsernameKey(network), null)
                 ?: legacyTestnetString(network, KEY_LEGACY_RPC_USERNAME)
                 ?: "",
@@ -189,6 +189,16 @@ class DogecoinWalletRepository(context: Context) {
             address = prefs.getString(wifCopyAddressKey(key.network), null),
             copiedAtMillis = prefs.getLong(wifCopyAtKey(key.network), 0L)
         )
+    }
+
+    fun loadPracticeNudgeDismissed(): Boolean {
+        return prefs.getBoolean(KEY_PRACTICE_NUDGE_DISMISSED, false)
+    }
+
+    fun dismissPracticeNudge() {
+        prefs.edit()
+            .putBoolean(KEY_PRACTICE_NUDGE_DISMISSED, true)
+            .apply()
     }
 
     fun markWifCopied(key: DogecoinWalletKey): DogecoinWifCopyState {
@@ -238,9 +248,7 @@ class DogecoinWalletRepository(context: Context) {
     fun loadRpcConfig(): DogecoinRpcConfig {
         val network = loadSelectedNetwork()
         return DogecoinRpcConfig(
-            url = prefs.getString(rpcUrlKey(network), network.defaultRpcUrl)
-                ?.takeIf { it.isNotBlank() }
-                ?: network.defaultRpcUrl,
+            url = prefs.getString(rpcUrlKey(network), "") ?: "",
             username = prefs.getString(rpcUsernameKey(network), "") ?: "",
             password = prefs.getString(rpcPasswordKey(network), "") ?: "",
             walletName = prefs.getString(rpcWalletNameKey(network), "") ?: ""
@@ -308,6 +316,7 @@ class DogecoinWalletRepository(context: Context) {
         const val KEY_LEGACY_RPC_URL = "rpc_url"
         const val KEY_LEGACY_RPC_USERNAME = "rpc_username"
         const val KEY_LEGACY_RPC_PASSWORD = "rpc_password"
+        const val KEY_PRACTICE_NUDGE_DISMISSED = "practice_nudge_dismissed"
 
         fun privateKeyKey(network: DogecoinNetwork): String = "${network.id}_private_key_hex"
         fun compressedKey(network: DogecoinNetwork): String = "${network.id}_compressed"
@@ -328,4 +337,9 @@ class DogecoinWalletRepository(context: Context) {
     private fun legacyTestnetString(network: DogecoinNetwork, key: String): String? {
         return if (network == DogecoinNetwork.TESTNET) prefs.getString(key, null) else null
     }
+}
+
+internal fun dogecoinNetworkForStoredSelection(id: String?): DogecoinNetwork {
+    if (id.isNullOrBlank()) return DogecoinNetwork.TESTNET
+    return DogecoinNetwork.fromId(id)
 }

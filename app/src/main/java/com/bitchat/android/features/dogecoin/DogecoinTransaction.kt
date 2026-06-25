@@ -344,6 +344,57 @@ object DogecoinTransactionBuilder {
         )
     }
 
+    fun estimateFeeForSelection(
+        wallet: DogecoinWalletKey,
+        utxos: List<DogecoinUtxo>,
+        sendAmountKoinu: Long,
+        network: DogecoinNetwork = wallet.network,
+        feePerKbKoinu: Long = DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU,
+        minimumOutputKoinu: Long = DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+    ): Long {
+        require(wallet.network == network) {
+            "Wallet key belongs to Dogecoin ${wallet.network.displayName}, not ${network.displayName}"
+        }
+        require(DogecoinAddress.isValidP2pkhAddress(wallet.address, network)) {
+            "Wallet address is not a Dogecoin ${network.displayName} P2PKH address"
+        }
+        require(feePerKbKoinu >= DogecoinProtocol.MIN_TX_FEE_KOINU) {
+            "Fee rate must be at least ${DogecoinAmount.formatKoinu(DogecoinProtocol.MIN_TX_FEE_KOINU)} DOGE/kB"
+        }
+
+        val effectiveMinimumOutputKoinu = dogecoinEffectiveStandardOutputKoinu(minimumOutputKoinu)
+        require(sendAmountKoinu >= effectiveMinimumOutputKoinu) {
+            "Dogecoin output amount must be at least " +
+                "${DogecoinAmount.formatKoinu(effectiveMinimumOutputKoinu)} DOGE"
+        }
+        val spendPlan = selectInputs(
+            wallet = wallet,
+            utxos = utxos,
+            sendAmountKoinu = sendAmountKoinu,
+            network = network,
+            feePerKbKoinu = feePerKbKoinu,
+            minimumOutputKoinu = effectiveMinimumOutputKoinu
+        )
+        return spendPlan.feeKoinu
+    }
+
+    fun estimateFeeForSelection(
+        wallet: DogecoinWalletKey,
+        inputCount: Int,
+        outputCount: Int,
+        feePerKbKoinu: Long = DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+    ): Long {
+        require(feePerKbKoinu >= DogecoinProtocol.MIN_TX_FEE_KOINU) {
+            "Fee rate must be at least ${DogecoinAmount.formatKoinu(DogecoinProtocol.MIN_TX_FEE_KOINU)} DOGE/kB"
+        }
+        return estimateFeeKoinu(
+            inputCount = inputCount,
+            outputCount = outputCount,
+            feePerKbKoinu = feePerKbKoinu,
+            inputSizeBytes = estimatedP2pkhInputSize(wallet)
+        )
+    }
+
     private fun selectInputs(
         wallet: DogecoinWalletKey,
         utxos: List<DogecoinUtxo>,

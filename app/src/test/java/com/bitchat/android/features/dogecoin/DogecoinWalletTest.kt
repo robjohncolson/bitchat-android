@@ -722,7 +722,17 @@ class DogecoinWalletTest {
     }
 
     @Test
-    fun `rpc config defaults blank url to selected dogecoin network endpoint`() {
+    fun `stored network selection defaults first run to testnet while fromId fallback stays mainnet`() {
+        assertEquals(DogecoinNetwork.MAINNET, DogecoinNetwork.DEFAULT)
+        assertEquals(DogecoinNetwork.MAINNET, DogecoinNetwork.fromId(null))
+        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection(null))
+        assertEquals(DogecoinNetwork.TESTNET, dogecoinNetworkForStoredSelection(""))
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("mainnet"))
+        assertEquals(DogecoinNetwork.MAINNET, dogecoinNetworkForStoredSelection("unknown"))
+    }
+
+    @Test
+    fun `rpc config keeps blank url until user enters a reachable node`() {
         val mainnetConfig = DogecoinRpcConfig(
             url = "  ",
             username = " dogeuser ",
@@ -731,11 +741,13 @@ class DogecoinWalletTest {
         ).normalized(DogecoinNetwork.MAINNET)
         val testnetConfig = DogecoinRpcConfig(url = "").normalized(DogecoinNetwork.TESTNET)
 
-        assertEquals(DogecoinNetwork.MAINNET.defaultRpcUrl, mainnetConfig.url)
+        assertEquals("", mainnetConfig.url)
         assertEquals("dogeuser", mainnetConfig.username)
         assertEquals("secret", mainnetConfig.password)
         assertEquals("main wallet", mainnetConfig.walletName)
-        assertEquals(DogecoinNetwork.TESTNET.defaultRpcUrl, testnetConfig.url)
+        assertEquals("", testnetConfig.url)
+        assertEquals("http://10.0.2.2:22555", DogecoinNetwork.MAINNET.emulatorRpcUrl)
+        assertEquals("http://10.0.2.2:44555", DogecoinNetwork.TESTNET.emulatorRpcUrl)
     }
 
     @Test
@@ -787,7 +799,7 @@ class DogecoinWalletTest {
 
     @Test
     fun `rpc config validates real node endpoints before use`() {
-        assertTrue(DogecoinRpcConfig(url = "").hasValidUrl(DogecoinNetwork.MAINNET))
+        assertFalse(DogecoinRpcConfig(url = "").hasValidUrl(DogecoinNetwork.MAINNET))
         assertTrue(DogecoinRpcConfig(url = " http://10.0.2.2:22555 ").hasValidUrl(DogecoinNetwork.MAINNET))
         assertTrue(DogecoinRpcConfig(url = " http://192.168.1.44:22555 ").hasValidUrl(DogecoinNetwork.MAINNET))
         assertTrue(DogecoinRpcConfig(url = "http://172.16.4.2:22555").hasValidUrl(DogecoinNetwork.MAINNET))
@@ -1317,6 +1329,50 @@ class DogecoinWalletTest {
         assertEquals(feeRateKoinu, transaction.feePerKbKoinu)
         assertEquals(22_700_000L, transaction.feeKoinu)
         assertEquals(777_300_000L, transaction.changeKoinu)
+    }
+
+    @Test
+    fun `transaction builder estimates fee for selected inputs without signing`() {
+        val wallet = DogecoinKeyGenerator.fromPrivateKeyHex(
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        )
+        val utxo = DogecoinUtxo(
+            txid = "121702030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            vout = 1,
+            amountKoinu = 10L * DogecoinProtocol.KOINU_PER_DOGE,
+            scriptPubKeyHex = DogecoinHex.encode(
+                DogecoinAddress.p2pkhScript(wallet.address, DogecoinNetwork.MAINNET)
+            ),
+            confirmations = 6
+        )
+        val feeRateKoinu = DogecoinProtocol.KOINU_PER_DOGE
+
+        val estimatedFee = DogecoinTransactionBuilder.estimateFeeForSelection(
+            wallet = wallet,
+            utxos = listOf(utxo),
+            sendAmountKoinu = 2L * DogecoinProtocol.KOINU_PER_DOGE,
+            feePerKbKoinu = feeRateKoinu
+        )
+        val transaction = DogecoinTransactionBuilder.createSignedTransaction(
+            wallet = wallet,
+            utxos = listOf(utxo),
+            recipientAddress = DogecoinKeyGenerator.fromPrivateKeyHex(
+                "0000000000000000000000000000000000000000000000000000000000000002"
+            ).address,
+            amount = "2",
+            feePerKbKoinu = feeRateKoinu
+        )
+
+        assertEquals(transaction.feeKoinu, estimatedFee)
+        assertEquals(
+            22_700_000L,
+            DogecoinTransactionBuilder.estimateFeeForSelection(
+                wallet = wallet,
+                inputCount = 1,
+                outputCount = 2,
+                feePerKbKoinu = feeRateKoinu
+            )
+        )
     }
 
     @Test
