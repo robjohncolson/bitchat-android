@@ -70,10 +70,17 @@ Dogecoin Core runs locally; the testnet node is **fully synced**:
 ```
 
 - Config (do NOT print the rpcpassword): `C:\Users\rober\AppData\Roaming\Dogecoin\dogecoin.conf`
-  (`server=1`, `rpcbind=127.0.0.1`, `rpcallowip=127.0.0.1`). For an emulator/LAN device to reach it,
-  set `rpcbind=0.0.0.0` + `rpcallowip=10.0.2.2` (emulator) or the PC LAN IP (physical), then restart.
-- Funded node-owned testnet address: `nceDCkWAP9tSktE5TJ5X6LVmD2r3HwiAXN` (~90k spendable + ~1.6M maturing
-  TESTDOGE). `dumpprivkey` it for the harness WIF.
+  (`server=1`, `rpcbind=127.0.0.1`, `rpcallowip=127.0.0.1`, plus `rpcuser`/`rpcpassword`). For an
+  emulator/LAN device to reach it, set `rpcbind=0.0.0.0` + `rpcallowip=10.0.2.2` (emulator) or the PC LAN
+  IP (physical), then restart.
+  **CURRENT STATE: the node is running LAN-open via *ephemeral CLI flags*, NOT the conf** — it was launched
+  `dogecoin-qt -testnet -rpcbind=10.0.0.24 -rpcbind=127.0.0.1 -rpcallowip=10.0.0.0/24 -rpcallowip=127.0.0.1`
+  (currently listening on both `127.0.0.1:44555` and `10.0.0.24:44555`). A plain `dogecoin-qt -testnet`
+  restart REVERTS to localhost-only, so re-launch with those flags (or edit the conf) before a phone re-test.
+  It can take several minutes to warm up after a restart (block-index check + any unclean-shutdown rewind).
+- Funded node-owned testnet address: `nceDCkWAP9tSktE5TJ5X6LVmD2r3HwiAXN` — **~1.72M spendable TESTDOGE
+  across 166 UTXOs** (2026-06-25; the old maturing coinbase has matured; ~100 spent in the round-trip test).
+  `dumpprivkey` it for the harness WIF. Its WIF is already imported into the Pixel's testnet wallet.
 - **Coinbase maturity is 240 blocks** (empirically verified — NOT 100). Faucets are dead; get test coins
   by CPU-mining: `minerd -a scrypt -o http://127.0.0.1:44555 -O <user>:<pass> --coinbase-addr=<addr> -t 12`
   (pooler cpuminer, github.com/pooler/cpuminer releases). The node's own `generatetoaddress` is too slow
