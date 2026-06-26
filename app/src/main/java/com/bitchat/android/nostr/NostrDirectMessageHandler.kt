@@ -107,6 +107,30 @@ class NostrDirectMessageHandler(
         }
     }
 
+    /**
+     * Process a [FAVORITED]/[UNFAVORITED] text DM received over Nostr (off-mesh), mirroring the mesh path so
+     * mutual favorites can be established while out of BLE range. The sender's Noise key is resolved from
+     * their Nostr pubkey via the existing favorite (favoriting earlier over mesh exchanged the Noise key);
+     * if it can't be resolved (npub-only, no prior relationship) we cannot key the relationship and skip.
+     */
+    private fun handleNostrFavoriteNotification(content: String, senderPubkey: String, senderNickname: String) {
+        try {
+            val isFavorite = content.startsWith("[FAVORITED]")
+            val npub = content.substringAfter(":", "").trim().takeIf { it.startsWith("npub1") }
+            val fav = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+            val noiseKey = fav.findNoiseKey(senderPubkey)
+            if (noiseKey != null) {
+                fav.updatePeerFavoritedUs(noiseKey, isFavorite)
+                if (npub != null) fav.updateNostrPublicKey(noiseKey, npub)
+                Log.d(TAG, "Processed Nostr ${if (isFavorite) "[FAVORITED]" else "[UNFAVORITED]"} from $senderNickname → theyFavoritedUs=$isFavorite")
+            } else {
+                Log.d(TAG, "Nostr ${if (isFavorite) "[FAVORITED]" else "[UNFAVORITED]"} from $senderNickname but no Noise key resolves from their pubkey — cannot record")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Nostr favorite-notification handling failed: ${e.message}")
+        }
+    }
+
     private suspend fun processNoisePayload(
         payload: NoisePayload,
         convKey: String,
@@ -118,6 +142,15 @@ class NostrDirectMessageHandler(
         when (payload.type) {
             NoisePayloadType.PRIVATE_MESSAGE -> {
                 val pm = PrivateMessagePacket.decode(payload.data) ?: return
+                // [FAVORITED]/[UNFAVORITED] arrive as text DMs. The mesh path intercepts them
+                // (MessageHandler.handleFavoriteNotificationFromMesh) and records theyFavoritedUs, but the
+                // Nostr path historically fell through and showed them as chat — so favoriting while OFF-MESH
+                // never made the pair mutual, which silently broke the Nostr off-mesh broadcast (helper gate
+                // is mutual-favorites-only). Process it here too, then stop (do NOT render as a message).
+                if (pm.content.startsWith("[FAVORITED]") || pm.content.startsWith("[UNFAVORITED]")) {
+                    handleNostrFavoriteNotification(pm.content, senderPubkey, senderNickname)
+                    return
+                }
                 val existingMessages = state.getPrivateChatsValue()[convKey] ?: emptyList()
                 if (existingMessages.any { it.id == pm.messageID }) return
 

@@ -122,6 +122,104 @@ class ChatViewModel(
             }
         )
     }
+
+    /**
+     * Debug-only adb console host. Registered in [init] when BuildConfig.DEBUG and released in [onCleared].
+     * Drive it from a host machine:
+     *   adb shell am broadcast -n com.bitchat.droid.debug/com.bitchat.android.debug.DebugCommandReceiver --es cmd "candidates"
+     * Output lands in logcat under tag "DbgConsole". Money-path commands (broadcast-test) honor the
+     * selected network's existing guards and use a dummy tx that helpers reject — they exercise dispatch only.
+     */
+    private val debugConsoleHost = object : com.bitchat.android.debug.DebugConsole.Host {
+        override fun handle(cmd: String, args: List<String>): String = when (cmd) {
+            "help" -> "cmds: help | myid | favorites | candidates | cansend <noiseHex> | forcemutual <noiseHexPrefix> [0|1] | sendfav <noiseHexPrefix> [0|1] | broadcast-test | nostr | tor"
+            "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
+            "favorites" -> {
+                val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
+                buildString {
+                    appendLine("favorites count=${all.size}")
+                    all.forEach { r ->
+                        val nk = r.peerNoisePublicKey.joinToString("") { "%02x".format(it) }
+                        appendLine("  noise=$nk nick='${r.peerNickname}' fav=${r.isFavorite} theyFav=${r.theyFavoritedUs} mutual=${r.isMutual} npub=${r.peerNostrPublicKey ?: "null"}")
+                    }
+                }
+            }
+            "candidates" -> {
+                val net = currentDogecoinNetwork()
+                val list = listBroadcastHelperCandidates(net)
+                buildString {
+                    appendLine("candidates net=${net.id} count=${list.size}")
+                    list.forEachIndexed { i, c -> appendLine("  [$i] ${c.take(20)} len=${c.length}") }
+                }
+            }
+            "cansend" -> {
+                val hex = args.firstOrNull()
+                if (hex == null) "usage: cansend <noiseHex>" else {
+                    val fav = runCatching {
+                        val bytes = hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(bytes)
+                    }.getOrNull()
+                    "cansend hex=${hex.take(16)} len=${hex.length} favFound=${fav != null} mutual=${fav?.isMutual} npubPresent=${fav?.peerNostrPublicKey != null}"
+                }
+            }
+            "forcemutual" -> {
+                // Debug-only: directly set theyFavoritedUs (matched by Noise-key prefix) WITHOUT the wire path,
+                // e.g. to reset a relationship to non-mutual before testing the real [FAVORITED] propagation.
+                val prefix = args.firstOrNull()?.lowercase()
+                val flag = args.getOrNull(1)?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: true
+                if (prefix == null) "usage: forcemutual <noiseHexPrefix> [0|1]" else {
+                    val svc = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                    val rel = svc.debugAllRelationships().firstOrNull {
+                        it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }.startsWith(prefix)
+                    }
+                    if (rel == null) "forcemutual: no relationship matching '$prefix'" else {
+                        svc.updatePeerFavoritedUs(rel.peerNoisePublicKey, flag)
+                        val after = svc.getFavoriteStatus(rel.peerNoisePublicKey)
+                        "forcemutual set theyFav=$flag for '${rel.peerNickname}'; now mutual=${after?.isMutual}"
+                    }
+                }
+            }
+            "sendfav" -> {
+                // Debug-only: send a REAL [FAVORITED]/[UNFAVORITED] to a stored peer (matched by Noise-key
+                // prefix) over the live wire (mesh if connected, else Nostr) — exercises the actual
+                // favorite-notification propagation + receive path under test.
+                val prefix = args.firstOrNull()?.lowercase()
+                val flag = args.getOrNull(1)?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: true
+                if (prefix == null) "usage: sendfav <noiseHexPrefix> [0|1]" else {
+                    val svc = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                    val rel = svc.debugAllRelationships().firstOrNull {
+                        it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }.startsWith(prefix)
+                    }
+                    if (rel == null) "sendfav: no relationship matching '$prefix'" else {
+                        val noiseHex = rel.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
+                        com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
+                            .sendFavoriteNotification(noiseHex, flag)
+                        "sendfav ${if (flag) "[FAVORITED]" else "[UNFAVORITED]"} -> '${rel.peerNickname}' ${noiseHex.take(16)} (mesh if connected, else Nostr)"
+                    }
+                }
+            }
+            "broadcast-test" -> {
+                val net = currentDogecoinNetwork()
+                viewModelScope.launch {
+                    android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "broadcast-test start net=${net.id} (dummy tx; helpers reject — exercises dispatch only)")
+                    val outcome = runCatching {
+                        paymentBroadcastCoordinator.broadcast("00".repeat(120), "11".repeat(32), net)
+                    }.fold({ it.toString() }, { "EX ${it.message}" })
+                    android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "broadcast-test outcome=$outcome")
+                }
+                "broadcast-test launched on net=${net.id} (watch DbgConsole)"
+            }
+            "nostr" -> {
+                val relays = com.bitchat.android.nostr.NostrRelayManager.shared.relays.value
+                "nostr " + relays.joinToString(" ") { "${it.url.substringAfter("://")}=${if (it.isConnected) "UP" else "down"}" }
+            }
+            "tor" -> {
+                val s = com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value
+                "tor mode=${s.mode} running=${s.running} bootstrap=${s.bootstrapPercent}% state=${s.state}"
+            }
+            else -> "unknown cmd '$cmd' (try: help)"
+        }
+    }
     private val _peerBroadcastState =
         kotlinx.coroutines.flow.MutableStateFlow<com.bitchat.android.features.dogecoin.PeerBroadcastUiState>(
             com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Idle
@@ -289,6 +387,8 @@ class ChatViewModel(
         // result with no in-flight broadcast is harmlessly ignored by the coordinator's replay-0 flow.
         // Cleared in onCleared so the singleton does not retain a dead ViewModel.
         com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.setSink(broadcastResultSink)
+        // Debug-only adb console (see DebugConsole). No-op in release; receiver only exists in debug builds.
+        if (com.bitchat.android.BuildConfig.DEBUG) com.bitchat.android.debug.DebugConsole.setHost(debugConsoleHost)
         // Hydrate UI state from process-wide AppStateStore to survive Activity recreation
         viewModelScope.launch {
             try { com.bitchat.android.services.AppStateStore.peers.collect { peers ->
@@ -413,6 +513,7 @@ class ChatViewModel(
         // 3b.1: release the broadcast-result sink so the process-wide router does not retain this dead
         // ViewModel. Compare-and-clear so a newer ViewModel that already re-registered is not clobbered.
         com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.clearSinkIfCurrent(broadcastResultSink)
+        com.bitchat.android.debug.DebugConsole.clearHostIfCurrent(debugConsoleHost)
         // Note: Mesh service lifecycle is now managed by MainActivity
     }
     

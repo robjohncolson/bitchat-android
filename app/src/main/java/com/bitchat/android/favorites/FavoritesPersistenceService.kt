@@ -236,20 +236,33 @@ class FavoritesPersistenceService private constructor(private val context: Conte
         val keyHex = noisePublicKey.joinToString("") { "%02x".format(it) }
         val existing = favorites[keyHex]
 
-        if (existing != null) {
-            val updated = existing.copy(
-                theyFavoritedUs = theyFavoritedUs,
-                lastUpdated = Date()
-            )
-            favorites[keyHex] = updated
-            saveFavorites()
-            notifyChanged(keyHex)
+        // Create-if-absent: an inbound [FAVORITED] can arrive BEFORE we've favorited the peer back. The old
+        // code only updated an existing record, so that signal was silently lost and the pair never became
+        // mutual once we did favorite back. Record it now (isFavorite=false → not yet mutual, so this can
+        // never make a non-favorite a broadcast helper) so it survives arrival-order.
+        val updated = existing?.copy(
+            theyFavoritedUs = theyFavoritedUs,
+            lastUpdated = Date()
+        ) ?: FavoriteRelationship(
+            peerNoisePublicKey = noisePublicKey,
+            peerNostrPublicKey = null,
+            peerNickname = "",
+            isFavorite = false,
+            theyFavoritedUs = theyFavoritedUs,
+            favoritedAt = Date(),
+            lastUpdated = Date()
+        )
+        favorites[keyHex] = updated
+        saveFavorites()
+        notifyChanged(keyHex)
 
-            Log.d(TAG, "Updated peer favorited us for ${keyHex.take(16)}...: $theyFavoritedUs")
-        }
+        Log.d(TAG, "Updated peer favorited us for ${keyHex.take(16)}...: $theyFavoritedUs (created=${existing == null})")
     }
 
     fun getMutualFavorites(): List<FavoriteRelationship> = favorites.values.filter { it.isMutual }
+
+    /** Debug-only: snapshot of ALL stored relationships (mutual or not) for the adb console. */
+    fun debugAllRelationships(): List<FavoriteRelationship> = favorites.values.toList()
     fun getOurFavorites(): List<FavoriteRelationship> = favorites.values.filter { it.isFavorite }
 
     fun clearAllFavorites() {
