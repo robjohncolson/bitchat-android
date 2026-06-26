@@ -5,6 +5,7 @@ import android.util.Log
 import com.bitchat.android.identity.SecureIdentityStateManager
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import java.security.MessageDigest
 import java.util.*
 
 /**
@@ -79,6 +80,29 @@ class FavoritesPersistenceService private constructor(private val context: Conte
                 }
             }
         }
+
+        /**
+         * Peer fingerprint = lowercase hex of SHA-256(Noise static public key). The 16-hex mesh peerID is
+         * this fingerprint's prefix (matches NoiseEncryptionService's `calculateFingerprint(key).take(16)`).
+         */
+        internal fun fingerprintHex(noisePublicKey: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(noisePublicKey).joinToString("") { "%02x".format(it) }
+
+        /**
+         * Pure peerID -> favorite resolution (extracted for unit testing without an Android Context).
+         * Tries a direct hit on the Noise-key-hex map key (a full 64-hex Noise key), then treats [peerID]
+         * as a fingerprint or fingerprint prefix and matches it against each relationship's derived
+         * fingerprint. Returns null for a blank peerID rather than matching the first entry.
+         */
+        internal fun matchFavoriteByPeerID(
+            favorites: Map<String, FavoriteRelationship>,
+            peerID: String
+        ): FavoriteRelationship? {
+            val pid = peerID.lowercase()
+            if (pid.isEmpty()) return null
+            favorites[pid]?.let { return it }
+            return favorites.values.firstOrNull { fingerprintHex(it.peerNoisePublicKey).startsWith(pid) }
+        }
     }
 
     private val stateManager = SecureIdentityStateManager(context)
@@ -99,15 +123,14 @@ class FavoritesPersistenceService private constructor(private val context: Conte
         return favorites[keyHex]
     }
 
-    /** Get favorite status for 16-hex peerID (by noiseHex prefix match) */
-    fun getFavoriteStatus(peerID: String): FavoriteRelationship? {
-        val pid = peerID.lowercase()
-        for ((_, relationship) in favorites) {
-            val noiseKeyHex = relationship.peerNoisePublicKey.joinToString("") { "%02x".format(it) }
-            if (noiseKeyHex.startsWith(pid)) return relationship
-        }
-        return null
-    }
+    /**
+     * Get favorite status for a peerID. The short mesh peerID is the first 16 hex chars of a peer's
+     * FINGERPRINT (SHA-256 of its Noise static key) — NOT a prefix of the Noise key itself — so we match
+     * against each relationship's derived fingerprint. A full 64-hex Noise key also resolves (direct map
+     * hit), so both call styles work. (Previously this prefix-matched the peerID against the raw Noise-key
+     * hex, which never matched a real 16-hex peerID, so mutual-favorite/Nostr-routing lookups silently failed.)
+     */
+    fun getFavoriteStatus(peerID: String): FavoriteRelationship? = matchFavoriteByPeerID(favorites, peerID)
 
     /** Update Nostr public key for a peer (indexed by Noise key) */
     fun updateNostrPublicKey(noisePublicKey: ByteArray, nostrPubkey: String) {
