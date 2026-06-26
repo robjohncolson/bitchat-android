@@ -224,6 +224,43 @@ class DogecoinWalletRepository(context: Context) {
             .apply()
     }
 
+    /**
+     * Sender-side opt-in (Milestone 3b.1, default OFF, per-network): when a single helper CLAIMS a peer
+     * broadcast, may this device independently confirm the txid against a public block explorer? Default
+     * off because the poll reveals to a third party that this device is interested in the txid.
+     */
+    fun loadOnChainCorroborationEnabled(network: DogecoinNetwork): Boolean {
+        return prefs.getBoolean(onChainCorroborationKey(network), false)
+    }
+
+    fun saveOnChainCorroborationEnabled(network: DogecoinNetwork, enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(onChainCorroborationKey(network), enabled)
+            .apply()
+    }
+
+    /**
+     * Explorer URL template (must contain `{txid}`) used for on-chain corroboration. Mainnet falls back to
+     * the built-in Blockchair endpoint when unset; other networks default to none (feature off until the
+     * user supplies a compatible explorer, since public testnet explorers are scarce).
+     */
+    fun loadExplorerUrlTemplate(network: DogecoinNetwork): String? {
+        val stored = prefs.getString(explorerUrlKey(network), null)?.trim()?.takeIf { it.isNotBlank() }
+        if (stored != null) return stored
+        return if (network == DogecoinNetwork.MAINNET) {
+            ExplorerTxConfirmationChecker.DEFAULT_MAINNET_URL_TEMPLATE
+        } else {
+            null
+        }
+    }
+
+    fun saveExplorerUrlTemplate(network: DogecoinNetwork, template: String?) {
+        val cleaned = template?.trim().orEmpty()
+        prefs.edit().apply {
+            if (cleaned.isBlank()) remove(explorerUrlKey(network)) else putString(explorerUrlKey(network), cleaned)
+        }.apply()
+    }
+
     fun loadSelectedNetwork(): DogecoinNetwork {
         val hasExistingWallet = prefs.contains(privateKeyKey(DogecoinNetwork.MAINNET)) ||
             prefs.contains(privateKeyKey(DogecoinNetwork.TESTNET)) ||
@@ -460,6 +497,8 @@ class DogecoinWalletRepository(context: Context) {
         fun wifCopyAddressKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_address"
         fun wifCopyAtKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_at"
         fun addressBookKey(network: DogecoinNetwork): String = "${network.id}_address_book"
+        fun onChainCorroborationKey(network: DogecoinNetwork): String = "${network.id}_onchain_corroboration_enabled"
+        fun explorerUrlKey(network: DogecoinNetwork): String = "${network.id}_explorer_url_template"
     }
 
     private fun loadIsCompressed(network: DogecoinNetwork): Boolean {

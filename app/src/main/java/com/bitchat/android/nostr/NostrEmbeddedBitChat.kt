@@ -2,6 +2,7 @@ package com.bitchat.android.nostr
 
 import android.util.Base64
 import android.util.Log
+import com.bitchat.android.model.NoisePayload
 import com.bitchat.android.model.PrivateMessagePacket
 import com.bitchat.android.model.NoisePayloadType
 import com.bitchat.android.protocol.BitchatPacket
@@ -169,6 +170,46 @@ object NostrEmbeddedBitChat {
         }
     }
     
+    /**
+     * Build a `bitchat1:` base64url-encoded BitChat packet carrying an arbitrary [NoisePayload]
+     * (`[type][data]`) for Nostr DMs. Used by the broadcast-over-mesh Nostr fallback (Milestone 3b.1)
+     * to gift-wrap a PAYMENT_BROADCAST_REQUEST (0x30) or PAYMENT_BROADCAST_RESULT (0x31).
+     *
+     * [recipientPeerID] is optional and purely cosmetic for these payloads: Nostr gift-wrap delivery is
+     * keyed by the recipient pubkey passed to [NostrProtocol.createPrivateMessage], and the inbound
+     * [NostrDirectMessageHandler] routes by the gift-wrap SENDER pubkey — neither consults the embedded
+     * recipient id. The HELPER reply path passes null (it only knows the requester by their Nostr pubkey).
+     */
+    fun encodeNoisePayloadForNostr(
+        type: NoisePayloadType,
+        data: ByteArray,
+        senderPeerID: String,
+        recipientPeerID: String? = null
+    ): String? {
+        try {
+            val payload = NoisePayload(type, data).encode()
+
+            val recipientIDHex = recipientPeerID?.takeIf { it.isNotBlank() }?.let { normalizeRecipientPeerID(it) }
+
+            val packet = BitchatPacket(
+                version = 1u,
+                type = MessageType.NOISE_ENCRYPTED.value,
+                senderID = hexStringToByteArray(senderPeerID),
+                recipientID = recipientIDHex?.let { hexStringToByteArray(it) },
+                timestamp = System.currentTimeMillis().toULong(),
+                payload = payload,
+                signature = null,
+                ttl = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+            )
+
+            val binaryData = packet.toBinaryData() ?: return null
+            return "bitchat1:" + base64URLEncode(binaryData)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encode NoisePayload (type=${type.name}) for Nostr: ${e.message}")
+            return null
+        }
+    }
+
     /**
      * Normalize recipient peer ID (matches iOS implementation)
      */

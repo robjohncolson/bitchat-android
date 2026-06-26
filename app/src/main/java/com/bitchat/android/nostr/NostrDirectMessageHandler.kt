@@ -191,11 +191,58 @@ class NostrDirectMessageHandler(
             }
             NoisePayloadType.VERIFY_CHALLENGE,
             NoisePayloadType.VERIFY_RESPONSE -> Unit // Ignore verification payloads in Nostr direct messages
-            NoisePayloadType.PAYMENT_BROADCAST_REQUEST,
+            NoisePayloadType.PAYMENT_BROADCAST_REQUEST -> {
+                // 3b.1 Nostr fallback (HELPER side): an off-mesh sender relayed a signed tx for us to
+                // broadcast. The global Nostr transport is favorites-keyed by nature (a sender needs our
+                // npub, exchanged via favoriting), so serve ONLY mutual favorites and DROP everyone else
+                // SILENTLY. Replying to / doing work for an arbitrary party would leak our helper config
+                // and online status and allow un-rate-limited reply + favorites-scan amplification over the
+                // open Nostr network (the decline gates run before the rate-limit gate). handleRequest then
+                // applies its full gate stack (per-network opt-in, network match, rate limits, txid check);
+                // it holds no keys and never broadcasts a tx that fails its gates.
+                val fromNoiseKey = runCatching {
+                    com.bitchat.android.favorites.FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
+                }.getOrNull()
+                val mutualFavorite = fromNoiseKey != null && runCatching {
+                    com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                        .getFavoriteStatus(fromNoiseKey)?.isMutual == true
+                }.getOrDefault(false)
+                if (!mutualFavorite) {
+                    Log.d(TAG, "Dropping Nostr broadcast REQUEST from non-mutual-favorite $convKey")
+                } else {
+                    Log.d(TAG, "💸 Payment broadcast REQUEST via Nostr from $convKey")
+                    val fromNoiseKeyHex = fromNoiseKey!!.joinToString("") { "%02x".format(it) }
+                    val helper = com.bitchat.android.features.dogecoin.BroadcastHelperService.getInstance(application)
+                    val resultBytes = helper.handleRequest(
+                        fromPeerID = convKey,
+                        fromNoiseKeyHex = fromNoiseKeyHex,
+                        requestPayload = payload.data,
+                        nowMs = System.currentTimeMillis()
+                    )
+                    if (resultBytes != null) {
+                        NostrTransport.getInstance(application)
+                            .sendPaymentBroadcastResultToPubkey(resultBytes, senderPubkey, recipientIdentity)
+                    }
+                }
+            }
             NoisePayloadType.PAYMENT_BROADCAST_RESULT -> {
-                // TODO(Task 10 - Nostr fallback): route broadcast-over-mesh payloads received via Nostr
-                // to the PaymentBroadcastCoordinator / BroadcastHelperService. Mesh is the MVP transport.
-                Log.d(TAG, "💸 Payment broadcast payload via Nostr from $convKey (Nostr fallback pending)")
+                // 3b.1 Nostr fallback (SENDER side): a helper returned a broadcast result over Nostr.
+                // Canonicalize the corroboration source id to the helper's STABLE Noise key (resolved from
+                // their Nostr pubkey via favorites) and DROP anything that doesn't resolve to a known
+                // favorite. This is the money-safety crux: a free-to-mint Nostr keypair never resolves, so a
+                // single helper cannot mint identities to fake the two-helper Confirmed; and because the
+                // mesh path also keys by Noise key, one physical helper is one identity across transports.
+                val helperNoiseKeyHex = runCatching {
+                    com.bitchat.android.favorites.FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
+                        ?.joinToString("") { "%02x".format(it) }
+                }.getOrNull()
+                if (helperNoiseKeyHex == null) {
+                    Log.d(TAG, "Dropping Nostr broadcast RESULT from non-favorite $convKey")
+                } else {
+                    Log.d(TAG, "💸 Payment broadcast RESULT via Nostr from $convKey")
+                    com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter
+                        .deliver(helperNoiseKeyHex, payload.data)
+                }
             }
         }
     }

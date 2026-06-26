@@ -37,31 +37,36 @@ Milestones shipped on this branch (newest first):
 
 ### Not done yet / next up
 
-1. **Nostr off-mesh fallback (3b.1)** — deliberately deferred (most-severable; gift-wrap latency vs the
-   signed-tx window unvalidated). Staged as non-breaking `TODO(Task 10)` hooks in
-   `services/MessageRouter.kt` (`sendPaymentBroadcastRequest/Result` Nostr branch) and
-   `nostr/NostrDirectMessageHandler.kt` (the `0x30`/`0x31` arms).
-   **Assessment (2026-06-25): keep deferred until the latency is empirically validated.** Wiring it is a
-   non-trivial money-path change, not a one-line TODO: (a) send side — add `NostrTransport` send methods
-   that gift-wrap the `0x30`/`0x31` `NoisePayload` (mirror `sendPrivateMessage` → `NostrProtocol.createPrivateMessage`
-   → `NostrRelayManager.sendEvent`) + a reverse path so the helper can return the RESULT to the requester's
-   npub; (b) receive side — route the `NostrDirectMessageHandler` `0x30`/`0x31` arms into
-   `BroadcastHelperService` / `PaymentBroadcastCoordinator.onResult` (same delegate the mesh path uses).
-   **The real blocker is design, not plumbing:** the coordinator's budget is `MAX_ATTEMPTS*ATTEMPT_TIMEOUT_MS`
-   = **90s**, and its 3×30s fan-out/retry assumes sub-second mesh RTT. A Nostr gift-wrap round-trip
-   (sender→relay→helper→relay→sender, helper must be online+subscribed) is seconds-to-tens-of-seconds and
-   can blow the 90s budget → the fallback silently times out to `Failed`. So it likely needs a Nostr-specific
-   (single-shot, longer-budget) path, and that budget can't be tuned without measuring real relay RTT — which
-   needs live relays + two online clients (infra not available in this repo). No money-safety risk in leaving
-   it unwired (mesh is the MVP transport; an unreachable helper is just skipped).
-2. **Single-ACCEPTED corroboration (3b.1)** — ✅ **corroboration shipped (commit `88fa814`).** A lone
-   helper's ACCEPTED is now `Outcome.Claimed` (uncorroborated claim, strong "verify before settled"
-   receipt disclaimer); `Outcome.Confirmed` requires **two distinct** positive helpers (ACCEPTED w/
-   matching txid, or ALREADY_KNOWN). New `PeerBroadcastUiState.Claimed`; receipt `peerCorroborated`
-   flag picks the disclaimer. `PaymentBroadcastCoordinatorTest` (16 cases) added; adversarially reviewed
-   (5 low/med latency+test findings found & fixed, 0 money-safety bugs). **Remaining sub-part:** an
-   explorer/txid on-chain poll would also corroborate the *single*-helper case (deferred — adds an
-   external-service network call + privacy leak; the honest `Claimed` labeling covers it meanwhile).
+1. **Nostr off-mesh fallback (3b.1)** — ✅ **SHIPPED + adversarially reviewed (uncommitted working tree).**
+   The `TODO(Task 10)` hooks are now wired. Send side: `NostrTransport.sendPaymentBroadcast{Request,Result}`
+   (favorites→npub) + `sendPaymentBroadcastResultToPubkey` (helper reply to the gift-wrap sender's pubkey);
+   `NostrEmbeddedBitChat.encodeNoisePayloadForNostr` gift-wraps the `0x30`/`0x31` `NoisePayload`;
+   `MessageRouter.sendPaymentBroadcast{Request,Result}` route over Nostr when the peer is off-mesh +
+   Nostr-reachable. Receive side: `NostrDirectMessageHandler` `0x30` arm → `BroadcastHelperService.handleRequest`
+   (mutual-favorites-only over Nostr; drops others silently) → reply over Nostr; `0x31` arm →
+   `PaymentBroadcastResultRouter` (new singleton bridge) → the active ViewModel's
+   `PaymentBroadcastCoordinator.onResult`. Off-mesh mutual favorites are appended to the candidate list
+   (lower-priority than mesh). **Budget kept at the proven 90s (append tier, per the chosen "minimal & safe"
+   approach — coordinator UNCHANGED); slow relays degrade to `Claimed`/`Failed` but never a false `Confirmed`.**
+   **Money-safety crux (found by adversarial review, fixed):** the two-helper corroboration must count by a
+   helper's STABLE identity, not a transport reply id. A Nostr pubkey is free to mint, so the first cut let a
+   single helper mint identities (or reply on both transports) to fake `Confirmed`. Fix: corroboration id is
+   now the helper's **Noise static key** end-to-end — both receive paths resolve to Noise-key hex, the Nostr
+   arm DROPS anything that doesn't resolve to a known favorite, and mesh drops if unresolved (symmetric). One
+   physical helper = one identity across transports. **Still ships UNVALIDATED against live relays** (no infra
+   in-repo); the design is safe-by-construction regardless of relay RTT.
+2. **Single-ACCEPTED corroboration (3b.1)** — ✅ **corroboration shipped (commit `88fa814`); explorer poll
+   now SHIPPED too (uncommitted).** A lone helper's ACCEPTED is `Outcome.Claimed` (uncorroborated, strong
+   "verify before settled" receipt disclaimer via `peerCorroborated`); `Outcome.Confirmed` requires **two
+   distinct** positive helpers. **NEW:** opt-in/default-OFF on-chain corroboration —
+   `DogecoinTxConfirmationChecker`/`ExplorerTxConfirmationChecker` (built-in Blockchair for mainnet,
+   user-configurable `{txid}` URL per network; HTTPS-only-to-public URL policy) polled by
+   `ChatViewModel.resolveClaimedPeerBroadcast` to upgrade `Claimed→Confirmed` on a positive sighting (decided
+   before emitting so the receipt is built once). Repository prefs added; wallet-sheet toggle + URL field
+   (hidden on regtest). `parsePresence` returns `true` only on a definitive sighting. Known shared limitation:
+   the Nostr/mesh broadcast encoder is `version=1u` (64 KB payload cap) — large txs (~32 KB+) fail on BOTH
+   transports; not a regression (mesh `sendNoisePayloadToPeer` is also v1). Tests: candidate-merge (8),
+   explorer parse+URL policy (13), result-router (4), Nostr embed round-trip (2), coordinator (now 17).
 3. **iOS cross-platform pre-merge gate** — reserve `NoisePayloadType` `0x30`/`0x31` and `TLVType` `0x06`
    on the iOS client before shipping. Cannot verify from this repo; tolerant decode keeps it
    Android↔iOS-safe meanwhile.
@@ -202,7 +207,13 @@ Estimate tap coords from the dump's `bounds`, not scaled screenshots. Hard-won g
 git diff --check
 ```
 
-Last green at commit `c9b031d` (testDebugUnitTest + assembleDebug; the mutual-favorite peerID fix).
+Last green at commit `c9b031d` (testDebugUnitTest + assembleDebug; the mutual-favorite peerID fix). The
+3b.1 Nostr-fallback + explorer-corroboration work is **green in the working tree but UNCOMMITTED** (the user
+has not asked to commit): `:app:testDebugUnitTest :app:assembleDebug` BUILD SUCCESSFUL, `git diff --check`
+clean. New files: `features/dogecoin/{PaymentBroadcastResultRouter,BroadcastHelperCandidates,DogecoinTxConfirmationChecker}.kt`
++ 4 test files; edits to `nostr/{NostrEmbeddedBitChat,NostrTransport,NostrDirectMessageHandler}.kt`,
+`services/MessageRouter.kt`, `ui/ChatViewModel.kt`, `features/dogecoin/{DogecoinWalletRepository,DogecoinWalletSheet}.kt`,
+`res/values/strings.xml`.
 
 ## Constraints
 

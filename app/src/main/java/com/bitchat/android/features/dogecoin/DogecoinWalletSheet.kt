@@ -163,6 +163,13 @@ fun DogecoinWalletSheet(
     var helperEnabled by remember(selectedNetwork) { mutableStateOf(repository.loadHelperEnabled(selectedNetwork)) }
     var helperFavoritesOnly by remember { mutableStateOf(repository.loadHelperFavoritesOnly()) }
     var helperMainnetConsent by remember(selectedNetwork) { mutableStateOf(false) }
+    // 3b.1 sender-side: independent on-chain corroboration of a single-helper Claimed peer broadcast.
+    var onChainCorroborationEnabled by remember(selectedNetwork) {
+        mutableStateOf(repository.loadOnChainCorroborationEnabled(selectedNetwork))
+    }
+    var explorerUrlTemplate by remember(selectedNetwork) {
+        mutableStateOf(repository.loadExplorerUrlTemplate(selectedNetwork).orEmpty())
+    }
     var peerBroadcastAck by remember { mutableStateOf(false) }
     var savedAddresses by remember { mutableStateOf(repository.loadSavedAddresses(snapshot.key.network)) }
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
@@ -2466,6 +2473,55 @@ fun DogecoinWalletSheet(
                                     repository.saveHelperFavoritesOnly(enabled)
                                 }
                             )
+                        }
+                    }
+                }
+
+                // 3b.1: sender-side on-chain corroboration. Meaningful only where a public explorer exists
+                // (not regtest). When a single helper claims a broadcast, optionally confirm the txid via
+                // an external block explorer to upgrade the receipt from "claimed" to "confirmed".
+                if (selectedNetwork != DogecoinNetwork.REGTEST) {
+                    item(key = "corroboration") {
+                        WalletCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_corroboration_title),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Switch(
+                                    checked = onChainCorroborationEnabled,
+                                    onCheckedChange = { enabled ->
+                                        onChainCorroborationEnabled = enabled
+                                        repository.saveOnChainCorroborationEnabled(selectedNetwork, enabled)
+                                    }
+                                )
+                            }
+                            Text(
+                                text = stringResource(R.string.dogecoin_corroboration_description),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 16.sp
+                            )
+                            if (onChainCorroborationEnabled) {
+                                OutlinedTextField(
+                                    value = explorerUrlTemplate,
+                                    onValueChange = {
+                                        explorerUrlTemplate = it
+                                        repository.saveExplorerUrlTemplate(selectedNetwork, it)
+                                    },
+                                    label = { Text(stringResource(R.string.dogecoin_corroboration_url_label)) },
+                                    supportingText = {
+                                        Text(stringResource(R.string.dogecoin_corroboration_url_hint))
+                                    },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                         }
                     }
                 }

@@ -475,8 +475,106 @@ class NostrTransport(
         }
     }
     
+    // MARK: - Broadcast-over-mesh (Milestone 3b.1) Nostr fallback
+
+    /**
+     * Send a PAYMENT_BROADCAST_REQUEST (0x30) to an off-mesh mutual-favorite helper via Nostr. [to] is
+     * the helper's 64-hex Noise key or 16-hex peerID (resolved to an npub through favorites, exactly like
+     * [sendPrivateMessage]). Fire-and-forget: a no-op if the helper has no known Nostr key / no identity.
+     */
+    fun sendPaymentBroadcastRequest(payload: ByteArray, to: String) {
+        sendBroadcastNoisePayload(NoisePayloadType.PAYMENT_BROADCAST_REQUEST, payload, to)
+    }
+
+    /**
+     * Send a PAYMENT_BROADCAST_RESULT (0x31) to a peer addressed by peerID/Noise key (favorites
+     * resolution). The Nostr-fallback HELPER reply path uses [sendPaymentBroadcastResultToPubkey]
+     * instead, since a helper only learns the requester by their Nostr pubkey.
+     */
+    fun sendPaymentBroadcastResult(payload: ByteArray, to: String) {
+        sendBroadcastNoisePayload(NoisePayloadType.PAYMENT_BROADCAST_RESULT, payload, to)
+    }
+
+    private fun sendBroadcastNoisePayload(type: NoisePayloadType, payload: ByteArray, to: String) {
+        transportScope.launch {
+            try {
+                val recipientNostrPubkey = resolveNostrPublicKey(to) ?: run {
+                    Log.w(TAG, "No Nostr public key for broadcast ${type.name} to ${to.take(16)}…")
+                    return@launch
+                }
+                val senderIdentity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: run {
+                    Log.e(TAG, "No Nostr identity available for broadcast ${type.name}")
+                    return@launch
+                }
+                val recipientHex = npubToHex(recipientNostrPubkey) ?: return@launch
+                val embedded = NostrEmbeddedBitChat.encodeNoisePayloadForNostr(
+                    type = type,
+                    data = payload,
+                    senderPeerID = senderPeerID,
+                    recipientPeerID = to
+                ) ?: run {
+                    Log.e(TAG, "Failed to embed broadcast ${type.name} for Nostr")
+                    return@launch
+                }
+                val giftWraps = NostrProtocol.createPrivateMessage(embedded, recipientHex, senderIdentity)
+                giftWraps.forEach { event ->
+                    Log.d(TAG, "NostrTransport: sending broadcast ${type.name} giftWrap id=${event.id.take(16)}…")
+                    NostrRelayManager.registerPendingGiftWrap(event.id)
+                    NostrRelayManager.getInstance(context).sendEvent(event)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send broadcast ${type.name} via Nostr: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * HELPER reply path: send a PAYMENT_BROADCAST_RESULT (0x31) to a requester identified only by their
+     * Nostr pubkey (the gift-wrap sender), using [fromIdentity] (the account identity the request arrived
+     * on). Used when a broadcast request was delivered over Nostr rather than mesh.
+     */
+    fun sendPaymentBroadcastResultToPubkey(
+        payload: ByteArray,
+        recipientPubkeyHex: String,
+        fromIdentity: NostrIdentity
+    ) {
+        transportScope.launch {
+            try {
+                val embedded = NostrEmbeddedBitChat.encodeNoisePayloadForNostr(
+                    type = NoisePayloadType.PAYMENT_BROADCAST_RESULT,
+                    data = payload,
+                    senderPeerID = senderPeerID
+                ) ?: run {
+                    Log.e(TAG, "Failed to embed broadcast RESULT (reply) for Nostr")
+                    return@launch
+                }
+                val giftWraps = NostrProtocol.createPrivateMessage(embedded, recipientPubkeyHex, fromIdentity)
+                giftWraps.forEach { event ->
+                    Log.d(TAG, "NostrTransport: sending broadcast RESULT reply giftWrap id=${event.id.take(16)}…")
+                    NostrRelayManager.registerPendingGiftWrap(event.id)
+                    NostrRelayManager.getInstance(context).sendEvent(event)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send broadcast RESULT reply via Nostr: ${e.message}")
+            }
+        }
+    }
+
+    private fun npubToHex(npub: String): String? = try {
+        val (hrp, data) = Bech32.decode(npub)
+        if (hrp != "npub") {
+            Log.e(TAG, "NostrTransport: recipient key not npub (hrp=$hrp)")
+            null
+        } else {
+            data.joinToString("") { "%02x".format(it) }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "NostrTransport: failed to decode npub -> hex: $e")
+        null
+    }
+
     // MARK: - Helper Methods
-    
+
     /**
      * Resolve Nostr public key for a peer ID
      */

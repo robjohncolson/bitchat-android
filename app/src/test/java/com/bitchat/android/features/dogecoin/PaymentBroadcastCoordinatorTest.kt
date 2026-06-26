@@ -71,6 +71,22 @@ class PaymentBroadcastCoordinatorTest {
     }
 
     @Test
+    fun `one source id accepting twice counts once and stays Claimed (canonical-identity invariant)`() =
+        runTest(UnconfinedTestDispatcher()) {
+            // This is the invariant the 3b.1 fix relies on: the adapter canonicalizes every reply to the
+            // helper's stable Noise key, so a single physical helper presents ONE source id regardless of
+            // how many replies/transports/minted Nostr keys it uses. With one distinct id, two ACCEPTEDs are
+            // one corroboration -> Claimed, never Confirmed.
+            val coordinator = coordinatorWith(listOf("A")) { _, uuid, emit ->
+                emit(acceptedReply(uuid))
+                emit(acceptedReply(uuid))
+                true
+            }
+            val outcome = coordinator.broadcast(rawHex, txid, network)
+            assertTrue("expected Claimed, was $outcome", outcome is PaymentBroadcastCoordinator.Outcome.Claimed)
+        }
+
+    @Test
     fun `two helpers accepting the same txid yields Confirmed`() = runTest(UnconfinedTestDispatcher()) {
         val coordinator = coordinatorWith(listOf("A", "B")) { _, uuid, emit ->
             emit(acceptedReply(uuid)); true

@@ -237,6 +237,10 @@
   <string name="dogecoin_helper_description">Let connected peers with no node broadcast their already-signed %1$s transactions through yours. You hold no keys and custody nothing — you can only relay. Off by default; enabled separately per network.</string>
   <string name="dogecoin_helper_favorites_only">Only help my mutual favorites</string>
   <string name="dogecoin_helper_mainnet_consent">I understand I will broadcast OTHER people\'s mainnet transactions through my node.</string>
+  <string name="dogecoin_corroboration_title">Confirm peer broadcasts on-chain</string>
+  <string name="dogecoin_corroboration_description">When a single peer says it broadcast your transaction, optionally check a public block explorer for the txid to upgrade the receipt from “claimed” to “confirmed.” Off by default: the check tells that explorer this device is interested in the transaction.</string>
+  <string name="dogecoin_corroboration_url_label">Explorer URL (use {txid})</string>
+  <string name="dogecoin_corroboration_url_hint">Mainnet defaults to Blockchair. The URL must contain {txid}; HTTPS only, except local addresses.</string>
   <string name="dogecoin_peer_broadcast_explainer">No reachable node of your own. A connected peer can broadcast this signed transaction for you.</string>
   <string name="dogecoin_peer_broadcast_ack">A peer will see and broadcast this transaction.</string>
   <string name="dogecoin_peer_broadcast_cta">Ask a peer to broadcast</string>

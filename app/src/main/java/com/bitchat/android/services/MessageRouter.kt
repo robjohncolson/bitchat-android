@@ -136,8 +136,9 @@ class MessageRouter private constructor(
             return true
         }
         if (canSendViaNostr(toPeerID)) {
-            // TODO(Task 10 - Nostr fallback): nostr.sendPaymentBroadcastRequest(payload, toPeerID); return true
-            Log.d(TAG, "Helper ${toPeerID.take(8)}… is Nostr-reachable but Nostr broadcast relay is not wired yet")
+            Log.d(TAG, "Routing payment-broadcast REQUEST via Nostr to ${toPeerID.take(8)}…")
+            nostr.sendPaymentBroadcastRequest(payload, toPeerID)
+            return true
         }
         return false
     }
@@ -153,8 +154,9 @@ class MessageRouter private constructor(
             return true
         }
         if (canSendViaNostr(toPeerID)) {
-            // TODO(Task 10 - Nostr fallback): nostr.sendPaymentBroadcastResult(payload, toPeerID); return true
-            Log.d(TAG, "Requester ${toPeerID.take(8)}… is Nostr-reachable but Nostr broadcast relay is not wired yet")
+            Log.d(TAG, "Routing payment-broadcast RESULT via Nostr to ${toPeerID.take(8)}…")
+            nostr.sendPaymentBroadcastResult(payload, toPeerID)
+            return true
         }
         return false
     }

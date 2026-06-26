@@ -57,6 +57,13 @@ class ChatViewModel(
 
     companion object {
         private const val TAG = "ChatViewModel"
+
+        // 3b.1 explorer corroboration poll for a single-helper Claimed broadcast. Bounded so the wallet UI
+        // never hangs: a few short attempts (a freshly broadcast tx may take a moment to index) within a
+        // total budget well inside the signed-tx validity window.
+        private const val EXPLORER_POLL_ATTEMPTS = 3
+        private const val EXPLORER_POLL_INTERVAL_MS = 4_000L
+        private const val EXPLORER_POLL_TOTAL_BUDGET_MS = 14_000L
     }
 
     fun sendVoiceNote(toPeerIDOrNull: String?, channelOrNull: String?, filePath: String) {
@@ -106,9 +113,12 @@ class ChatViewModel(
     private val paymentBroadcastCoordinator by lazy {
         com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator(
             listCandidateHelpers = { network -> listBroadcastHelperCandidates(network) },
-            sendRequestToPeer = { peerID, payload ->
+            sendRequestToPeer = { candidateNoiseKeyHex, payload ->
+                // candidateNoiseKeyHex is a canonical Noise key. Prefer the connected mesh peer holding it;
+                // otherwise hand MessageRouter the Noise key, which routes it over Nostr (favorites -> npub).
+                val target = resolveConnectedMeshPeerId(candidateNoiseKeyHex) ?: candidateNoiseKeyHex
                 com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
-                    .sendPaymentBroadcastRequest(payload, peerID)
+                    .sendPaymentBroadcastRequest(payload, target)
             }
         )
     }
@@ -117,6 +127,16 @@ class ChatViewModel(
             com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Idle
         )
     val peerBroadcastState: StateFlow<com.bitchat.android.features.dogecoin.PeerBroadcastUiState> = _peerBroadcastState
+    // 3b.1 Nostr fallback: stable reference so the sink can be compare-and-cleared on teardown.
+    private val broadcastResultSink: (String, ByteArray) -> Unit = { fromId, payload ->
+        paymentBroadcastCoordinator.onResult(fromId, payload)
+    }
+    // 3b.1: independent on-chain corroboration for a single-helper Claimed peer broadcast (opt-in/off).
+    private val txConfirmationChecker: com.bitchat.android.features.dogecoin.DogecoinTxConfirmationChecker by lazy {
+        com.bitchat.android.features.dogecoin.ExplorerTxConfirmationChecker(
+            urlTemplateProvider = { network -> dogecoinWalletRepository.loadExplorerUrlTemplate(network) }
+        )
+    }
     private val messageManager = MessageManager(state)
     private val channelManager = ChannelManager(state, messageManager, dataManager, viewModelScope)
 
@@ -264,6 +284,11 @@ class ChatViewModel(
     init {
         // Note: Mesh service delegate is now set by MainActivity
         loadAndInitialize()
+        // 3b.1 Nostr fallback: let the Nostr direct-message handler (built in GeohashViewModel) deliver a
+        // PAYMENT_BROADCAST_RESULT received off-mesh to this ViewModel's coordinator. Last writer wins; a
+        // result with no in-flight broadcast is harmlessly ignored by the coordinator's replay-0 flow.
+        // Cleared in onCleared so the singleton does not retain a dead ViewModel.
+        com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.setSink(broadcastResultSink)
         // Hydrate UI state from process-wide AppStateStore to survive Activity recreation
         viewModelScope.launch {
             try { com.bitchat.android.services.AppStateStore.peers.collect { peers ->
@@ -385,6 +410,9 @@ class ChatViewModel(
     
     override fun onCleared() {
         super.onCleared()
+        // 3b.1: release the broadcast-result sink so the process-wide router does not retain this dead
+        // ViewModel. Compare-and-clear so a newer ViewModel that already re-registered is not clobbered.
+        com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.clearSinkIfCurrent(broadcastResultSink)
         // Note: Mesh service lifecycle is now managed by MainActivity
     }
     
@@ -1038,7 +1066,19 @@ class ChatViewModel(
     }
 
     override fun didReceivePaymentBroadcastResult(peerID: String, payload: ByteArray, timestampMs: Long) {
-        paymentBroadcastCoordinator.onResult(peerID, payload)
+        // Canonicalize the corroboration source id to the helper's stable Noise key so mesh and the Nostr
+        // fallback share ONE identity space: a single physical helper that replies on both transports
+        // collapses to one entry and can never fake the two-helper Confirmed. DROP if the Noise key can't be
+        // resolved (rather than falling back to the 16-hex peerID, which lives in a different id space) —
+        // symmetric with the Nostr arm's drop-if-unresolved policy, so the canonical-identity invariant has
+        // no seam. A result over an established session always resolves; an unresolvable one merely doesn't
+        // corroborate (the safe direction).
+        val canonicalId = mesh.getPeerInfo(peerID)?.noisePublicKey?.joinToString("") { "%02x".format(it) }
+        if (canonicalId == null) {
+            android.util.Log.d("ChatViewModel", "Dropping payment-broadcast RESULT from unresolved peer ${peerID.take(8)}…")
+            return
+        }
+        paymentBroadcastCoordinator.onResult(canonicalId, payload)
     }
 
     /**
@@ -1062,10 +1102,41 @@ class ChatViewModel(
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Confirmed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(outcome.txid)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Claimed ->
-                    com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed(outcome.txid)
+                    resolveClaimedPeerBroadcast(outcome.txid, network)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed(outcome.reason)
             }
+        }
+    }
+
+    /**
+     * 3b.1: a single helper's uncorroborated Claimed broadcast. If on-chain corroboration is enabled for
+     * [network], independently confirm [txid] via a public block explorer; a positive sighting (mempool or
+     * block) is a second, independent witness that upgrades Claimed -> Confirmed. Bounded and best-effort:
+     * disabled, unreachable, not-found, or timed-out all leave it Claimed (the honest "verify before
+     * settled" receipt). Decided BEFORE emitting so the UI receipt is built exactly once.
+     */
+    private suspend fun resolveClaimedPeerBroadcast(
+        txid: String,
+        network: DogecoinNetwork
+    ): com.bitchat.android.features.dogecoin.PeerBroadcastUiState {
+        val enabled = runCatching {
+            dogecoinWalletRepository.loadOnChainCorroborationEnabled(network)
+        }.getOrDefault(false)
+        if (!enabled) return com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed(txid)
+
+        val seen = kotlinx.coroutines.withTimeoutOrNull(EXPLORER_POLL_TOTAL_BUDGET_MS) {
+            repeat(EXPLORER_POLL_ATTEMPTS) { attempt ->
+                val result = runCatching { txConfirmationChecker.isOnChain(txid, network) }.getOrNull()
+                if (result == true) return@withTimeoutOrNull true
+                if (attempt < EXPLORER_POLL_ATTEMPTS - 1) kotlinx.coroutines.delay(EXPLORER_POLL_INTERVAL_MS)
+            }
+            false
+        }
+        return if (seen == true) {
+            com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(txid)
+        } else {
+            com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed(txid)
         }
     }
 
@@ -1077,23 +1148,25 @@ class ChatViewModel(
     fun hasBroadcastHelperCandidate(): Boolean = listBroadcastHelperCandidates(currentDogecoinNetwork()).isNotEmpty()
 
     private fun listBroadcastHelperCandidates(network: DogecoinNetwork): List<String> {
-        // Prefer peers who advertise (signature-verified) that they will broadcast for this network;
-        // also include mutual favorites (a favorites-only helper may not have advertised). Rank
-        // advertised helpers first, then mutual favorites. Non-helpers simply reply DECLINED.
         return try {
-            state.getConnectedPeersValue()
+            // Candidates are identified by the helper's stable 64-hex Noise key (the canonical per-helper
+            // identity used for dispatch AND for counting corroborations — see mergeBroadcastHelperCandidates
+            // and resolveConnectedMeshPeerId). Mesh tier (fast path): connected, session-established peers
+            // that either advertise (signature-verified) NODE_HELPER for this network or are mutual favorites
+            // (a favorites-only helper may not have advertised). Ranked advertised-first, then mutual.
+            val meshNoiseKeysOrdered = state.getConnectedPeersValue()
                 .asSequence()
                 .filter { it != mesh.myPeerID }
                 .filter { mesh.hasEstablishedSession(it) }
                 .mapNotNull { peerID ->
                     val info = mesh.getPeerInfo(peerID) ?: return@mapNotNull null
+                    val key = info.noisePublicKey ?: return@mapNotNull null
+                    val noiseHex = key.joinToString("") { "%02x".format(it) }
                     val advertisesHelp = network.id in info.helperNetworks
-                    val mutual = info.noisePublicKey?.let { key ->
-                        runCatching {
-                            com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(key)?.isMutual == true
-                        }.getOrDefault(false)
-                    } ?: false
-                    if (advertisesHelp || mutual) Triple(peerID, advertisesHelp, mutual) else null
+                    val mutual = runCatching {
+                        com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(key)?.isMutual == true
+                    }.getOrDefault(false)
+                    if (advertisesHelp || mutual) Triple(noiseHex, advertisesHelp, mutual) else null
                 }
                 .sortedWith(
                     compareByDescending<Triple<String, Boolean, Boolean>> { it.second }
@@ -1101,7 +1174,36 @@ class ChatViewModel(
                 )
                 .map { it.first }
                 .toList()
+
+            // Nostr fallback tier (3b.1): mutual favorites with a stored Nostr key, by 64-hex Noise key.
+            // Appended AFTER all mesh candidates and de-duped against them by Noise key in
+            // mergeBroadcastHelperCandidates so one helper is dispatched on only one transport.
+            val offMeshFavoriteNoiseHex = runCatching {
+                com.bitchat.android.favorites.FavoritesPersistenceService.shared.getMutualFavorites()
+                    .asSequence()
+                    .filter { !it.peerNostrPublicKey.isNullOrBlank() }
+                    .map { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
+                    .toList()
+            }.getOrDefault(emptyList())
+
+            com.bitchat.android.features.dogecoin.mergeBroadcastHelperCandidates(meshNoiseKeysOrdered, offMeshFavoriteNoiseHex)
         } catch (_: Exception) { emptyList() }
+    }
+
+    /**
+     * Resolve a canonical 64-hex Noise key to a currently connected, session-established mesh peerID that
+     * holds that key, or null if no such mesh peer (the helper is off-mesh -> dispatch over Nostr). Used so
+     * the coordinator can address candidates by stable Noise identity while the wire send still targets the
+     * peer's live (rotating) mesh peerID.
+     */
+    private fun resolveConnectedMeshPeerId(noiseKeyHex: String): String? {
+        val want = noiseKeyHex.lowercase()
+        return runCatching {
+            state.getConnectedPeersValue().firstOrNull { peerID ->
+                mesh.hasEstablishedSession(peerID) &&
+                    mesh.getPeerInfo(peerID)?.noisePublicKey?.joinToString("") { "%02x".format(it) } == want
+            }
+        }.getOrNull()
     }
     
     override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
