@@ -129,6 +129,7 @@ fun DogecoinWalletSheet(
     onDismiss: () -> Unit,
     onShareToChat: (String) -> Unit,
     onAdvertisedAddressChanged: () -> Unit = {},
+    onHelperEnabledChanged: () -> Unit = {},
     onRequestPeerBroadcast: (DogecoinSignedTransaction) -> Unit = {},
     peerBroadcastState: PeerBroadcastUiState = PeerBroadcastUiState.Idle,
     hasHelperCandidate: Boolean = false,
@@ -2412,6 +2413,9 @@ fun DogecoinWalletSheet(
                                 onCheckedChange = { enabled ->
                                     helperEnabled = enabled
                                     repository.saveHelperEnabled(selectedNetwork, enabled)
+                                    // Re-announce immediately so peers learn the changed NODE_HELPER
+                                    // capability now, instead of waiting for the ~30s periodic announce.
+                                    onHelperEnabledChanged()
                                 }
                             )
                         }

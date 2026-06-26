@@ -591,7 +591,10 @@ private fun ChatDialogs(
                 onDogecoinWalletDismiss()
             },
             onAdvertisedAddressChanged = {
-                viewModel.reannounceDogecoinReceiveAddress()
+                viewModel.reannounceIdentity()
+            },
+            onHelperEnabledChanged = {
+                viewModel.reannounceIdentity()
             },
             onRequestPeerBroadcast = { signedTx -> viewModel.requestPeerBroadcast(signedTx) },
             peerBroadcastState = peerBroadcastState,

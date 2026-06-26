@@ -95,7 +95,37 @@ Driving Compose via adb: `uiautomator dump` works; `adb pull /sdcard/...` needs 
 wallet bottom-sheet dismisses on a downward swipe at its top — navigate with upward finger-swipes.
 
 **Two-phone test status (2026-06-25):**
-- ✅ VERIFIED on hardware: app installs + launches crash-free on both (S24 Android 16, Pixel 3 Android 12);
+- ✅ **Sender pipeline proven on Pixel-3 hardware (testnet):** with the node opened to the LAN
+  (`http://10.0.0.24:44555`), drove the whole send flow through the app UI on the Pixel 3 — switched to
+  testnet, **imported the funded WIF** (`nceDC…`, ~1.72M TESTDOGE, node-owned → balance loaded with no
+  rescan), built a 100-DOGE send to `nUW5oqZKqcLfyDAVBW1uAoigt9esediX35`, **signed on-device**, broadcast
+  through the node. Result txid `7dfb78e55888ad94088e2654ba6f60de94333376f708f483208e8ee4f845171b` matched
+  the signed txid, node-accepted (vout = 100 to recipient + 69899.98 change to `nceDC`), **mined to 2 conf**
+  in testnet block `25154995…`. So the M3b *sender* produces network-valid signed txs on real hardware.
+- ✅ **FULL mesh round-trip PROVEN two-phone (after a fix).** The "Ask a peer to broadcast" CTA was not
+  appearing because `ChatViewModel.hasBroadcastHelperCandidate()` requires `hasEstablishedSession(peer) &&
+  (peer advertises the network || mutual favorite)`, and the **advert never propagated** to the sender: the
+  helper Switch only saved the flag — unlike the working advertise-address toggle, it did **not** re-announce,
+  so a running app never re-broadcast the capability. **Fix (committed):** the helper toggle now calls a new
+  `onHelperEnabledChanged` → `ChatScreen` → `viewModel.reannounceIdentity()` (renamed from
+  `reannounceDogecoinReceiveAddress`; just `mesh.sendBroadcastAnnounce()`), plus a `PeerManager` diagnostic
+  log. After rebuild+reinstall the Pixel logged `🛰️ peer 22381df3 NODE_HELPER networks updated -> [testnet,
+  regtest]`, and with a Noise session (open a DM to establish it) the CTA rendered (it sits **below the fold**
+  in the scrollable Broadcast-confirm dialog). Tapping it fired: Pixel `📤 Sent payment broadcast request
+  (565 bytes)` → S24 `💸 Payment broadcast request received` → result back → Pixel `No connected peer accepted
+  the transaction` in ~11s (a real `NODE_NOT_READY`, the expected single-`networkactive=false`-node outcome).
+  A *successful on-chain* peer broadcast still needs a 2nd relay-up node, but the wire path is fully proven.
+- ⚠️ **DEFERRED core bug — mutual-favorite key mismatch (NOT the Dogecoin feature).** `isMutual` never resolves
+  because a peer is keyed three ways (announced noise key vs SHA-256 fingerprint vs peerID=fingerprint-prefix),
+  and `FavoritesPersistenceService.getFavoriteStatus(peerID)` prefix-matches the *noise* key against a
+  fingerprint-derived peerID (never matches). Affects DMs/Nostr too; broad blast radius. Left untouched on
+  purpose — the advert is the primary helper-discovery path. Fix as a dedicated, well-tested change.
+- ⚠️ adb-UI gotchas (cost real time): `keyevent 111` is **ESCAPE** and dismisses the Compose wallet
+  bottom-sheet (network resets to mainnet on reopen) — never use 111/BACK inside the sheet; drop the
+  keyboard by tapping a neutral label or scrolling, then re-dump for the field's new bounds. And
+  `adb shell input text` **mangles long random strings** (the 36-char rpcpassword landed wrong → node
+  logged `incorrect password attempt`); clear with MOVE_END(123)+DEL(67) and verify field length vs source.
+- ✅ VERIFIED on hardware (earlier): app installs + launches crash-free on both (S24 Android 16, Pixel 3 Android 12);
   the S24 wallet sheet + the new helper opt-in card render correctly (enable switch OFF by default,
   "Only help my mutual favorites" ON by default); the two phones form a **BLE mesh** and Ed25519-**verify**
   each other's signed announce (logcat `MessageHandler: ✅ Verified announce from <peerID>`); enabling the

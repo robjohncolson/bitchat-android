@@ -220,6 +220,7 @@ class PeerManager {
             helperNetworks = networks,
             lastSeen = System.currentTimeMillis()
         )
+        Log.d(TAG, "🛰️ peer $peerID NODE_HELPER networks updated -> $networks")
         return true
     }
 

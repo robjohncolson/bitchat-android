@@ -252,7 +252,12 @@ class ChatViewModel(
         }.getOrNull()
     }
 
-    fun reannounceDogecoinReceiveAddress() {
+    /**
+     * Re-broadcast the signed IdentityAnnouncement immediately. The announce is rebuilt from current
+     * state, so this propagates any just-changed advertised fields (Dogecoin receive address AND the
+     * NODE_HELPER broadcast-helper networks) without waiting for the ~30s periodic announce.
+     */
+    fun reannounceIdentity() {
         mesh.sendBroadcastAnnounce()
     }
 
