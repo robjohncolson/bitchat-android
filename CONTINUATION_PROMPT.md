@@ -38,9 +38,22 @@ Milestones shipped on this branch (newest first):
 ### Not done yet / next up
 
 1. **Nostr off-mesh fallback (3b.1)** — deliberately deferred (most-severable; gift-wrap latency vs the
-   10-min signed-tx window unvalidated). Staged as non-breaking `TODO(Task 10)` hooks in
+   signed-tx window unvalidated). Staged as non-breaking `TODO(Task 10)` hooks in
    `services/MessageRouter.kt` (`sendPaymentBroadcastRequest/Result` Nostr branch) and
    `nostr/NostrDirectMessageHandler.kt` (the `0x30`/`0x31` arms).
+   **Assessment (2026-06-25): keep deferred until the latency is empirically validated.** Wiring it is a
+   non-trivial money-path change, not a one-line TODO: (a) send side — add `NostrTransport` send methods
+   that gift-wrap the `0x30`/`0x31` `NoisePayload` (mirror `sendPrivateMessage` → `NostrProtocol.createPrivateMessage`
+   → `NostrRelayManager.sendEvent`) + a reverse path so the helper can return the RESULT to the requester's
+   npub; (b) receive side — route the `NostrDirectMessageHandler` `0x30`/`0x31` arms into
+   `BroadcastHelperService` / `PaymentBroadcastCoordinator.onResult` (same delegate the mesh path uses).
+   **The real blocker is design, not plumbing:** the coordinator's budget is `MAX_ATTEMPTS*ATTEMPT_TIMEOUT_MS`
+   = **90s**, and its 3×30s fan-out/retry assumes sub-second mesh RTT. A Nostr gift-wrap round-trip
+   (sender→relay→helper→relay→sender, helper must be online+subscribed) is seconds-to-tens-of-seconds and
+   can blow the 90s budget → the fallback silently times out to `Failed`. So it likely needs a Nostr-specific
+   (single-shot, longer-budget) path, and that budget can't be tuned without measuring real relay RTT — which
+   needs live relays + two online clients (infra not available in this repo). No money-safety risk in leaving
+   it unwired (mesh is the MVP transport; an unreachable helper is just skipped).
 2. **Single-ACCEPTED corroboration (3b.1)** — ✅ **corroboration shipped (commit `88fa814`).** A lone
    helper's ACCEPTED is now `Outcome.Claimed` (uncorroborated claim, strong "verify before settled"
    receipt disclaimer); `Outcome.Confirmed` requires **two distinct** positive helpers (ACCEPTED w/
@@ -53,12 +66,15 @@ Milestones shipped on this branch (newest first):
    on the iOS client before shipping. Cannot verify from this repo; tolerant decode keeps it
    Android↔iOS-safe meanwhile.
 4. **Funded mainnet broadcast** — still user-gated (irreversible real-money action via the on-device UI).
-5. **DEFERRED core bug — mutual-favorite key mismatch** (NOT the Dogecoin feature). `isMutual` never
-   resolves: a peer is keyed three ways (announced noise key vs SHA-256 fingerprint vs peerID =
-   fingerprint-prefix), and `FavoritesPersistenceService.getFavoriteStatus(peerID)` prefix-matches the
-   *noise* key against a fingerprint-derived peerID (never matches). Affects DMs/Nostr too; broad blast
-   radius. Left untouched on purpose — the helper advert is the primary discovery path. Fix as a
-   dedicated, well-tested change. The peer-broadcast feature does **not** depend on it.
+5. **Core bug — mutual-favorite key mismatch — ✅ FIXED (commit `c9b031d`).** `isMutual` never resolved on
+   the peerID path: `FavoritesPersistenceService.getFavoriteStatus(peerID: String)` prefix-matched the
+   16-hex peerID against the raw *noise-key* hex, but peerID = `SHA-256(noiseKey).take(16)` (a *fingerprint*
+   prefix), so it never matched. Now matches against the derived fingerprint (+ direct hit for a full
+   noise-key hex; blank → null). The ByteArray overload was correct and is untouched. Fixed the silent
+   breakage of Nostr DM routing to offline mutual favorites + offline fingerprint/nickname display; all 5
+   String-overload call sites verified to consume the now-resolving result defensively.
+   `FavoritesPersistenceServicePeerIdTest` (8 cases) added. Did NOT affect the Dogecoin broadcast-helper
+   path (it uses the ByteArray overload).
 6. **Successful *on-chain* peer broadcast** — the two-phone round-trip is proven, but landing a peer
    broadcast on the actual chain needs a **second relay-up node** for the helper (the one shared node was
    set `networkactive=false` to force the CTA, so it returns `NODE_NOT_READY`). The `sendrawtransaction`
@@ -146,12 +162,11 @@ Estimate tap coords from the dump's `bounds`, not scaled screenshots. Hard-won g
   (565 bytes)` → S24 `💸 Payment broadcast request received` → result back → Pixel `No connected peer accepted
   the transaction` in ~11s (a real `NODE_NOT_READY`, the expected single-`networkactive=false`-node outcome).
   A *successful on-chain* peer broadcast still needs a 2nd relay-up node, but the wire path is fully proven.
-- ⚠️ **DEFERRED core bug — mutual-favorite key mismatch (NOT the Dogecoin feature).** `isMutual` never resolves
-  because a peer is keyed three ways (announced noise key vs SHA-256 fingerprint vs peerID=fingerprint-prefix),
-  and `FavoritesPersistenceService.getFavoriteStatus(peerID)` prefix-matches the *noise* key against a
-  fingerprint-derived peerID (never matches). Affects DMs/Nostr too; broad blast radius. Left untouched on
-  purpose — the advert is the primary helper-discovery path. Fix as a dedicated, well-tested change.
-  (adb-driving gotchas now live in the "Driving Compose via adb" notes above.)
+- ✅ **FIXED core bug — mutual-favorite key mismatch (commit `c9b031d`, NOT the Dogecoin feature).**
+  `FavoritesPersistenceService.getFavoriteStatus(peerID: String)` prefix-matched the 16-hex peerID against
+  the raw *noise-key* hex, but peerID is a *fingerprint* prefix (`SHA-256(noiseKey).take(16)`) → never matched,
+  so `isMutual` never resolved on the peerID path (silently broke Nostr DM routing + offline display). Now
+  matches the derived fingerprint. See "Not done yet" #5. (adb-driving gotchas live in "Driving Compose via adb".)
 - ✅ VERIFIED on hardware (earlier): app installs + launches crash-free on both (S24 Android 16, Pixel 3 Android 12);
   the S24 wallet sheet + the new helper opt-in card render correctly (enable switch OFF by default,
   "Only help my mutual favorites" ON by default); the two phones form a **BLE mesh** and Ed25519-**verify**
@@ -187,7 +202,7 @@ Estimate tap coords from the dump's `bounds`, not scaled screenshots. Hard-won g
 git diff --check
 ```
 
-Last green at commit `88fa814` (testDebugUnitTest + assembleDebug; the 3b.1 two-helper corroboration).
+Last green at commit `c9b031d` (testDebugUnitTest + assembleDebug; the mutual-favorite peerID fix).
 
 ## Constraints
 
