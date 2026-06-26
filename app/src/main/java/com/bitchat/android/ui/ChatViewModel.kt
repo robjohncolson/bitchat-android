@@ -123,6 +123,21 @@ class ChatViewModel(
         )
     }
 
+    /** Debug-only: build + sign a REAL Dogecoin tx for the console money-path commands (suspend; lists UTXOs). */
+    private suspend fun debugBuildSignedDogeTx(
+        net: DogecoinNetwork, to: String, amount: String, feePerKbKoinu: Long
+    ): com.bitchat.android.features.dogecoin.DogecoinSignedTransaction {
+        val cfg = dogecoinWalletRepository.loadRpcConfig(net)
+        val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
+        val rpc = com.bitchat.android.features.dogecoin.DogecoinRpcClient()
+        val utxos = rpc.listUnspent(cfg, snap.key.address, net)
+        return com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
+            wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amount,
+            network = net, feePerKbKoinu = feePerKbKoinu,
+            minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+        )
+    }
+
     /**
      * Debug-only adb console host. Registered in [init] when BuildConfig.DEBUG and released in [onCleared].
      * Drive it from a host machine:
@@ -132,7 +147,10 @@ class ChatViewModel(
      */
     private val debugConsoleHost = object : com.bitchat.android.debug.DebugConsole.Host {
         override fun handle(cmd: String, args: List<String>): String = when (cmd) {
-            "help" -> "cmds: help | myid | favorites | candidates | cansend <noiseHex> | forcemutual <noiseHexPrefix> [0|1] | sendfav <noiseHexPrefix> [0|1] | broadcast-test | nostr | tor"
+            "help" -> "cmds: help myid favorites candidates cansend forcemutual sendfav broadcast-test nostr tor | " +
+                "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
+                "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
+                "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -217,6 +235,145 @@ class ChatViewModel(
                 val s = com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value
                 "tor mode=${s.mode} running=${s.running} bootstrap=${s.bootstrapPercent}% state=${s.state}"
             }
+            // ---- Dogecoin wallet (P0: drive a send / peer-broadcast from the console) ----
+            "doge-network" -> {
+                val net = DogecoinNetwork.values().firstOrNull { it.id == args.firstOrNull()?.lowercase() }
+                if (net == null) "usage: doge-network mainnet|testnet|regtest" else {
+                    dogecoinWalletRepository.saveSelectedNetwork(net)
+                    "net=${dogecoinWalletRepository.loadSelectedNetwork().id}"
+                }
+            }
+            "doge-rpc-set" -> {
+                if (args.isEmpty()) "usage: doge-rpc-set <url> [user] [pass] [walletName]" else {
+                    val net = currentDogecoinNetwork()
+                    val cfg = com.bitchat.android.features.dogecoin.DogecoinRpcConfig(
+                        url = args.getOrElse(0) { "" }, username = args.getOrElse(1) { "" },
+                        password = args.getOrElse(2) { "" }, walletName = args.getOrElse(3) { "" })
+                    dogecoinWalletRepository.saveRpcConfig(net, cfg)
+                    "saved rpc net=${net.id} url=${cfg.url} wallet=${cfg.walletName}"
+                }
+            }
+            "doge-rpc-show" -> {
+                val net = currentDogecoinNetwork()
+                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
+                viewModelScope.launch {
+                    runCatching {
+                        val s = com.bitchat.android.features.dogecoin.DogecoinRpcClient().getBlockchainStatus(cfg, net)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-rpc-show ready=${s.isReadyFor(net)} canBroadcast=${s.canBroadcastFor(net)}")
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-rpc-show node ERR ${it.message}") }
+                }
+                "net=${net.id} url=${cfg.url} user=${cfg.username} wallet=${cfg.walletName} (node status -> DbgConsole)"
+            }
+            "doge-address" -> {
+                val net = currentDogecoinNetwork()
+                "addr=${dogecoinWalletRepository.loadOrCreateWallet(net).key.address} net=${net.id}"
+            }
+            "doge-import-wif" -> {
+                val wif = args.firstOrNull()
+                val net = currentDogecoinNetwork()
+                when {
+                    wif == null -> "usage: doge-import-wif <wif>"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet key import is console-blocked"
+                    else -> runCatching {
+                        val snap = dogecoinWalletRepository.importWalletFromWif(net, wif)
+                        "imported addr=${snap.key.address} net=${net.id}"   // never logs the WIF
+                    }.getOrElse { "import ERR ${it.message}" }
+                }
+            }
+            "doge-balance" -> {
+                val net = currentDogecoinNetwork()
+                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
+                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                viewModelScope.launch {
+                    runCatching {
+                        val bal = com.bitchat.android.features.dogecoin.DogecoinRpcClient().getWalletBalance(cfg, addr, net)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-balance conf=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-balance ERR ${it.message}") }
+                }
+                "balance for ${addr.take(12)} net=${net.id} -> DbgConsole"
+            }
+            "doge-self-broadcast" -> {
+                val to = args.getOrNull(0); val amt = args.getOrNull(1)
+                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+                val net = currentDogecoinNetwork()
+                when {
+                    to == null || amt == null -> "usage: doge-self-broadcast <addr> <amountDoge> [feePerKbKoinu]"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
+                    else -> {
+                        viewModelScope.launch {
+                            runCatching {
+                                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
+                                val signed = debugBuildSignedDogeTx(net, to, amt, feeKb)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} change=${signed.changeKoinu}")
+                                val txid = com.bitchat.android.features.dogecoin.DogecoinRpcClient().sendRawTransaction(cfg, signed.rawTransactionHex, net)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast BROADCAST OK txid=$txid")
+                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast ERR ${it.message}") }
+                        }
+                        "self-broadcast launched net=${net.id} -> DbgConsole"
+                    }
+                }
+            }
+            "doge-peer-broadcast" -> {
+                val to = args.getOrNull(0); val amt = args.getOrNull(1)
+                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+                val net = currentDogecoinNetwork()
+                when {
+                    to == null || amt == null -> "usage: doge-peer-broadcast <addr> <amountDoge> [feePerKbKoinu]"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
+                    else -> {
+                        viewModelScope.launch {
+                            val signed = runCatching { debugBuildSignedDogeTx(net, to, amt, feeKb) }
+                                .getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast build ERR ${it.message}"); return@launch }
+                            android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} -> requestPeerBroadcast")
+                            requestPeerBroadcast(signed)
+                            var waited = 0
+                            while (waited < 95000) {
+                                val st = peerBroadcastState.value
+                                if (st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed ||
+                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed ||
+                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed) {
+                                    android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast TERMINAL=$st"); break
+                                }
+                                kotlinx.coroutines.delay(500); waited += 500
+                            }
+                        }
+                        "peer-broadcast launched net=${net.id} (signs real tx -> requestPeerBroadcast) -> DbgConsole"
+                    }
+                }
+            }
+            "doge-helper-enable" -> {
+                val on = args.firstOrNull()?.let { it == "1" || it.equals("true", ignoreCase = true) }
+                if (on == null) "usage: doge-helper-enable <0|1>" else {
+                    val net = currentDogecoinNetwork()
+                    dogecoinWalletRepository.saveHelperEnabled(net, on)
+                    reannounceIdentity()
+                    "helper-enable=$on net=${net.id} (re-announced)"
+                }
+            }
+            // ---- mesh / connectivity ----
+            "peers" -> {
+                val nicks = mesh.getPeerNicknames()
+                val conn = state.getConnectedPeersValue()
+                buildString {
+                    appendLine("peers connected=${conn.size}")
+                    conn.forEach { pid -> appendLine("  $pid nick='${nicks[pid] ?: "?"}' session=${mesh.hasEstablishedSession(pid)}") }
+                }
+            }
+            "reannounce" -> { reannounceIdentity(); "re-announced identity" }
+            "tor-set" -> {
+                val mode = when (args.firstOrNull()?.lowercase()) {
+                    "on" -> com.bitchat.android.net.TorMode.ON
+                    "off" -> com.bitchat.android.net.TorMode.OFF
+                    else -> null
+                }
+                if (mode == null) "usage: tor-set on|off" else {
+                    com.bitchat.android.net.TorPreferenceManager.set(getApplication(), mode)
+                    viewModelScope.launch { com.bitchat.android.net.ArtiTorManager.getInstance().applyMode(getApplication(), mode) }
+                    "tor-set=$mode (applying -> watch 'tor')"
+                }
+            }
+            "nostr-connect" -> { viewModelScope.launch { com.bitchat.android.nostr.NostrRelayManager.shared.connect() }; "nostr connect requested" }
+            "nostr-disconnect" -> { com.bitchat.android.nostr.NostrRelayManager.shared.disconnect(); "nostr disconnected" }
             else -> "unknown cmd '$cmd' (try: help)"
         }
     }
