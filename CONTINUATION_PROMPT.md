@@ -41,10 +41,14 @@ Milestones shipped on this branch (newest first):
    10-min signed-tx window unvalidated). Staged as non-breaking `TODO(Task 10)` hooks in
    `services/MessageRouter.kt` (`sendPaymentBroadcastRequest/Result` Nostr branch) and
    `nostr/NostrDirectMessageHandler.kt` (the `0x30`/`0x31` arms).
-2. **Single-ACCEPTED corroboration (3b.1)** — documented in `PaymentBroadcastCoordinator`: a lone
-   helper's ACCEPTED is its *claim*, not chain-verified by the node-less sender. Add corroboration
-   (second ACCEPTED) or an explorer/txid poll before presenting a settled receipt. No funds at risk;
-   favorites-only default limits exposure.
+2. **Single-ACCEPTED corroboration (3b.1)** — ✅ **corroboration shipped (commit `88fa814`).** A lone
+   helper's ACCEPTED is now `Outcome.Claimed` (uncorroborated claim, strong "verify before settled"
+   receipt disclaimer); `Outcome.Confirmed` requires **two distinct** positive helpers (ACCEPTED w/
+   matching txid, or ALREADY_KNOWN). New `PeerBroadcastUiState.Claimed`; receipt `peerCorroborated`
+   flag picks the disclaimer. `PaymentBroadcastCoordinatorTest` (16 cases) added; adversarially reviewed
+   (5 low/med latency+test findings found & fixed, 0 money-safety bugs). **Remaining sub-part:** an
+   explorer/txid on-chain poll would also corroborate the *single*-helper case (deferred — adds an
+   external-service network call + privacy leak; the honest `Claimed` labeling covers it meanwhile).
 3. **iOS cross-platform pre-merge gate** — reserve `NoisePayloadType` `0x30`/`0x31` and `TLVType` `0x06`
    on the iOS client before shipping. Cannot verify from this repo; tolerant decode keeps it
    Android↔iOS-safe meanwhile.
@@ -183,7 +187,7 @@ Estimate tap coords from the dump's `bounds`, not scaled screenshots. Hard-won g
 git diff --check
 ```
 
-Last green at commit `6fa3a52` (testDebugUnitTest + assembleDebug; the helper re-announce fix).
+Last green at commit `88fa814` (testDebugUnitTest + assembleDebug; the 3b.1 two-helper corroboration).
 
 ## Constraints
 
