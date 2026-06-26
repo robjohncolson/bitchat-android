@@ -2301,7 +2301,13 @@ fun DogecoinWalletSheet(
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 if (receipt.viaPeer) {
                                     Text(
-                                        text = stringResource(R.string.dogecoin_send_receipt_via_peer),
+                                        text = stringResource(
+                                            if (receipt.peerCorroborated) {
+                                                R.string.dogecoin_send_receipt_via_peer_corroborated
+                                            } else {
+                                                R.string.dogecoin_send_receipt_via_peer
+                                            }
+                                        ),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                         lineHeight = 16.sp
@@ -2640,16 +2646,22 @@ fun DogecoinWalletSheet(
             reviewNowMillis = System.currentTimeMillis()
         }
 
-        // Peer-broadcast (3b): when a helper confirms, populate the same receipt the local path uses.
+        // Peer-broadcast (3b): when a helper confirms/claims, populate the same receipt the local path uses.
         LaunchedEffect(peerBroadcastState) {
-            val confirmed = peerBroadcastState as? PeerBroadcastUiState.Confirmed ?: return@LaunchedEffect
+            // A Confirmed is corroborated by >=2 helpers; a Claimed is a single helper's uncorroborated
+            // claim (3b.1) — both populate a receipt, but the via-peer disclaimer is stronger for a claim.
+            val (resultTxid, corroborated) = when (val pb = peerBroadcastState) {
+                is PeerBroadcastUiState.Confirmed -> pb.txid to true
+                is PeerBroadcastUiState.Claimed -> pb.txid to false
+                else -> return@LaunchedEffect
+            }
             if (selectedNetwork != transaction.network) return@LaunchedEffect
-            // Money-safety: only consume a Confirmed that belongs to THIS transaction. Otherwise a stale
+            // Money-safety: only consume a result that belongs to THIS transaction. Otherwise a stale
             // peer-broadcast result (dialog dismissed while pending, then a different tx opened on the
             // same network) could pair another tx's txid with this tx's amounts and mark it "sent".
-            if (confirmed.txid != transaction.txid) return@LaunchedEffect
+            if (resultTxid != transaction.txid) return@LaunchedEffect
             sentReceipt = DogecoinBroadcastReceipt(
-                txid = confirmed.txid,
+                txid = resultTxid,
                 network = transaction.network,
                 recipientAddress = transaction.recipientAddress,
                 sendAmountKoinu = transaction.sendAmountKoinu,
@@ -2658,7 +2670,8 @@ fun DogecoinWalletSheet(
                 changeAddress = transaction.changeAddress,
                 requestLabel = transaction.requestLabel,
                 requestMessage = transaction.requestMessage,
-                viaPeer = true
+                viaPeer = true,
+                peerCorroborated = corroborated
             )
             sendAmount = ""
             pendingTransaction = null
@@ -3976,7 +3989,10 @@ private data class DogecoinBroadcastReceipt(
     val changeAddress: String?,
     val requestLabel: String?,
     val requestMessage: String?,
-    val viaPeer: Boolean = false   // 3b: broadcast was relayed by a peer's node, not this device's node
+    val viaPeer: Boolean = false,  // 3b: broadcast was relayed by a peer's node, not this device's node
+    // 3b.1: when relayed by a peer, whether two or more helpers independently corroborated it. A single
+    // helper's claim (false) is not chain-verified by this device and gets the stronger "verify" warning.
+    val peerCorroborated: Boolean = false
 ) {
     val totalDebitKoinu: Long
         get() = dogecoinSaturatingAddKoinu(sendAmountKoinu, feeKoinu)

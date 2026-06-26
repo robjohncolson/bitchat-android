@@ -1043,7 +1043,7 @@ class ChatViewModel(
 
     /**
      * Sender side: relay a locally-signed transaction to opt-in helper peers when the local node
-     * cannot broadcast. Drives [peerBroadcastState] (Pending -> Confirmed/Failed) for the wallet UI.
+     * cannot broadcast. Drives [peerBroadcastState] (Pending -> Confirmed/Claimed/Failed) for the wallet UI.
      */
     fun requestPeerBroadcast(signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction) {
         _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Pending
@@ -1061,6 +1061,8 @@ class ChatViewModel(
             _peerBroadcastState.value = when (outcome) {
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Confirmed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(outcome.txid)
+                is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Claimed ->
+                    com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed(outcome.txid)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed(outcome.reason)
             }
