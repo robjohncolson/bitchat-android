@@ -131,10 +131,13 @@ class DogecoinWalletRepository(context: Context) {
             ?: if (network == DogecoinNetwork.TESTNET) prefs.getString(KEY_LEGACY_PRIVATE_KEY_HEX, null) else null
         val key = if (existingPrivateKeyHex.isNullOrBlank()) {
             DogecoinKeyGenerator.generate(network).also { generated ->
+                val generatedAtMillis = System.currentTimeMillis()
                 prefs.edit()
                     .putString(privateKeyPrefsKey, generated.privateKeyHex)
                     .putBoolean(compressedKey(network), generated.isCompressed)
-                    .putString(createdAtKey(network), System.currentTimeMillis().toString())
+                    .putString(createdAtKey(network), generatedAtMillis.toString())
+                    // Freshly generated: no funds can predate this, so the SPV scan can start here (fast).
+                    .putLong(spvBirthdateKey(network), generatedAtMillis)
                     .apply()
             }
         } else {
@@ -218,6 +221,26 @@ class DogecoinWalletRepository(context: Context) {
 
     fun saveBackend(network: DogecoinNetwork, backend: DogecoinBackend) {
         prefs.edit().putString(backendKey(network), backend.name).apply()
+    }
+
+    // ---- SPV scan-start birthdate: a per-network conservative LOWER BOUND on when this key's funds could
+    // first exist, used as the bitcoinj key creation time + CheckpointManager scan start. Persisted
+    // SEPARATELY from created_at, which importWalletFromWif OVERWRITES with import time — feeding an
+    // import/backup timestamp to CheckpointManager could fast-forward PAST funding txs (bitcoinj scans
+    // forward only -> silent money-missing). This value only ever DECREASES ([lowerSpvBirthdateMillis]),
+    // so a later backup/re-import can never push it forward. See docs/dogecoin-spv-integration-plan.md. ----
+    fun loadSpvBirthdateMillis(network: DogecoinNetwork): Long {
+        val stored = prefs.getLong(spvBirthdateKey(network), 0L)
+        return if (stored > 0L) stored else DEFAULT_SPV_IMPORT_BIRTHDATE_MILLIS
+    }
+
+    /** Lower the persisted SPV birthdate to [candidateMillis] if it is earlier; never raise it. */
+    fun lowerSpvBirthdateMillis(network: DogecoinNetwork, candidateMillis: Long) {
+        if (candidateMillis <= 0L) return
+        val stored = prefs.getLong(spvBirthdateKey(network), Long.MAX_VALUE)
+        if (candidateMillis < stored) {
+            prefs.edit().putLong(spvBirthdateKey(network), candidateMillis).apply()
+        }
     }
 
     // ---- Explorer-backed ("no-node") mode config: which public-explorer provider + optional API key ----
@@ -394,6 +417,7 @@ class DogecoinWalletRepository(context: Context) {
             .remove(privateKeyKey(network))
             .remove(compressedKey(network))
             .remove(createdAtKey(network))
+            .remove(spvBirthdateKey(network))
             .remove(wifCopyAddressKey(network))
             .remove(wifCopyAtKey(network))
             .remove(addressBookKey(network))
@@ -414,6 +438,10 @@ class DogecoinWalletRepository(context: Context) {
             .putString(wifCopyAddressKey(network), key.address)
             .putLong(wifCopyAtKey(network), backedUpAtMillis)
             .apply()
+        // Imported key: its true birthdate is unknown and created_at is now import time, so the SPV scan
+        // must start from the conservative floor — NEVER the import timestamp (that could skip funding txs).
+        // lower-only, so this can't push an earlier (e.g. user-supplied) birthdate forward.
+        lowerSpvBirthdateMillis(network, DEFAULT_SPV_IMPORT_BIRTHDATE_MILLIS)
         return DogecoinWalletSnapshot(
             key = key,
             rpcConfig = loadRpcConfig(network)
@@ -511,9 +539,16 @@ class DogecoinWalletRepository(context: Context) {
         const val KEY_LEGACY_RPC_PASSWORD = "rpc_password"
         const val KEY_PRACTICE_NUDGE_DISMISSED = "practice_nudge_dismissed"
 
+        // Conservative default SPV scan-start for an IMPORTED key whose true birthdate is unknown (its
+        // created_at is import time, not when the key was funded). 2021-01-01 UTC — a balance between not
+        // missing realistic funds and keeping the header scan tractable. TUNABLE / open question: for an
+        // older imported key the user may need to supply an earlier birthdate (see the integration plan).
+        const val DEFAULT_SPV_IMPORT_BIRTHDATE_MILLIS = 1609459200000L
+
         fun privateKeyKey(network: DogecoinNetwork): String = "${network.id}_private_key_hex"
         fun helperEnabledKey(network: DogecoinNetwork): String = "${network.id}_helper_enabled"
         fun backendKey(network: DogecoinNetwork): String = "${network.id}_backend"
+        fun spvBirthdateKey(network: DogecoinNetwork): String = "${network.id}_spv_birthdate"
         fun compressedKey(network: DogecoinNetwork): String = "${network.id}_compressed"
         fun createdAtKey(network: DogecoinNetwork): String = "${network.id}_created_at"
         fun rpcUrlKey(network: DogecoinNetwork): String = "${network.id}_rpc_url"

@@ -143,6 +143,36 @@ class DogecoinWalletRepositoryTest {
     }
 
     @Test
+    fun `spv birthdate is generation time for a generated key and the conservative floor for an import`() {
+        val conservativeFloorMillis = 1609459200000L // 2021-01-01 UTC, the import default
+        val repository = DogecoinWalletRepository(context)
+        val beforeGenMillis = System.currentTimeMillis()
+
+        // Generated key: SPV birthdate ~= now (no funds can predate generation), NOT the old floor.
+        repository.loadOrCreateWallet(DogecoinNetwork.TESTNET)
+        val genBirthdate = repository.loadSpvBirthdateMillis(DogecoinNetwork.TESTNET)
+        assertTrue("generated key birthdate should be ~now", genBirthdate >= beforeGenMillis - 5000)
+
+        // Import a WIF over it: birthdate must drop to the conservative floor — NEVER the import time,
+        // which would let CheckpointManager fast-forward past funding txs (silent money-missing).
+        val wif = DogecoinKeyGenerator.fromPrivateKeyHex(
+            "0000000000000000000000000000000000000000000000000000000000000a17",
+            DogecoinNetwork.TESTNET
+        ).wif
+        repository.importWalletFromWif(DogecoinNetwork.TESTNET, wif)
+        val importBirthdate = repository.loadSpvBirthdateMillis(DogecoinNetwork.TESTNET)
+        assertEquals("import must use the conservative floor, not import time", conservativeFloorMillis, importBirthdate)
+        assertTrue("import birthdate must be earlier than now", importBirthdate < beforeGenMillis)
+
+        // lower-only: a later candidate (e.g. a re-import/backup) must never push the birthdate forward.
+        repository.lowerSpvBirthdateMillis(DogecoinNetwork.TESTNET, System.currentTimeMillis())
+        assertEquals(conservativeFloorMillis, repository.loadSpvBirthdateMillis(DogecoinNetwork.TESTNET))
+        // ...but an EARLIER candidate does lower it.
+        repository.lowerSpvBirthdateMillis(DogecoinNetwork.TESTNET, conservativeFloorMillis - 1000L)
+        assertEquals(conservativeFloorMillis - 1000L, repository.loadSpvBirthdateMillis(DogecoinNetwork.TESTNET))
+    }
+
+    @Test
     fun `loadWalletIfPresent is read-only and never generates a key`() {
         val repository = DogecoinWalletRepository(context)
 
