@@ -90,6 +90,13 @@ android {
     }
 }
 
+configurations.all {
+    // bitcoinj 0.14.7 needs guava 18, which BUNDLES com.google.common.util.concurrent.ListenableFuture;
+    // some Google libs also pull the standalone com.google.guava:listenablefuture, which defines the SAME
+    // class -> duplicate-class build error. guava 18 already provides it, so drop the standalone artifact.
+    exclude(group = "com.google.guava", module = "listenablefuture")
+}
+
 dependencies {
     // Core Android dependencies
     implementation(libs.androidx.core.ktx)
@@ -122,15 +129,14 @@ dependencies {
     // Cryptography
     implementation(libs.bundles.cryptography)
 
-    // Dogecoin SPV backend (bitcoinj + libdohj). See docs/dogecoin-spv-integration-plan.md.
-    // Exclude bitcoinj's bundled org.bouncycastle:bcprov-jdk15to18 so the app's AUDITED
-    // bcprov-jdk15on:1.70 remains the SOLE org.bouncycastle provider — the money-path signer
-    // (DogecoinTransactionBuilder) must stay byte-identical (enforced by DogecoinSignerRegressionTest).
-    implementation(libs.libdohj) {
-        exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
-    }
-    // bitcoinj exposes Guava (ListenableFuture via waitForPeers/startAsync) in its public API but
-    // declares it `implementation`; pin it on our classpath.
+    // Dogecoin SPV backend (bitcoinj 0.14.7 + libdohj). See docs/dogecoin-spv-integration-plan.md.
+    // 0.14.7 uses com.madgag.spongycastle (org.spongycastle.*), a SEPARATE namespace from the app's
+    // org.bouncycastle:1.70 — so bitcoinj's crypto is isolated and the money-path signer
+    // (DogecoinTransactionBuilder, on the app's AUDITED bcprov 1.70) is untouched; bitcoinj NEVER signs
+    // (Option B). The DogecoinSignerRegressionTest still guards the app signer byte-for-byte.
+    implementation(libs.libdohj)
+    // bitcoinj exposes Guava (ListenableFuture via waitForPeers) in its public API but declares it
+    // `implementation`; pin the version bitcoinj 0.14.7 uses.
     implementation(libs.guava)
     
     // JSON

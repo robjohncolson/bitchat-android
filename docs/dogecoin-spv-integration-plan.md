@@ -16,8 +16,20 @@ to the Dogecoin P2P network, keys on-device, free.
 
 The feasibility spike settled the make-or-break questions (see `tools/spv-spike/README.md`):
 
-- **libdohj is obtainable** — `com.github.dogecoin:libdohj:v0.15.9` resolves from JitPack and pulls
-  `org.bitcoinj:bitcoinj-core:0.15.9` (+ `guava:28.2-android`) from Maven Central; compiles on JDK 17.
+- **libdohj is obtainable** — resolves from JitPack and pulls bitcoinj-core + guava transitively;
+  compiles on JDK 17. **The feasibility spike used `libdohj:v0.15.9` (bitcoinj 0.15.9), but the app
+  integration uses `libdohj:0.14.7` (bitcoinj 0.14.7) — see the dependency revision below.**
+
+> **Dependency revision (Phase 0/2): use bitcoinj `0.14.7`, not `0.15.9`.** bitcoinj 0.15+ uses
+> `org.bouncycastle` and calls `ECPoint.isCompressed()`, which BouncyCastle **removed in 1.70** — the
+> exact bcprov the app uses for `EncryptionService`/`NostrCrypto`/`NoiseEncryptionService`. Two
+> `org.bouncycastle` jars can't coexist (duplicate classes), and downgrading the app's bcprov would be a
+> whole-app security change. **bitcoinj `0.14.7` instead uses `com.madgag.spongycastle` (`org.spongycastle.*`)
+> — a SEPARATE namespace — so the app keeps bcprov 1.70 untouched and bitcoinj's crypto is isolated and
+> never signs (Option B).** Confirmed: spike synced 199,710 testnet headers through AuxPoW on 0.14.7 with
+> zero `VerificationException`; key-import gate + signing regression + debug/release builds all green.
+> (Pin `guava:18.0` to match bitcoinj 0.14.7, and `exclude com.google.guava:listenablefuture` — guava 18
+> bundles `ListenableFuture`, conflicting with the standalone artifact some Google libs pull.)
 - **The engine is correct** — synced **275,487 testnet headers, zero `VerificationException`**, through
   the testnet DigiShield + AuxPoW transitions (libdohj issue #15 rejected nothing real).
 - **The no-node path works** — connected to local *and* public testnet peers; Dogecoin Core still
@@ -54,9 +66,11 @@ gates — and would widen key custody into bitcoinj's keychain. Rejected.
 ### Phase 0 — Dependency wiring + signer regression gate (no feature code)
 - Add JitPack to `settings.gradle.kts` `dependencyResolutionManagement.repositories` (NOT
   `app/build.gradle.kts` — `FAIL_ON_PROJECT_REPOS` rejects project repos).
-- Add `libdohj v0.15.9` + an explicit `guava:28.2-android` pin to `gradle/libs.versions.toml`.
-- **Resolve the BouncyCastle split (hard gate):** bitcoinj 0.15.9 drags its own bcprov; force/exclude
-  it to the app's audited **bcprov 1.70** so `DogecoinKeyGenerator`/`DogecoinTransactionBuilder` keep
+- Add `libdohj 0.14.7` + a `guava:18.0` pin to `gradle/libs.versions.toml`; `exclude
+  com.google.guava:listenablefuture` in `app/build.gradle.kts` (guava-18 bundles `ListenableFuture`).
+- **BouncyCastle (resolved via 0.14.7, not a force):** because 0.14.7 uses spongycastle (`org.spongycastle.*`),
+  the app's audited **bcprov 1.70** stays the sole `org.bouncycastle` untouched so
+  `DogecoinKeyGenerator`/`DogecoinTransactionBuilder` keep
   the exact provider. This is the *one* place SPV could silently reach the money path under Option B.
 - **Signing regression test** (`DogecoinSignerRegressionTest.kt`): assert `createSignedTransaction`
   produces **identical signed hex + txid** vs fixed baseline fixtures on the new classpath. Must pass

@@ -89,7 +89,8 @@ public class SpvSpike {
         System.out.println("[spike] connected peers=" + peerGroup.numConnectedPeers());
         for (Peer p : peerGroup.getConnectedPeers()) {
             VersionMessage vm = p.getPeerVersionMessage();
-            boolean nodeBloom = (vm.localServices & VersionMessage.NODE_BLOOM) == VersionMessage.NODE_BLOOM;
+            long NODE_BLOOM = 1L << 2; // BIP111 service bit (not a named constant in bitcoinj 0.14.7)
+            boolean nodeBloom = (vm.localServices & NODE_BLOOM) == NODE_BLOOM;
             System.out.println("    peer " + p.getAddress()
                     + " proto=" + vm.clientVersion
                     + " subver=" + vm.subVer

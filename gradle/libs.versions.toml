@@ -25,11 +25,14 @@ accompanist-permissions = "0.37.3"
 bouncycastle = "1.70"
 tink-android = "1.10.0"
 
-# Dogecoin SPV (bitcoinj + libdohj). libdohj v0.15.9 transitively pulls bitcoinj-core 0.15.9;
-# guava is pinned explicitly because bitcoinj exposes it in its public API but declares it
-# `implementation`. See docs/dogecoin-spv-integration-plan.md.
-libdohj = "v0.15.9"
-guava = "28.2-android"
+# Dogecoin SPV (bitcoinj + libdohj). libdohj 0.14.7 transitively pulls bitcoinj-core 0.14.7, which uses
+# com.madgag.spongycastle (org.spongycastle.*) — a SEPARATE namespace from the app's
+# org.bouncycastle:1.70, so there is NO bcprov conflict (bitcoinj 0.15+ switched to org.bouncycastle and
+# needs ECPoint.isCompressed(), removed in bcprov 1.70). guava is pinned to the version bitcoinj 0.14.7
+# itself uses because bitcoinj exposes it in its API but declares it `implementation`.
+# See docs/dogecoin-spv-integration-plan.md.
+libdohj = "0.14.7"
+guava = "18.0"
 
 # JSON
 gson = "2.13.1"

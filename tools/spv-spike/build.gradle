@@ -8,18 +8,20 @@ repositories {
 }
 
 java {
-    // bitcoinj 0.15.9 predates modern JDKs; compile + run on JDK 17 regardless of the dev's JAVA_HOME.
+    // bitcoinj predates modern JDKs; compile + run on JDK 17 regardless of the dev's JAVA_HOME.
     toolchain { languageVersion = JavaLanguageVersion.of(17) }
 }
 
 dependencies {
-    // The make-or-break dependency: libdohj (Dogecoin params for bitcoinj) from JitPack.
-    // This transitively pulls org.bitcoinj:bitcoinj-core:0.15.9 from Maven Central.
-    implementation 'com.github.dogecoin:libdohj:v0.15.9'
-    // bitcoinj exposes Guava types (ListenableFuture via waitForPeers/startAsync) in its public API
-    // but declares Guava as `implementation`, so it isn't on our compile classpath. Pin the exact
-    // version bitcoinj 0.15.9 resolves (28.2-android) so we compile against the same Guava it runs on.
-    implementation 'com.google.guava:guava:28.2-android'
+    // libdohj 0.14.7 (Dogecoin params for bitcoinj) from JitPack. This line pulls
+    // org.bitcoinj:bitcoinj-core:0.14.7, which uses com.madgag.spongycastle (org.spongycastle.*) — a
+    // SEPARATE namespace from the app's org.bouncycastle:1.70, so there is no bcprov version conflict.
+    // (bitcoinj 0.15+ switched to org.bouncycastle and needs ECPoint.isCompressed(), removed in bcprov
+    // 1.70 — hence 0.14.7. See docs/dogecoin-spv-integration-plan.md.)
+    implementation 'com.github.dogecoin:libdohj:0.14.7'
+    // bitcoinj exposes Guava types (ListenableFuture via waitForPeers) in its public API but declares
+    // Guava `implementation`; pin the version bitcoinj 0.14.7 itself resolves so we compile + run on it.
+    implementation 'com.google.guava:guava:18.0'
     // So we actually SEE bitcoinj/libdohj log lines (VerificationException, retarget, peer handshake).
     implementation 'org.slf4j:slf4j-simple:1.7.36'
 }
@@ -30,6 +32,10 @@ application {
         '--add-opens=java.base/java.lang=ALL-UNNAMED',
         '--add-opens=java.base/java.util=ALL-UNNAMED',
         '--add-opens=java.base/java.nio=ALL-UNNAMED',
+        // bitcoinj 0.14.7 SPVBlockStore.close() uses WindowsMMapHack (reflects into sun.nio.ch.DirectBuffer)
+        // to unmap the file on Windows; JDK 17 blocks that without this open. Windows-desktop-spike ONLY —
+        // WindowsMMapHack never runs on Android (Linux), so the app is unaffected.
+        '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
         '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn',
         '-Dorg.slf4j.simpleLogger.logFile=System.out',
         '-Dorg.slf4j.simpleLogger.showThreadName=false',
