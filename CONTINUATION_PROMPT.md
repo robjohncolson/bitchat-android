@@ -15,8 +15,8 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `3256ea2`** (`:app:testDebugUnitTest` +
-`:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `b34ca4c`** (SPV Phase 3 testnet broadcast;
+`:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 > **CRITICAL: the app now uses bitcoinj/libdohj `0.14.7` (spongycastle), NOT `0.15.9`.** bitcoinj 0.15+
 > uses `org.bouncycastle` + `ECPoint.isCompressed()`, REMOVED in bcprov 1.70 — the bcprov the app uses for
@@ -25,8 +25,27 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
 > is isolated + never signs (Option B). The feasibility-spike numbers below were on 0.15.9; re-validated on
 > 0.14.7 (199,710 testnet headers through AuxPoW, zero errors).
 
-### The SPV arc so far (newest first) — feasibility PROVEN; Phases 0, 1, AND 2 (read-only SPV) SHIPPED
+### The SPV arc so far (newest first) — feasibility PROVEN; Phases 0, 1, 2 (read-only) AND 3 (testnet broadcast) SHIPPED
 
+- **`b34ca4c` — SPV Phase 3: testnet broadcast, FAIL-CLOSED, mainnet hard-blocked (Option B).** New
+  `DogecoinSpvBroadcastVerifier` is the fail-closed chokepoint: decode the normalized signed hex → reject
+  segwit framing via the BIP144 marker byte (`Transaction.hasWitnesses()` is ABSENT on the libdohj 0.14.7
+  fork) → require `tx.bitcoinSerialize().contentEquals(inputBytes)` byte-for-byte (default serializer is
+  NON-retaining ⇒ a real re-encode; a test pins `isParseRetainMode==false`) → require `tx.hashAsString ==
+  DogecoinTransactionBuilder.transactionId(normalized)`; ANY divergence THROWS, so bitcoinj's own bytes never
+  reach the wire. `DogecoinSpvService.broadcast()` is verifier-gated + peer-floor-pinned
+  (`minBroadcastConnections=MIN_PEERS`), calls `wallet.receivePending` to reserve inputs (anti same-input
+  double-spend), and awaits `future.get(25s)` OFF-lock — a TIMEOUT returns Claimed, NOT failure (thin testnet
+  peers rarely re-announce). `confirmationDepth()` drives Claimed→Confirmed from our own synced chain.
+  `DogecoinSpvDataSource.broadcast()` un-thrown + `withContext(Dispatchers.IO)` (the ANR fix — the sheet scope
+  is Main). Sheet: SPV send routes via the datasource; `mempoolAcceptance(checked=false)` (note:
+  `requiresPolicyUnavailableAcknowledgement()` is MAINNET-gated, so no ack pops on testnet — intended);
+  Claimed-only receipt; send+confirm buttons enabled for a synced TESTNET SPV backend (route-mirroring);
+  mesh-helper CTA gated OFF under SPV; clearnet/testnet-only disclosure. Console `doge-spv-broadcast`
+  (node-free, mainnet-refused, IO). Tests: verifier fail-closed matrix + datasource mainnet refusal; signer
+  canaries green. **MAINNET blocked at 4 layers.** Built by a plan workflow (`8720092` =
+  `docs/dogecoin-spv-phase3-plan.md`) + a 5-lens adversarial code review (15 confirmed findings, none
+  critical/high; fixes folded in). **NOT yet run on-device — next is the testnet soak.**
 - **`3256ea2` — SPV Phase 2 (FINAL): wallet-sheet backend selector + sync status — PHASE 2 COMPLETE.**
   `DogecoinSpvService` is now a process SINGLETON (`getInstance`) so the sheet + console share ONE
   PeerGroup/SPVBlockStore. `DogecoinWalletSheet`: a "Connection" selector under Advanced settings ("My node"
@@ -109,28 +128,35 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
   Doubles as a re-validation tool + basis for a `BuildCheckpoints` generator. Run: `gradlew -p
   tools/spv-spike run` (default local node, or `-PnoLocalhost`, or `-PpeerHost=127.0.0.1`).
 
-### NEXT STEP: PHASE 3 — SPV broadcast (testnet first, fail-closed)
+### NEXT STEP: on-device TESTNET SOAK of Phase 3 broadcast → then Phase 4 (mainnet)
 
-PHASE 2 (read-only SPV) is COMPLETE — the built-in light client reads balance/UTXOs and is selectable in
-the wallet sheet. Phase 3 lets SPV BROADCAST (build+sign STILL on-device via `DogecoinTransactionBuilder`
-— Option B). Per docs/dogecoin-spv-integration-plan.md:
-- Un-throw `DogecoinSpvDataSource.broadcast()`: run `DogecoinRawTxValidator.normalize`, deserialize the
-  signed hex into a libdohj `Transaction`, RE-SERIALIZE + recompute the txid via
-  `DogecoinTransactionBuilder.transactionId`, and **FAIL CLOSED** on ANY byte/txid divergence — never hand
-  bitcoinj's bytes to `peerGroup.broadcastTransaction` unless they exactly match bitchat's signed hex.
-- Pin bitcoinj `minBroadcastConnections` to the peer floor (single-peer `TransactionBroadcast` can deadlock).
-- In the sheet send path, when backend==SPV set `mempoolAcceptance.checked=false` so the EXISTING
-  `requiresPolicyUnavailableAcknowledgement` gate fires (no testmempoolaccept for SPV); RE-ENABLE the send
-  button for SPV (currently gated off at `DogecoinWalletSheet` send `Button` + the inline note). Render the
-  peerGroup return as **Claimed ONLY** — require the existing Claimed→Confirmed on-chain corroboration before
-  a success receipt. MAINNET stays hard-blocked in Phase 3.
-- OPEN (need user/live test): exact `spv_birthdate` floor for OLD imported keys; whether bitcoinj `PeerGroup`
-  can route over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; Arti couldn't build Nostr
-  circuits) → default clearnet-with-disclosure, NEVER silent fallback.
-- Optional Phase-2 on-device confirmation first: build+install → pick "Built-in" in the sheet (Advanced →
-  Connection), or `doge-network testnet`→`doge-address`→fund via node→`doge-spv-start`→`doge-spv-balance`.
+PHASE 3 (testnet broadcast, fail-closed) is SHIPPED + COMMITTED (`b34ca4c`) and build+tests green, but
+**NOT yet run on-device.** The next step is a real testnet broadcast soak (needs a funded testnet key).
 
-Later: Phase 4 (mainnet, user-gated, after a read-only soak). MAINNET is the last switch, per-spend authorized.
+**Console soak (no second node needed):**
+```powershell
+adb -s <serial> shell "am broadcast -n com.bitchat.droid.debug/com.bitchat.android.debug.DebugCommandReceiver --es cmd 'doge-network testnet'"
+# fund the wallet's testnet address (doge-address) from the local node, then:
+# doge-spv-start  -> poll doge-spv-status until synced=true peers>=4
+# doge-spv-balance / doge-spv-unspents -> confirm the funded UTXOs are visible
+# doge-spv-broadcast <addr> <amtDoge> [feePerKbKoinu] -> expect "CLAIMED txid=..."
+# poll doge-spv-status (depth) and/or an explorer until the tx is mined (depth>=1)
+adb -s <serial> logcat -d -s DbgConsole
+```
+**Sheet soak:** Connection -> "Built-in" on testnet; send disabled while syncing (hint shown), enabled once
+synced; run a send; receipt shows "Claimed — …not yet confirmed", flips to confirmed after on-chain depth>=1.
+**Negatives to confirm:** broadcast-before-sync -> ERR; regtest -> SPV not offered; mainnet -> blocked everywhere.
+
+OPEN questions to settle during/after the soak (see `docs/dogecoin-spv-phase3-plan.md`): peer-floor
+reachability on testnet (MIN_PEERS=4 may need a pinned known-good peer via `addAddress`); the `spv_birthdate`
+floor for OLD imported keys (pre-2021 funds invisible under SPV); whether bitcoinj `PeerGroup` can route over
+the embedded Arti Tor SOCKS (UNVERIFIED — clearnet-with-disclosure ships now, NEVER silent fallback).
+
+Deferred Phase-3 review nits (reviewer-sanctioned): reorg one-way receipt (depth>=1 never downgrades),
+interruptible 25s await, enabling "Use Max" under SPV.
+
+Later: **Phase 4 (mainnet, user-gated)** — remove the 4-layer mainnet block after a mainnet read-only soak +
+WIF-backup requirement + mainnet/high-fee/policy acks. MAINNET is the last switch, per-spend authorized.
 
 ### Node state + deferred balance-match spike (Task 3)
 **The testnet node is now HEALTHY** (user closed the mainnet instance 2026-06-27; only testnet runs —
