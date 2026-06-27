@@ -91,8 +91,9 @@ class DogecoinSpvService private constructor(
             val key = ECKey.fromPrivate(DogecoinHex.decode(snapshot.key.privateKeyHex), snapshot.key.isCompressed)
             val birthdateSecs = repository.loadSpvBirthdateMillis(network) / 1000L
             key.creationTimeSeconds = birthdateSecs
-            val w = Wallet(params)
-            w.importKey(key)
+            // Persisted wallet: the UTXO set survives stop/start. Without it the in-memory wallet is empty on
+            // restart and, since the header store has advanced past the funding block, never re-derives balance.
+            val w = loadOrCreateSpvWallet(params, network, key)
 
             val store = SPVBlockStore(params, blockStoreFile(network))
             // Seed the header store near the key birthdate from a shipped checkpoints asset (if present), so
@@ -136,6 +137,8 @@ class DogecoinSpvService private constructor(
     fun stop() = synchronized(lock) { stopLocked() }
 
     private fun stopLocked() {
+        // Final flush + stop the autosave thread so the latest UTXO set is persisted before teardown.
+        wallet?.let { w -> runCatching { w.shutdownAutosaveAndWait() } }
         peerGroup?.let { pg ->
             runCatching { pg.stopAsync() }
         }
@@ -299,6 +302,54 @@ class DogecoinSpvService private constructor(
 
     private fun blockStoreFile(network: DogecoinNetwork): File =
         File(appContext.filesDir, "dogecoin-spv-${network.id}.chain")
+
+    private fun walletFile(network: DogecoinNetwork): File =
+        File(appContext.filesDir, "dogecoin-spv-${network.id}.wallet")
+
+    /**
+     * Load the persisted bitcoinj wallet for [network] if present and it still holds the current [key];
+     * otherwise create a fresh wallet importing [key]. Autosave keeps the UTXO set on disk so balance/UTXOs
+     * survive stop/start (sheet close, app background, backend switch) without a full rescan.
+     *
+     * Loaded via the EXPLICIT-params serializer because bitcoinj's NetworkParameters.fromID (used by the
+     * convenience Wallet.loadFromFile) does not recognise the libdohj Dogecoin networks and would throw.
+     */
+    private fun loadOrCreateSpvWallet(params: NetworkParameters, network: DogecoinNetwork, key: ECKey): Wallet {
+        val file = walletFile(network)
+        val loaded = if (file.exists()) runCatching {
+            file.inputStream().use { ins ->
+                val proto = org.bitcoinj.wallet.WalletProtobufSerializer.parseToProto(ins)
+                org.bitcoinj.wallet.WalletProtobufSerializer().readWallet(params, null, proto)
+            }
+        }.getOrNull() else null
+
+        val wallet = if (loaded != null && loaded.findKeyFromPubHash(key.pubKeyHash) != null) {
+            Log.i(TAG, "Loaded persisted SPV wallet for $network (UTXO set survives restart)")
+            loaded
+        } else {
+            if (loaded != null) {
+                Log.i(TAG, "Persisted SPV wallet does not hold the current key; recreating fresh")
+                runCatching { file.delete() }
+            }
+            Wallet(params).also { it.importKey(key) }
+        }
+        // Persist on change (Schildbach/Langerhans pattern); shutdownAutosaveAndWait() in stop flushes the last save.
+        runCatching { wallet.autosaveToFile(file, 1000L, java.util.concurrent.TimeUnit.MILLISECONDS, null) }
+        return wallet
+    }
+
+    /**
+     * Force a full re-scan: stop and delete BOTH the persisted wallet and the block store for [network]
+     * (KEEPS the on-device key). The next [start] reseeds at the birthdate checkpoint and re-derives the
+     * UTXO set from the chain. Needed when the wallet was never persisted (legacy state) or to recover from
+     * a store/wallet drift. REGTEST/no-op safe.
+     */
+    fun clearPersistedState(network: DogecoinNetwork) = synchronized(lock) {
+        stopLocked()
+        runCatching { blockStoreFile(network).delete() }
+        runCatching { walletFile(network).delete() }
+        Log.i(TAG, "Cleared SPV store + wallet for $network; next start() will rescan from the checkpoint")
+    }
 
     private fun paramsFor(network: DogecoinNetwork): NetworkParameters? = when (network) {
         DogecoinNetwork.MAINNET -> DogecoinMainNetParams.get()

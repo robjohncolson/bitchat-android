@@ -163,7 +163,7 @@ class ChatViewModel(
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
-                "doge-reset | doge-spv-start | doge-spv-stop | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-broadcast <addr> <amt> [feeKb] | " +
+                "doge-reset | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
                 "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
@@ -311,9 +311,9 @@ class ChatViewModel(
                 val net = currentDogecoinNetwork()
                 if (net == DogecoinNetwork.MAINNET) "refused: mainnet wallet reset is console-blocked"
                 else {
-                    dogecoinSpv().stop()
+                    dogecoinSpv().clearPersistedState(net)   // stop + delete SPV store + stale wallet file
                     val snap = dogecoinWalletRepository.resetWallet(net)
-                    "wallet reset net=${net.id} new addr=${snap.key.address} (fresh birthdate=now; delete the SPV store, then doge-spv-start)"
+                    "wallet reset net=${net.id} new addr=${snap.key.address} (fresh birthdate=now; run doge-spv-start)"
                 }
             }
             "doge-spv-start" -> {
@@ -326,6 +326,11 @@ class ChatViewModel(
                 }
             }
             "doge-spv-stop" -> { dogecoinSpv().stop(); "spv stopped" }
+            "doge-spv-rescan" -> {
+                val net = currentDogecoinNetwork()
+                dogecoinSpv().clearPersistedState(net)
+                "spv state cleared for ${net.id} (keeps key); run doge-spv-start to rescan from the birthdate checkpoint"
+            }
             "doge-spv-status" -> {
                 val s = dogecoinSpv().status.value
                 "spv net=${s.network.id} running=${s.running} synced=${s.synced} height=${s.chainHeight} " +
