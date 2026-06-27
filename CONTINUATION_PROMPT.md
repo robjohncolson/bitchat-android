@@ -10,169 +10,172 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## Current State (branch `dogecoin-m2-pay-nickname`)
+## CURRENT FOCUS: self-contained SPV wallet (no node, no paid key)
 
-The wallet does legacy P2PKH/P2SH signing on-device, with mainnet/testnet/regtest separation and heavy
-money-safety guards. The full build→sign→broadcast pipeline is **proven on regtest and public testnet**
-(testnet txid `673fdcd5…`, mined). Last green commit is **`d9455f0`** (`:app:testDebugUnitTest` +
-`:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). **The whole 2026-06-26 session below
-is COMMITTED** — the working tree is clean.
+The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
+libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
+agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
+`dogecoin-m2-pay-nickname`. **Last green commit: `e10012a`** (`:app:testDebugUnitTest` +
+`:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
-### Shipped milestones (older → newer)
-- **M0/M1** — UX hardening + send/receive ergonomics (fee presets, address book, payment requests).
-- **M2 — Pay @nickname.** Ed25519-signed Dogecoin receive-address TLVs in IdentityAnnouncement (decoded
-  only after signature verification); opt-in/default-off advertising; "Send DOGE" entry points.
-- **M3b — Broadcast-over-mesh.** A node-less sender relays an already-SIGNED tx to an opt-in helper peer;
-  the helper broadcasts via its own node and returns the node-verified txid. `NoisePayloadType` `0x30`/`0x31`
-  + `PaymentBroadcastPacket`; `BroadcastHelperService` (per-network opt-in, mainnet default-off, favorites-only
-  default-on, Sybil ceilings, holds no keys); `PaymentBroadcastCoordinator` (fan-out ≤2, two-helper
-  corroboration ⇒ `Confirmed`, lone helper ⇒ `Claimed`); signed `NODE_HELPER` (`TLVType 0x06`) advert.
-- **3b.1 — Nostr off-mesh fallback + explorer corroboration (commit `3a52182`).** When a helper is off-mesh
-  but a mutual-favorite over Nostr, the request/result gift-wrap over Nostr relays. Corroboration counts by
-  the helper's **Noise static key** (a free-to-mint Nostr pubkey can't fake `Confirmed`). Opt-in explorer
-  `Claimed→Confirmed` poll.
+### The SPV arc so far (newest first) — feasibility PROVEN, Phases 0+1 SHIPPED
 
-### Proven on real hardware THIS SESSION (2026-06-26)
-- **Nostr off-mesh broadcast round-trip — PROVEN against LIVE relays** (~1s RTT, Tor OFF): Pixel (BT-off,
-  off-mesh) → `MessageRouter` Nostr route → gift-wrap → live relay (`relay.damus.io`/`primal`/`nostr21`) →
-  S24 helper gate → result back → coordinator resolved.
-- **On-chain peer broadcast — PROVEN, mined to 36 confirmations.** Driven from the debug console with NO
-  2nd node: `doge-peer-broadcast` built+signed a real 5-DOGE testnet tx → S24 helper broadcast it via the
-  relay-up node → txid `d3be593cd9e3e41be649df17ddc3366718f51c9ee347a0b996faf08badb6b0c9`. **Key insight:**
-  the console calls `requestPeerBroadcast(signed)` directly, bypassing the GUI's "can-I-broadcast" CTA gate,
-  so the sender's node does NOT need to be relay-down — one relay-up node suffices.
+- **`e10012a` — SPV Phase 1: `DogecoinWalletDataSource` read abstraction (behavior-preserving).**
+  Narrow interface (`getBalance`/`listUnspent`/`broadcast` only — node-specific status/watch/mempool/
+  rescan + rich activity stay RPC-specific, per the design critique's leaky-interface warning).
+  `DogecoinRpcDataSource` (thin delegation using the caller's CAPTURED config → byte-identical),
+  `DogecoinExplorerDataSource` (READ-only; `broadcast()` HARD-THROWS so the refactor doesn't re-expose
+  explorer broadcast). `DogecoinBackend{RPC,EXPLORER,SPV}` enum + repo `loadBackend`/`saveBackend`
+  (per-network, default RPC, key `"${network.id}_backend"`). Routed the 7 read sites in
+  `DogecoinWalletSheet` (3 getBalance + 4 listUnspent) through a local `walletReadSource(config)`
+  helper (currently always RPC; Phase 2 makes it branch on backend). Default RPC ⇒ zero behavior change.
+- **`faf9f6f` — SPV Phase 0: deps + bcprov isolation + signing regression gate (no feature code).**
+  JitPack repo in `settings.gradle.kts`; `libdohj v0.15.9` (→ `bitcoinj-core:0.15.9`) + `guava
+  28.2-android` pin in `libs.versions.toml`/`app/build.gradle.kts`. **EXCLUDE bitcoinj's bundled
+  `org.bouncycastle:bcprov-jdk15to18`** so the app's audited `bcprov-jdk15on:1.70` stays the SOLE
+  `org.bouncycastle` (same package, different module → would otherwise dup-class). R8 keep/dontwarn for
+  bitcoinj/libdohj/protobuf/spongycastle. **`DogecoinSignerRegressionTest`** pins byte-for-byte signed
+  hex+txid (captured pre-bitcoinj) ⇒ proves the money-path signer is UNCHANGED with bitcoinj present.
+  **APK delta = +2.0 MB/ABI** (arm64 16.2→18.2; R8 shrinks the ~6-8MB stack to ~2MB). User: size not a concern.
+- **`827060f` — SPV integration plan: `docs/dogecoin-spv-integration-plan.md`.** Produced by a grounded
+  design workflow + adversarial money-path critique. **UTXO fork RESOLVED → Option B**: bitcoinj is ONLY
+  a UTXO source + broadcast sink; `DogecoinTransactionBuilder` stays the SOLE signer (every safety gate
+  preserved, additive). 5 phases (0 deps → 1 read abstraction → 2 read-only SPV → 3 testnet broadcast →
+  4 mainnet). READ THIS DOC before continuing.
+- **`f9d13c1` — dev-only feasibility spike: `tools/spv-spike/` (standalone pure-JVM Gradle, JDK 17).**
+  PROVED: libdohj v0.15.9 resolves from JitPack + compiles; **synced 275,487 testnet headers in 8 min,
+  ZERO `VerificationException`**, through the testnet DigiShield (~157.5k) + AuxPoW (~158.1k) transitions
+  (libdohj issue #15 rejected nothing); connected to LOCAL + PUBLIC testnet peers, all `NODE_BLOOM`.
+  Doubles as a re-validation tool + basis for a `BuildCheckpoints` generator. Run: `gradlew -p
+  tools/spv-spike run` (default local node, or `-PnoLocalhost`, or `-PpeerHost=127.0.0.1`).
 
-### Session commits (newest first)
-- `d9455f0`, `5c82c19`, `339fec5`, `2ce91d7`, `8696ebc` — **wallet UX redesign (P0+P1).** The sheet is one
-  `LazyColumn` of `item(key=…)` blocks. Node/RPC/helper/corroboration/danger collapsed behind one **"Node &
-  developer settings"** expander (auto-opens when unconfigured); de-jargoned labels (RPC URL→Node address,
-  UTXO→coins, etc.); **balance is the hero** (headlineMedium) and moved first; raw coins behind a "Show coins"
-  toggle; Request folded into a "Request a specific amount" expander; send-confirmation dialog plain-languaged
-  **(every safety gate kept)**. Large block-moves were done with a byte-exact Python relocation script (see
-  the scratchpad pattern) — NOT hand-transcription.
-- `b939eca` — **explorer-backed "no-node" mode.** `DogecoinExplorerClient` reads UTXOs/balance + broadcasts
-  via a public explorer (Blockbook keyless default / Blockchair w/ `?key=`); parsers unit-tested. **BUT free
-  public Dogecoin explorers gate anonymous access** — Blockchair → 430 (needs a PAID key), Trezor Blockbook
-  + Dogechain → Cloudflare 403. So this mode isn't usable keyless against those endpoints.
-- `be0d8c2` — the debug console drives the whole wallet textually (see below).
-- `8b20a79` — **fixed a real bug + built the debug console.** The Nostr `PRIVATE_MESSAGE` handler rendered
-  `[FAVORITED]` DMs as chat instead of recording `theyFavoritedUs`, so favoriting OFF-MESH never made a pair
-  mutual → the helper dropped off-mesh requests (self-undermining). Fixed + `updatePeerFavoritedUs` is now
-  create-if-absent.
+### NEXT STEP (user-agreed 2026-06-27): START PHASE 2 — read-only SPV service
 
-## Debug console (your primary on-device driver — `DebugConsole`, BuildConfig.DEBUG only)
+Phase 2 = the on-device SPV service, READ-ONLY (broadcast disabled), no money path. Per the plan:
+- `DogecoinSpvService` (**sync-on-demand while the wallet sheet is open — NOT a foreground service in
+  v1**, per the critique; owned at ChatViewModel/app scope, start on SPV-select/sheet-open, pause/stop
+  on close): libdohj params per network, `new Wallet(params)` + `wallet.importKey(ECKey.fromPrivate(
+  hexDecode(privateKeyHex), isCompressed))` — NEVER `Wallet.createDeterministic`; share the EXISTING key.
+  REGTEST → SPV disabled. (Key model: single secp256k1 key per network in EncryptedSharedPreferences,
+  `${network.id}_private_key_hex` + `_compressed`; one P2PKH address; address-reuse. `DogecoinWallet.kt`.)
+- **BIRTHDATE POLICY (must-fix):** `created_at` is OVERWRITTEN with import time on WIF import
+  (`DogecoinWalletRepository.kt:~403`), so feeding it to `CheckpointManager` can fast-forward PAST funding
+  txs (forward-scan only → silent money-missing). Persist a SEPARATE conservative `spv_birthdate` floor.
+- **CHECKPOINTS — user chose: GENERATE FROM THE TESTNET NODE** via bitcoinj `BuildCheckpoints` (needs the
+  synced testnet node reachable). Testnet is ~65.7M blocks; checkpoint-less sync is infeasible. Ship
+  per-network assets; a fresh on-device key (recent birthdate) then syncs near-instant. A Bitcoin
+  checkpoints file will NOT validate against libdohj (AuxPoW/Scrypt) — must be libdohj-generated.
+- `DogecoinSpvDataSource` (implements `DogecoinWalletDataSource`): `listUnspent` maps
+  `wallet.getUnspents()`→`DogecoinUtxo` (own P2PKH, depth→confirmations HONEST), balance AVAILABLE vs
+  ESTIMATED; `broadcast()` throws this phase. Peer floor >1 (target 3-4). Witness wart needs a
+  `selectDownloadPeer` override (Dogecoin has no SegWit — see the spike's `HighestHeightDownloadPeerGroup`).
+- Status via a `DownloadProgressTracker` → `StateFlow{height,headers,peerCount,verification,syncedAsOf}`;
+  sheet OBSERVES it; expand `walletReadSource()` to branch on `loadBackend`; add a backend selector UI.
+- **Cross-check is a DbgConsole/soak tool, not production sheet UI this phase.** Oracle = the RPC NODE on
+  testnet (there is NO public testnet explorer); explorer cross-check reserved for the mainnet soak.
+- OPEN (need user/live test): exact `spv_birthdate` floor date; whether bitcoinj `PeerGroup` can route
+  over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; last session Arti couldn't build
+  Nostr circuits) → default clearnet-with-disclosure, NEVER silent fallback.
 
-Drive the app textually over adb (no UI tapping). **Quote the WHOLE am command** so a space-arg survives the
-device shell:
+Later: Phase 3 (testnet broadcast — fail-closed re-verify txid, render Claimed-not-Confirmed), Phase 4
+(mainnet, user-gated, after a read-only soak). MAINNET is the last switch, per-spend authorized.
 
+### Deferred: balance-match spike (Task 3)
+Closes the last feasibility sub-step: point the spike at the local testnet node (`-PpeerHost=127.0.0.1`),
+watch a funded address, assert SPV balance == node oracle. **Blocked: two `dogecoin-qt` instances were
+running and RPC hung** (P2P 44556 was fine — the spike connected over it). Clear the duplicate so
+`dogecoin-cli -testnet getblockchaininfo` responds, then run it (also needed to GENERATE checkpoints).
+
+## Older shipped milestones (background — all committed pre-`f9d13c1`)
+- **M0/M1** — UX hardening (fee presets, address book, payment requests). **M2 — Pay @nickname**
+  (Ed25519-signed receive-address TLVs). **M3b — Broadcast-over-mesh** (node-less sender relays a SIGNED
+  tx to an opt-in helper; `NoisePayloadType 0x30/0x31`, `BroadcastHelperService`,
+  `PaymentBroadcastCoordinator`, two-helper corroboration ⇒ Confirmed; signed `NODE_HELPER` TLV 0x06).
+- **3b.1 — Nostr off-mesh fallback + explorer corroboration** (corroboration counts by the helper's
+  Noise static key, never a free-to-mint Nostr pubkey). Proven on hardware: Nostr off-mesh broadcast
+  round-trip vs LIVE relays (Tor OFF); on-chain peer broadcast mined (testnet txid `d3be593c…`, 36 conf).
+- **Wallet UX redesign (P0+P1)** — one `LazyColumn` of `item(key=…)`; node/dev settings collapsed;
+  balance hero; de-jargoned. **Explorer "no-node" mode (`b939eca`)** — but free public explorers gate
+  anonymous access (Blockchair → paid key; Trezor/Dogechain → 403). THIS is why SPV is the direction.
+
+## Debug console (on-device driver — `DebugConsole`, BuildConfig.DEBUG only)
+Drive the app textually over adb (no UI tapping). **Quote the WHOLE am command** so a space-arg survives:
 ```powershell
 adb -s <serial> shell "am broadcast -n com.bitchat.droid.debug/com.bitchat.android.debug.DebugCommandReceiver --es cmd 'doge-peer-broadcast nceDC… 5'"
-adb -s <serial> logcat -d -s DbgConsole      # output lands here
+adb -s <serial> logcat -d -s DbgConsole
 ```
+Host registers from `ChatViewModel.init` (chat screen must be alive — if "no host registered", relaunch).
+Commands incl.: `doge-network/-rpc-set/-address/-import-wif/-balance/-self-broadcast/-peer-broadcast/
+-helper-enable/-explorer-config/-explorer-balance/-utxos/-broadcast/-send`; `nostr tor tor-set peers
+reannounce`. **Mainnet money-path commands HARD-REFUSE; WIF/keys never logged.** (Phase 2: add SPV
+sync/balance + SPV-vs-node cross-check commands here as the soak surface.)
 
-Host registers from `ChatViewModel.init` (the chat screen must be alive — if "no host registered", relaunch
-the app). Commands: `myid favorites candidates cansend forcemutual sendfav broadcast-test nostr tor peers
-reannounce tor-set nostr-connect/-disconnect | doge-network <net> | doge-rpc-set/-show | doge-address |
-doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> | doge-peer-broadcast <addr> <amt> |
-doge-helper-enable <0|1> | doge-explorer-config <blockbook|blockchair> [key] | doge-explorer-balance/-utxos/
--broadcast/-send`. **Mainnet money-path commands HARD-REFUSE; WIF/keys never logged.**
-
-## Next up / direction
-
-1. **SELF-CONTAINED WALLET via SPV — the agreed next direction** (Blockchair keys cost money; the user wants
-   no node + no paid key). Build an **SPV backend like the Langerhans wallet** (`C:\Users\rober\Downloads\
-   Projects\dogecoin-wallet-new`): `bitcoinj-core:0.14.7` + `libdohj-core:0.15-SNAPSHOT`, `PeerGroup`/
-   `BlockChain`/`SPVBlockStore`/`BloomFilter`/`DnsDiscovery` → talk straight to the Dogecoin P2P network
-   (headers + bloom-filtered txs, keys on-device, broadcast to peers; can route over the Arti Tor already
-   shipped). Add it ALONGSIDE the RPC + explorer backends, sharing the existing key. **Hurdle:** `libdohj`
-   is NOT on a live Maven repo (Langerhans uses `mavenLocal()`+dead `jcenter()`) — build it from source
-   (`github.com/dogecoin/libdohj`). **First step = a read-only feasibility spike** (connect a PeerGroup,
-   sync headers, read the existing key's balance) before the full build. Lighter alt (deprioritized): public
-   ElectrumX (sparse for Dogecoin).
-2. **Funded MAINNET broadcast** — still user-gated (irreversible real money via the on-device UI / explicit
-   spend authorization). Mainnet is the LAST step.
-3. **More console coverage** (optional P1): dm/send/verify/block, geohash, more wallet read-only commands.
-4. **More wallet UX polish** (optional): the "Node & developer settings" toggle currently sits just above the
-   balance — could move it to the bottom; first-run empty state; activity-row redesign.
-5. **iOS cross-platform reserve** of `NoisePayloadType 0x30/0x31` + `TLVType 0x06` — deprioritized (user is
-   not on Apple right now); tolerant decode keeps it Android↔iOS-safe meanwhile.
-
-## Local Dogecoin Node (testnet, synced)
-
+## Local Dogecoin Node (testnet)
 ```text
-"C:\Program Files\Dogecoin\dogecoin-qt.exe" -testnet          # RPC 127.0.0.1:44555 (P2P 44556)
+"C:\Program Files\Dogecoin\dogecoin-qt.exe" -testnet            # RPC 127.0.0.1:44555 (P2P 44556)
 "C:\Program Files\Dogecoin\daemon\dogecoin-cli.exe" -testnet <cmd>
 ```
-
 - Config (do NOT print rpcpassword): `C:\Users\rober\AppData\Roaming\Dogecoin\dogecoin.conf` (`server=1`,
-  `rpcuser`/`rpcpassword`; RPC user is `apstats`). For a phone to reach it over the LAN, launch
-  `dogecoin-qt -testnet -rpcbind=10.0.0.24 -rpcbind=127.0.0.1 -rpcallowip=10.0.0.0/24 -rpcallowip=127.0.0.1`
-  (currently reachable at `http://10.0.0.24:44555`). A plain `-testnet` restart reverts to localhost-only.
-- Funded node-owned address: `nceDCkWAP9tSktE5TJ5X6LVmD2r3HwiAXN` — **~1.72M spendable TESTDOGE** (its WIF is
-  imported into the Pixel's wallet). The **S24's own** testnet key is `ni5e6MFNimwAZfFXGbdxWjzC7FBWfwM7iS`
-  (its wallet, ~0 balance — it's the helper).
-- Coinbase maturity is **240 blocks** (empirically verified). Faucets dead → CPU-mine with pooler minerd.
-- For an on-chain peer broadcast: keep the node `networkactive=true` (relay-up) and drive the send from the
-  console (`doge-peer-broadcast`), which bypasses the sender-CTA gate so one node suffices. (To repro via the
-  GUI CTA you'd need a 2nd relay-up node.) See [[dogecoin-testnet-ops]] in memory.
+  RPC user `apstats`). For a phone over LAN: `dogecoin-qt -testnet -rpcbind=10.0.0.24 -rpcbind=127.0.0.1
+  -rpcallowip=10.0.0.0/24 -rpcallowip=127.0.0.1` (was reachable at `http://10.0.0.24:44555`). For SPV the
+  phone uses P2P (44556) directly, not RPC. For `BuildCheckpoints`, keep the node synced + RPC up.
+- Funded node-owned address `nceDCkWAP9tSktE5TJ5X6LVmD2r3HwiAXN` — ~1.72M TESTDOGE (WIF imported into the
+  Pixel's wallet). The S24's own testnet key is `ni5e6MFNimwAZfFXGbdxWjzC7FBWfwM7iS` (~0; it's the helper).
+- Coinbase maturity 240 blocks. Faucets dead → CPU-mine with pooler minerd. See [[dogecoin-testnet-ops]].
 
 ## Android / Device State
-
 - SDK `C:\Users\rober\AppData\Local\Android\Sdk`; `adb` at `…\Sdk\platform-tools\adb`.
-- **Galaxy S24** (Android 16) serial `RFCX81GNBRE` = **helper**; **Pixel 3** (Android 12, arm64) serial
-  `89VX0HPX1` = **sender**. Both run the latest debug build (`d9455f0`). Debug app id
-  `com.bitchat.droid.debug` (coexists with a Play-installed `com.bitchat.droid`). REGTEST selector is
-  DEBUG-only.
-
+- **Galaxy S24** (Android 16) serial `RFCX81GNBRE` = helper; **Pixel 3** (Android 12, arm64) serial
+  `89VX0HPX1` = sender. Both arm64; debug app id `com.bitchat.droid.debug` (coexists with Play
+  `com.bitchat.droid`). REGTEST selector is DEBUG-only.
 ```powershell
-.\gradlew.bat assembleDebug      # SPLIT per-ABI; both phones are arm64:
+.\gradlew.bat assembleDebug      # SPLIT per-ABI; both phones arm64:
 adb -s 89VX0HPX1 install -r app\build\outputs\apk\debug\app-arm64-v8a-debug.apk
 adb -s 89VX0HPX1 shell monkey -p com.bitchat.droid.debug -c android.intent.category.LAUNCHER 1
 ```
-
 Gotchas (hard-won):
-- **Samsung (S24) aggressively kills backgrounded bitchat** → "the wallet doesn't show" usually just means
-  the app was killed and the ChatViewModel is dead; force-stop + relaunch fixes it. The wallet is
-  **Tor-independent** (its own HTTP client) — Tor on/off never affects the wallet.
-- **Both phones have a secure lock** that can re-engage on idle; `adb` can't unlock it. UI screenshots may
-  need the user to unlock — but the **console works regardless of lock** (it's a BroadcastReceiver).
-- **Nostr is forced through embedded Arti Tor** (`TorMode` default ON, SOCKS `127.0.0.1:9060`, fail-closed).
-  On this network Arti can't build circuits → off-mesh Nostr is dead-on-arrival by default. **Toggle Tor OFF**
-  for Nostr tests: About-sheet switch, or `tor-set off`, or set `tor_mode=OFF` in the plain `bitchat_settings`
-  SharedPreferences via `run-as` + restart. Dogecoin RPC bypasses Tor regardless.
-- `uiautomator dump` works; estimate tap coords from `bounds`, not scaled screenshots. `keyevent 111`
-  (ESCAPE) dismisses the wallet sheet (network resets to mainnet) — never use it inside the sheet; use
-  `keyevent 4` (BACK) to drop the keyboard. `adb shell input text` mangles long random strings (verify field
-  length). The send confirm dialog is scrollable; the "Ask a peer to broadcast" CTA is below the fold.
-- For PowerShell + `adb pull` binary files: pull with `adb pull` (not `>` redirection, which UTF-16-mangles).
-  PowerShell has NO heredocs — commit multi-line messages via the Bash tool.
+- **Windows: ALWAYS pass `gradlew -p "<repo>"`** — a stale shell CWD makes Gradle resolve the wrong
+  project dir ("Project directory … is not part of the build"). Never pipe gradlew to `tail`/`grep` and
+  trust the exit code (capture to a file, check `$LASTEXITCODE`).
+- **gitnexus MCP tools were NOT connected this session** (despite CLAUDE.md) — do impact analysis manually
+  via grep, or check if they're back.
+- **bitcoinj 0.15.9 predates new JDKs**: the spike pins a JDK-17 Gradle toolchain. The app's AGP build
+  runs on JAVA_HOME (JDK 22) with source/target 8 — fine; the signing regression test guards the signer.
+- **Samsung (S24) aggressively kills backgrounded bitchat** → "wallet doesn't show" = app was killed;
+  force-stop + relaunch. The wallet is **Tor-independent** (own HTTP client). **Nostr is forced through
+  Arti Tor** (default ON, SOCKS `127.0.0.1:9060`, fail-closed) — toggle OFF (`tor-set off`) for Nostr
+  tests; Dogecoin RPC bypasses Tor. **SPV P2P over Arti is UNVERIFIED.**
+- Both phones have a secure lock that re-engages on idle; `adb` can't unlock, but the console works
+  regardless (it's a BroadcastReceiver). `keyevent 4` (BACK) drops the keyboard; never `keyevent 111`
+  (ESC) inside the sheet (resets network to mainnet). `adb shell input text` mangles long random strings.
+- PowerShell has NO heredocs — commit multi-line messages via the Bash tool. `adb pull` binary files
+  (don't `>`-redirect — UTF-16 mangles).
 
 ## Key Files
-
-UX/wallet UI: `features/dogecoin/DogecoinWalletSheet.kt` (one big `LazyColumn`; `WalletCard`; item keys
-header/balance/address/request/send + collapsed advanced). Wallet core:
+SPV (new): `features/dogecoin/{DogecoinWalletDataSource,DogecoinRpcDataSource,DogecoinExplorerDataSource}.kt`;
+plan `docs/dogecoin-spv-integration-plan.md`; spike `tools/spv-spike/` (+ its README). Reference SPV
+wallet: `C:\Users\rober\Downloads\Projects\dogecoin-wallet-new` (Langerhans, bitcoinj+libdohj) —
+`wallet/src/de/schildbach/wallet/service/{BlockchainService,NonWitnessPeerGroup}.java` + `Constants.java`
+(checkpoints asset `checkpoints.txt`, `CheckpointManager.checkpoint(...)`). Wallet core:
 `features/dogecoin/{DogecoinWalletRepository,DogecoinWallet,DogecoinTransaction(Builder),DogecoinRpcClient,
-DogecoinExplorerClient,DogecoinRawTxValidator,BroadcastHelperService,PaymentBroadcastCoordinator,
-PaymentBroadcastResultRouter,DogecoinTxConfirmationChecker,BroadcastHelperCandidates}.kt`. Debug console:
-`debug/DebugConsole.kt` + `app/src/debug/AndroidManifest.xml` + the `debugConsoleHost` in `ui/ChatViewModel.kt`.
-Mesh/Nostr: `mesh/{MessageHandler,PeerManager,...}.kt`, `services/MessageRouter.kt`,
-`nostr/{NostrDirectMessageHandler,NostrTransport,NostrEmbeddedBitChat,NostrRelayManager}.kt`,
-`favorites/FavoritesPersistenceService.kt`, `net/{ArtiTorManager,OkHttpProvider,TorPreferenceManager}.kt`.
+DogecoinExplorerClient,DogecoinRawTxValidator,BroadcastHelperService,PaymentBroadcastCoordinator}.kt`. UI:
+`features/dogecoin/DogecoinWalletSheet.kt` (4200+ lines; `walletReadSource()` helper near `rpcClient`).
+Debug console: `debug/DebugConsole.kt` + `app/src/debug/AndroidManifest.xml` + `debugConsoleHost` in
+`ui/ChatViewModel.kt`. Mesh/Nostr/Tor: `mesh/*`, `services/MessageRouter.kt`, `nostr/*`, `net/*`.
 
 ## Verification
-
 ```powershell
-# IMPORTANT: never pipe gradlew to tail/grep and trust the exit code — capture to a file and check $LASTEXITCODE.
-.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug --console=plain
+# IMPORTANT: pass -p; never pipe gradlew to tail/grep and trust the exit code.
+.\gradlew.bat -p "C:\Users\rober\Downloads\Projects\bitchat-android" :app:testDebugUnitTest :app:assembleDebug --console=plain
 git diff --check
 ```
-
-Last green at `d9455f0`. Reference wallet for the SPV plan: `C:\Users\rober\Downloads\Projects\dogecoin-wallet-new`
-(Langerhans) — `bitcoinj`+`libdohj`, `wallet/src/de/schildbach/wallet/service/{BlockchainService,NonWitnessPeerGroup}.java`.
+Last green at `e10012a`. The `DogecoinSignerRegressionTest` is the money-path canary — if it ever fails
+after a dep change, the audited ECDSA signer changed; REJECT the change, do not re-baseline.
 
 ## Constraints
-
 - No mainnet wallet broadcast without explicit per-spend user authorization (irreversible real money).
 - No custodial signing, remote key storage, or seed export without explicit approval.
 - Never print private keys or RPC passwords in user-facing output.
 - No destructive git commands. Keep changes narrowly scoped; follow existing Kotlin/Compose style.
+- SPV must NOT be the sole money-path source of truth until mainnet-validated; keep RPC/explorer as the
+  cross-check anchor. bitcoinj NEVER signs (Option B) — `DogecoinTransactionBuilder` is the only signer.
