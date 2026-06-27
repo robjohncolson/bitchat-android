@@ -212,7 +212,7 @@
   <string name="dogecoin_receive_address">Receive address</string>
   <string name="dogecoin_receive_share_text">Dogecoin %1$s receive address:\n%2$s</string>
   <string name="dogecoin_address_qr_description">Dogecoin receive address QR code</string>
-  <string name="dogecoin_request_title">Payment request</string>
+  <string name="dogecoin_request_title">Request a specific amount</string>
   <string name="dogecoin_request_doge">Request DOGE</string>
   <string name="dogecoin_request_doge_title">Request DOGE</string>
   <string name="dogecoin_request_doge_post">Post request</string>

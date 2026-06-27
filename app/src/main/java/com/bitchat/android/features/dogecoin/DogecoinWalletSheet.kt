@@ -234,6 +234,7 @@ fun DogecoinWalletSheet(
     // expander so first-time users see balance/receive/send first; auto-open when no node is configured yet.
     var advancedExpanded by remember { mutableStateOf(rpcUrlBlank) }
     var showUtxoDetails by remember { mutableStateOf(false) }
+    var showRequest by remember { mutableStateOf(false) }
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
         !rpcUrlBlank && DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
     }
@@ -1956,11 +1957,24 @@ fun DogecoinWalletSheet(
 
                 item(key = "request") {
                     WalletCard {
-                        Text(
-                            text = stringResource(R.string.dogecoin_request_title),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showRequest = !showRequest },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_request_title),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Icon(
+                                imageVector = if (showRequest) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null
+                            )
+                        }
+                        if (showRequest) {
                         OutlinedTextField(
                             value = amount,
                             onValueChange = { amount = it },
@@ -2057,6 +2071,7 @@ fun DogecoinWalletSheet(
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(stringResource(R.string.share_to_chat))
+                        }
                         }
                     }
                 }
