@@ -121,6 +121,17 @@ dependencies {
     
     // Cryptography
     implementation(libs.bundles.cryptography)
+
+    // Dogecoin SPV backend (bitcoinj + libdohj). See docs/dogecoin-spv-integration-plan.md.
+    // Exclude bitcoinj's bundled org.bouncycastle:bcprov-jdk15to18 so the app's AUDITED
+    // bcprov-jdk15on:1.70 remains the SOLE org.bouncycastle provider — the money-path signer
+    // (DogecoinTransactionBuilder) must stay byte-identical (enforced by DogecoinSignerRegressionTest).
+    implementation(libs.libdohj) {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
+    }
+    // bitcoinj exposes Guava (ListenableFuture via waitForPeers/startAsync) in its public API but
+    // declares it `implementation`; pin it on our classpath.
+    implementation(libs.guava)
     
     // JSON
     implementation(libs.gson)

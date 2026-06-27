@@ -25,6 +25,12 @@ accompanist-permissions = "0.37.3"
 bouncycastle = "1.70"
 tink-android = "1.10.0"
 
+# Dogecoin SPV (bitcoinj + libdohj). libdohj v0.15.9 transitively pulls bitcoinj-core 0.15.9;
+# guava is pinned explicitly because bitcoinj exposes it in its public API but declares it
+# `implementation`. See docs/dogecoin-spv-integration-plan.md.
+libdohj = "v0.15.9"
+guava = "28.2-android"
+
 # JSON
 gson = "2.13.1"
 
@@ -92,6 +98,10 @@ accompanist-permissions = { module = "com.google.accompanist:accompanist-permiss
 # Cryptography
 bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk15on", version.ref = "bouncycastle" }
 google-tink-android = { module = "com.google.crypto.tink:tink-android", version.ref = "tink-android" }
+
+# Dogecoin SPV
+libdohj = { module = "com.github.dogecoin:libdohj", version.ref = "libdohj" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
 
 # JSON
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
