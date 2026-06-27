@@ -143,6 +143,28 @@ class DogecoinWalletRepositoryTest {
     }
 
     @Test
+    fun `resolveBackend defaults to Built-in only when no node is configured and a checkpoint asset ships`() {
+        val repository = DogecoinWalletRepository(context)
+        // Pure decision logic (asset-independent): Built-in only when no node AND a checkpoint asset ships.
+        assertEquals(DogecoinBackend.SPV, repository.defaultBackend(noNodeConfigured = true, spvCheckpointShipped = true))
+        assertEquals(DogecoinBackend.RPC, repository.defaultBackend(noNodeConfigured = false, spvCheckpointShipped = true))
+        assertEquals(DogecoinBackend.RPC, repository.defaultBackend(noNodeConfigured = true, spvCheckpointShipped = false))
+        assertEquals(DogecoinBackend.RPC, repository.defaultBackend(noNodeConfigured = false, spvCheckpointShipped = false))
+
+        // resolveBackend branches that don't depend on the (unit-test-unavailable) asset:
+        // regtest never offers SPV; mainnet ships no checkpoint asset -> RPC. (testnet's no-node -> SPV path
+        // needs the bundled asset and is validated on-device.)
+        assertEquals(DogecoinBackend.RPC, repository.resolveBackend(DogecoinNetwork.REGTEST))
+        assertEquals(DogecoinBackend.RPC, repository.resolveBackend(DogecoinNetwork.MAINNET))
+        // A configured node forces RPC even where SPV could ship.
+        repository.saveRpcConfig(DogecoinNetwork.TESTNET, DogecoinRpcConfig(url = "http://10.0.0.24:44555"))
+        assertEquals(DogecoinBackend.RPC, repository.resolveBackend(DogecoinNetwork.TESTNET))
+        // An explicit saved choice always wins, regardless of node config.
+        repository.saveBackend(DogecoinNetwork.TESTNET, DogecoinBackend.SPV)
+        assertEquals(DogecoinBackend.SPV, repository.resolveBackend(DogecoinNetwork.TESTNET))
+    }
+
+    @Test
     fun `spv birthdate is generation time for a generated key and the conservative floor for an import`() {
         val conservativeFloorMillis = 1609459200000L // 2021-01-01 UTC, the import default
         val repository = DogecoinWalletRepository(context)

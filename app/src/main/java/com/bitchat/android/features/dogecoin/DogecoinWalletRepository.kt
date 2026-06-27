@@ -223,6 +223,37 @@ class DogecoinWalletRepository(context: Context) {
         prefs.edit().putString(backendKey(network), backend.name).apply()
     }
 
+    /**
+     * Backend to use as the INITIAL selection for [network]: the user's explicit saved choice if any,
+     * otherwise SPV ("Built-in") when NO node is configured AND a checkpoint asset ships for the network
+     * (so SPV seeds fast and is practical), else RPC. This lets a no-node user see their balance without
+     * digging into settings; an explicit [saveBackend] choice always wins, and configuring a node flips the
+     * soft default back to RPC. NOT persisted — it is recomputed each open from the current node config.
+     */
+    fun resolveBackend(network: DogecoinNetwork): DogecoinBackend {
+        val saved = prefs.getString(backendKey(network), null)
+        if (saved != null) {
+            return runCatching { DogecoinBackend.valueOf(saved) }.getOrDefault(DogecoinBackend.RPC)
+        }
+        return defaultBackend(
+            noNodeConfigured = loadRpcConfig(network).url.isBlank(),
+            spvCheckpointShipped = spvCheckpointAssetShipped(network)
+        )
+    }
+
+    /** Pure default-backend decision (testable without assets/prefs): Built-in only when there is no node
+     *  AND a checkpoint asset ships for the network; otherwise RPC. */
+    internal fun defaultBackend(noNodeConfigured: Boolean, spvCheckpointShipped: Boolean): DogecoinBackend =
+        if (noNodeConfigured && spvCheckpointShipped) DogecoinBackend.SPV else DogecoinBackend.RPC
+
+    /** True if a shipped SPV checkpoint asset exists for [network] (so a fresh key seeds near the tip
+     *  instead of from genesis). Currently testnet only; mainnet joins when its asset + Phase 4 land. */
+    private fun spvCheckpointAssetShipped(network: DogecoinNetwork): Boolean {
+        if (network == DogecoinNetwork.REGTEST) return false
+        val asset = "dogecoin-checkpoints-${if (network == DogecoinNetwork.MAINNET) "mainnet" else "testnet"}.txt"
+        return runCatching { appContext.assets.open(asset).use { } }.isSuccess
+    }
+
     // ---- SPV scan-start birthdate: a per-network conservative LOWER BOUND on when this key's funds could
     // first exist, used as the bitcoinj key creation time + CheckpointManager scan start. Persisted
     // SEPARATELY from created_at, which importWalletFromWif OVERWRITES with import time — feeding an

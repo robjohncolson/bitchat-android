@@ -169,7 +169,9 @@ fun DogecoinWalletSheet(
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
     // Phase 2 backend selector: which source serves balance/UTXO reads for the selected network. Default RPC.
     // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
-    var dogecoinBackend by remember(selectedNetwork) { mutableStateOf(repository.loadBackend(selectedNetwork)) }
+    // Default to "Built-in" (SPV) when no node is configured and SPV is practical, so a no-node user sees
+    // their balance without digging into settings; an explicit selector choice persists and wins.
+    var dogecoinBackend by remember(selectedNetwork) { mutableStateOf(repository.resolveBackend(selectedNetwork)) }
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
