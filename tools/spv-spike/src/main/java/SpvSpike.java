@@ -32,6 +32,8 @@ public class SpvSpike {
     public static void main(String[] args) {
         int minutes = Integer.getInteger("spike.minutes", 8);
         try {
+            String verifyCp = System.getProperty("spike.verifyCheckpoint");
+            if (verifyCp != null) { verifyCheckpoint(verifyCp); System.exit(0); }
             run(minutes);
             System.out.println("[spike] RESULT: clean exit, no exception propagated to main.");
             System.exit(0);
@@ -40,6 +42,28 @@ public class SpvSpike {
             t.printStackTrace(System.out);
             System.exit(1);
         }
+    }
+
+    /** Load a generated checkpoint file the way DogecoinSpvService does, and print the seeded store head
+     *  (compare its height + hash to the node's getblockhash to confirm the checkpoint is correct). */
+    private static void verifyCheckpoint(String path) throws Exception {
+        final NetworkParameters params = DogecoinTestNet3Params.get();
+        final Context ctx = new Context(params);
+        Context.propagate(ctx);
+        File tmp = File.createTempFile("cp-verify", ".chain");
+        tmp.delete();
+        SPVBlockStore store = new SPVBlockStore(params, tmp);
+        long nowSecs = System.currentTimeMillis() / 1000L;
+        try (java.io.InputStream in = new java.io.FileInputStream(path)) {
+            org.bitcoinj.core.CheckpointManager.checkpoint(params, in, store, nowSecs);
+        }
+        org.bitcoinj.core.StoredBlock head = store.getChainHead();
+        System.out.println("[verify] checkpoint -> SPVBlockStore head: height=" + head.getHeight()
+                + " time=" + new Date(head.getHeader().getTimeSeconds() * 1000L)
+                + " hash=" + head.getHeader().getHashAsString());
+        // store.close() hits WindowsMMapHack (sun.nio.ch) on JDK17/Windows — Android never runs it; swallow.
+        try { store.close(); } catch (Throwable ignored) {}
+        System.out.println("[verify] OK: checkpoint loads + seeds the store (compare height/hash to the node).");
     }
 
     private static void run(int minutes) throws Exception {

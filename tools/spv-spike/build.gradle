@@ -51,4 +51,6 @@ run {
     if (project.hasProperty('peerHost')) systemProperty 'spike.peerHost', project.property('peerHost').toString()
     // -PnoLocalhost forces the public DNS path (don't auto-prefer a detected 127.0.0.1 node).
     if (project.hasProperty('noLocalhost')) systemProperty 'spike.noLocalhost', '1'
+    // -PverifyCheckpoint=<path> loads a generated checkpoint file + prints the seeded store head, then exits.
+    if (project.hasProperty('verifyCheckpoint')) systemProperty 'spike.verifyCheckpoint', project.property('verifyCheckpoint').toString()
 }
