@@ -15,9 +15,19 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `2d4271b`** (SPV wallet persistence; Phase 3 testnet
-broadcast PROVEN on-device; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check`
-clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `0383ae5`** (SPV UX: "bitchat dev" label + default-to-Built-in;
+on top of `2d4271b` SPV wallet persistence; Phase 3 testnet broadcast PROVEN on-device; `:app:testDebugUnitTest`
++ `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+
+**Two on-device UX fixes after the soak (`0383ae5`):** (1) the debug build (`com.bitchat.droid.debug`) was
+indistinguishable from a side-by-side Play-store `com.bitchat.droid` on the home screen — easy to open the wrong
+app (no Dogecoin wallet); the debug manifest now relabels the launcher to **"bitchat dev"** (`tools:replace`).
+(2) the wallet defaulted to "My node" (RPC) and showed nothing for a no-node user; `DogecoinWalletRepository.resolveBackend`
+now defaults to **Built-in (SPV)** when no node is configured AND a checkpoint asset ships (testnet today),
+explicit choice always wins, configuring a node flips it back. **Wallet UI access: tap the app title → App Info
+sheet → "Dogecoin Wallet" row (below Tor Network); the green wallet icon in the message bar is "request DOGE",
+NOT the wallet.** Android tears down the Activity/ViewModel for a backgrounded app (process may survive) → the
+wallet "disappears"; just relaunch (data persists).
 
 > **CRITICAL: the app now uses bitcoinj/libdohj `0.14.7` (spongycastle), NOT `0.15.9`.** bitcoinj 0.15+
 > uses `org.bouncycastle` + `ECPoint.isCompressed()`, REMOVED in bcprov 1.70 — the bcprov the app uses for
