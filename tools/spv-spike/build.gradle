@@ -53,4 +53,7 @@ run {
     if (project.hasProperty('noLocalhost')) systemProperty 'spike.noLocalhost', '1'
     // -PverifyCheckpoint=<path> loads a generated checkpoint file + prints the seeded store head, then exits.
     if (project.hasProperty('verifyCheckpoint')) systemProperty 'spike.verifyCheckpoint', project.property('verifyCheckpoint').toString()
+    // -PwatchKeyHex=<hex> [-Pcheckpoint=<path>] runs the full SPV balance read for that key (import + seed + bloom-sync).
+    if (project.hasProperty('watchKeyHex')) systemProperty 'spike.watchKeyHex', project.property('watchKeyHex').toString()
+    if (project.hasProperty('checkpoint')) systemProperty 'spike.checkpoint', project.property('checkpoint').toString()
 }

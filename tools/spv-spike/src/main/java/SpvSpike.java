@@ -1,6 +1,8 @@
 import org.bitcoinj.core.AbstractBlockChain;
 import org.bitcoinj.core.BlockChain;
+import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.Context;
+import org.bitcoinj.core.ECKey;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Peer;
 import org.bitcoinj.core.PeerGroup;
@@ -34,6 +36,8 @@ public class SpvSpike {
         try {
             String verifyCp = System.getProperty("spike.verifyCheckpoint");
             if (verifyCp != null) { verifyCheckpoint(verifyCp); System.exit(0); }
+            String watchKey = System.getProperty("spike.watchKeyHex");
+            if (watchKey != null) { runBalance(watchKey, System.getProperty("spike.checkpoint"), minutes); System.exit(0); }
             run(minutes);
             System.out.println("[spike] RESULT: clean exit, no exception propagated to main.");
             System.exit(0);
@@ -50,20 +54,95 @@ public class SpvSpike {
         final NetworkParameters params = DogecoinTestNet3Params.get();
         final Context ctx = new Context(params);
         Context.propagate(ctx);
+        final long nowSecs = System.currentTimeMillis() / 1000L;
+        // Probe which checkpoint CheckpointManager picks for various birthdates (now-Nd).
+        try (java.io.InputStream in = new java.io.FileInputStream(path)) {
+            org.bitcoinj.core.CheckpointManager cm = new org.bitcoinj.core.CheckpointManager(params, in);
+            for (long days : new long[]{0, 5, 10, 30, 90, 365}) {
+                org.bitcoinj.core.StoredBlock cp = cm.getCheckpointBefore(nowSecs - days * 86400L);
+                System.out.println("[verify] getCheckpointBefore(now-" + days + "d): height=" + cp.getHeight()
+                        + " time=" + new Date(cp.getHeader().getTimeSeconds() * 1000L));
+            }
+        }
+        // Seed a fresh store at a now-birthdate; print head + hash (compare to node getblockhash).
         File tmp = File.createTempFile("cp-verify", ".chain");
         tmp.delete();
         SPVBlockStore store = new SPVBlockStore(params, tmp);
-        long nowSecs = System.currentTimeMillis() / 1000L;
         try (java.io.InputStream in = new java.io.FileInputStream(path)) {
             org.bitcoinj.core.CheckpointManager.checkpoint(params, in, store, nowSecs);
         }
         org.bitcoinj.core.StoredBlock head = store.getChainHead();
-        System.out.println("[verify] checkpoint -> SPVBlockStore head: height=" + head.getHeight()
+        System.out.println("[verify] seeded head: height=" + head.getHeight()
                 + " time=" + new Date(head.getHeader().getTimeSeconds() * 1000L)
                 + " hash=" + head.getHeader().getHashAsString());
         // store.close() hits WindowsMMapHack (sun.nio.ch) on JDK17/Windows — Android never runs it; swallow.
         try { store.close(); } catch (Throwable ignored) {}
         System.out.println("[verify] OK: checkpoint loads + seeds the store (compare height/hash to the node).");
+    }
+
+    /** Full SPV READ validation (mirrors DogecoinSpvService): import a key, seed the store at the LATEST
+     *  checkpoint (no 7-day margin, for a fast sync), bloom-sync against the local node, and print the
+     *  wallet's balance + UTXOs. Compare to the node's view of the same address. */
+    private static void runBalance(String keyHex, String checkpointPath, int minutes) throws Exception {
+        final NetworkParameters params = DogecoinTestNet3Params.get();
+        final Context ctx = new Context(params);
+        Context.propagate(ctx);
+
+        ECKey key = ECKey.fromPrivate(org.bitcoinj.core.Utils.HEX.decode(keyHex.trim()), true);
+        String address = key.toAddress(params).toString();
+        System.out.println("[bal] watch address = " + address);
+
+        File chainFile = new File("spv-bal.chain");
+        if (chainFile.exists() && !chainFile.delete()) System.out.println("[bal] WARN could not delete old store");
+        SPVBlockStore store = new SPVBlockStore(params, chainFile);
+        if (checkpointPath != null) {
+            try (java.io.InputStream in = new java.io.FileInputStream(checkpointPath)) {
+                org.bitcoinj.core.CheckpointManager cm = new org.bitcoinj.core.CheckpointManager(params, in);
+                org.bitcoinj.core.StoredBlock cp = cm.getCheckpointBefore(System.currentTimeMillis() / 1000L);
+                store.put(cp);
+                store.setChainHead(cp);
+                System.out.println("[bal] seeded store at checkpoint height=" + cp.getHeight()
+                        + " (sync only the headers after this)");
+            }
+        }
+
+        org.bitcoinj.wallet.Wallet wallet = new org.bitcoinj.wallet.Wallet(params);
+        wallet.importKey(key);
+        BlockChain chain = new BlockChain(ctx, wallet, store);
+        PeerGroup pg = new HighestHeightDownloadPeerGroup(ctx, chain);
+        pg.setUserAgent("bitchat-spv-bal", "0.1");
+        pg.addWallet(wallet);                 // injects the address into the BIP37 bloom filter
+        pg.setBloomFilteringEnabled(true);
+        pg.setMaxConnections(1);
+        pg.addAddress(new org.bitcoinj.core.PeerAddress(params,
+                java.net.InetAddress.getByName("127.0.0.1"), params.getPort()));
+
+        pg.startAsync();
+        pg.startBlockChainDownload(new DownloadProgressTracker());
+        final long deadline = System.currentTimeMillis() + minutes * 60_000L;
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(5000);
+            int h = chain.getBestChainHeight();
+            long bestPeer = 0;
+            for (Peer p : pg.getConnectedPeers()) bestPeer = Math.max(bestPeer, p.getBestHeight());
+            Coin est = wallet.getBalance(org.bitcoinj.wallet.Wallet.BalanceType.ESTIMATED);
+            System.out.println("[bal] height=" + h + " peers=" + pg.numConnectedPeers()
+                    + " bestPeer=" + bestPeer + " balance(est)=" + est.toFriendlyString());
+            if (bestPeer > 0 && h >= bestPeer) { System.out.println("[bal] caught up to tip."); break; }
+        }
+
+        System.out.println("[bal] ===== RESULT =====");
+        System.out.println("[bal] address   = " + address);
+        System.out.println("[bal] AVAILABLE = " + wallet.getBalance(org.bitcoinj.wallet.Wallet.BalanceType.AVAILABLE).toFriendlyString());
+        System.out.println("[bal] ESTIMATED = " + wallet.getBalance(org.bitcoinj.wallet.Wallet.BalanceType.ESTIMATED).toFriendlyString());
+        for (org.bitcoinj.core.TransactionOutput o : wallet.getUnspents()) {
+            int depth = o.getParentTransaction() != null ? o.getParentTransaction().getConfidence().getDepthInBlocks() : 0;
+            System.out.println("[bal]   utxo " + o.getParentTransactionHash() + ":" + o.getIndex()
+                    + " = " + o.getValue().toFriendlyString() + " depth=" + depth);
+        }
+        pg.stopAsync();
+        try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+        try { store.close(); } catch (Throwable ignored) {}
     }
 
     private static void run(int minutes) throws Exception {
