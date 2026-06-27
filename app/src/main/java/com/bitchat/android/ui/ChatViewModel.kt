@@ -105,6 +105,12 @@ class ChatViewModel(
     private val dataManager = DataManager(application.applicationContext)
     private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
     private val dogecoinWalletRepository by lazy { DogecoinWalletRepository(getApplication()) }
+    // On-device SPV light client (read-only, sync-on-demand). Created lazily on first SPV use; stopped in
+    // onCleared. Currently driven only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
+    private var dogecoinSpvService: com.bitchat.android.features.dogecoin.DogecoinSpvService? = null
+    private fun dogecoinSpv(): com.bitchat.android.features.dogecoin.DogecoinSpvService =
+        dogecoinSpvService ?: com.bitchat.android.features.dogecoin.DogecoinSpvService(getApplication(), dogecoinWalletRepository)
+            .also { dogecoinSpvService = it }
 
     // --- Milestone 3b: broadcast-over-mesh (node-optional sender + opt-in helper) ---
     private val broadcastHelper by lazy {
@@ -299,6 +305,45 @@ class ChatViewModel(
                     }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-balance ERR ${it.message}") }
                 }
                 "balance for ${addr.take(12)} net=${net.id} -> DbgConsole"
+            }
+            "doge-spv-start" -> {
+                val net = currentDogecoinNetwork()
+                if (!dogecoinSpv().isSupported(net)) "spv-start refused: not supported for ${net.id} (regtest has no peers)"
+                else {
+                    val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                    dogecoinSpv().start(net)
+                    "spv starting net=${net.id} watch=${addr.take(12)} (sync-on-demand) -> doge-spv-status"
+                }
+            }
+            "doge-spv-stop" -> { dogecoinSpv().stop(); "spv stopped" }
+            "doge-spv-status" -> {
+                val s = dogecoinSpv().status.value
+                "spv net=${s.network.id} running=${s.running} synced=${s.synced} height=${s.chainHeight} " +
+                    "peers=${s.peerCount} bestPeer=${s.bestPeerHeight} behind=${s.blocksBehind}"
+            }
+            "doge-spv-balance" -> {
+                val net = currentDogecoinNetwork()
+                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                viewModelScope.launch {
+                    runCatching {
+                        val bal = dogecoinSpv().snapshotBalance(net)
+                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-balance avail=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-balance ERR ${it.message}") }
+                }
+                "spv balance for ${addr.take(12)} net=${net.id} -> DbgConsole"
+            }
+            "doge-spv-unspents" -> {
+                val net = currentDogecoinNetwork()
+                viewModelScope.launch {
+                    runCatching {
+                        val utxos = dogecoinSpv().snapshotUnspents(net)
+                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents count=${utxos.size} total=${utxos.sumOf { it.amountKoinu }}k")
+                        utxos.take(5).forEachIndexed { i, u -> android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "  [$i] ${u.txid}:${u.vout} ${u.amountKoinu}k conf=${u.confirmations}") }
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents ERR ${it.message}") }
+                }
+                "spv unspents net=${net.id} -> DbgConsole"
             }
             "doge-self-broadcast" -> {
                 val to = args.getOrNull(0); val amt = args.getOrNull(1)
@@ -758,6 +803,7 @@ class ChatViewModel(
         // ViewModel. Compare-and-clear so a newer ViewModel that already re-registered is not clobbered.
         com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.clearSinkIfCurrent(broadcastResultSink)
         com.bitchat.android.debug.DebugConsole.clearHostIfCurrent(debugConsoleHost)
+        dogecoinSpvService?.stop()  // release the SPV PeerGroup/store if it was started this session
         // Note: Mesh service lifecycle is now managed by MainActivity
     }
     
