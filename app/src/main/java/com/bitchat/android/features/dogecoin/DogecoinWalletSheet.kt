@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -46,6 +47,8 @@ import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Visibility
@@ -227,6 +230,9 @@ fun DogecoinWalletSheet(
     var wifScanError by remember { mutableStateOf<String?>(null) }
     var showNodeHelp by remember { mutableStateOf(false) }
     val rpcUrlBlank = rpcUrl.trim().isEmpty()
+    // Node/developer settings (connection, network, helper, corroboration, danger zone) collapse into one
+    // expander so first-time users see balance/receive/send first; auto-open when no node is configured yet.
+    var advancedExpanded by remember { mutableStateOf(rpcUrlBlank) }
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
         !rpcUrlBlank && DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
     }
@@ -1352,6 +1358,28 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                item(key = "advanced_header") {
+                    WalletCard {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { advancedExpanded = !advancedExpanded },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_advanced_settings_title),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Icon(
+                                imageVector = if (advancedExpanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null
+                            )
+                        }
+                    }
+                }
+                if (advancedExpanded) {
                 item(key = "network") {
                     WalletCard {
                         Text(
@@ -1581,6 +1609,7 @@ fun DogecoinWalletSheet(
                             Text(stringResource(R.string.refresh_node_status))
                         }
                     }
+                }
                 }
 
                 item(key = "address") {
@@ -2406,6 +2435,7 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                if (advancedExpanded) {
                 item(key = "helper") {
                     WalletCard {
                         Row(
@@ -2624,6 +2654,7 @@ fun DogecoinWalletSheet(
                             Text(stringResource(R.string.dogecoin_reset_selected_wallet))
                         }
                     }
+                }
                 }
             }
 
