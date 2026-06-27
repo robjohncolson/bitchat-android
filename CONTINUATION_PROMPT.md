@@ -15,8 +15,9 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `a6fba67`** (SPV Phase 3 testnet broadcast PROVEN on-device;
-`:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `2d4271b`** (SPV wallet persistence; Phase 3 testnet
+broadcast PROVEN on-device; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check`
+clean). Working tree clean.
 
 > **CRITICAL: the app now uses bitcoinj/libdohj `0.14.7` (spongycastle), NOT `0.15.9`.** bitcoinj 0.15+
 > uses `org.bouncycastle` + `ECPoint.isCompressed()`, REMOVED in bcprov 1.70 — the bcprov the app uses for
@@ -27,6 +28,17 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
 
 ### The SPV arc so far (newest first) — Phases 0–3 SHIPPED; Phase 3 testnet broadcast PROVEN on-device
 
+- **`2d4271b` — SPV wallet PERSISTENCE (balance survives stop/start).** The soak exposed that the service
+  created a fresh in-memory bitcoinj `Wallet` each `start()` and never saved it → balance showed 0 after ANY
+  stop/start (sheet close, app background, backend switch) because the header store had advanced past the
+  funding block (funds always safe on-chain; only the cache was lost). Fix: `loadOrCreateSpvWallet` +
+  `autosaveToFile` per network; `stopLocked` flushes via `shutdownAutosaveAndWait`. **bitcoinj quirk:
+  `Wallet.loadFromFile` FAILS for Dogecoin (`NetworkParameters.fromID` doesn't know libdohj nets) — load via
+  the EXPLICIT-params `WalletProtobufSerializer().readWallet(params, null, parseToProto(stream))`.** Added
+  `clearPersistedState`/`doge-spv-rescan` (force re-scan, keeps key); `doge-reset` now clears store+wallet.
+  Validated on-device: 14.99 survived a stop→start ("Loaded persisted SPV wallet", instant, no rescan).
+  **UI note: the sheet defaults to "My node" (RPC); switch Connection → "Built-in" on testnet to SEE the SPV
+  balance (persists per-network via saveBackend).**
 - **`a6fba67` — SPV Phase 3 soak: fast checkpoint seed + `doge-reset` — testnet broadcast PROVEN ON-DEVICE (S24).**
   The on-device soak first exposed a seed-speed bug: the service seeded via the static
   `CheckpointManager.checkpoint(...,time)` which applies a ~7-day margin (~1M extra testnet headers), and the S24's
