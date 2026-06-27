@@ -138,6 +138,12 @@ class ChatViewModel(
         )
     }
 
+    /** Debug-only: explorer client built from the saved provider + API key (see the doge-explorer-config command). */
+    private fun debugExplorerClient() = com.bitchat.android.features.dogecoin.DogecoinExplorerClient(
+        provider = dogecoinWalletRepository.loadExplorerProvider(),
+        apiKey = dogecoinWalletRepository.loadExplorerApiKey()
+    )
+
     /**
      * Debug-only adb console host. Registered in [init] when BuildConfig.DEBUG and released in [onCleared].
      * Drive it from a host machine:
@@ -150,7 +156,9 @@ class ChatViewModel(
             "help" -> "cmds: help myid favorites candidates cansend forcemutual sendfav broadcast-test nostr tor | " +
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
-                "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
+                "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
+                "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -348,6 +356,85 @@ class ChatViewModel(
                     dogecoinWalletRepository.saveHelperEnabled(net, on)
                     reannounceIdentity()
                     "helper-enable=$on net=${net.id} (re-announced)"
+                }
+            }
+            // ---- explorer-backed "no-node" mode (public block explorer; Blockbook keyless default) ----
+            "doge-explorer-config" -> {
+                val p = when (args.firstOrNull()?.lowercase()) {
+                    "blockbook" -> com.bitchat.android.features.dogecoin.DogecoinExplorerProvider.BLOCKBOOK
+                    "blockchair" -> com.bitchat.android.features.dogecoin.DogecoinExplorerProvider.BLOCKCHAIR
+                    else -> null
+                }
+                if (p == null) "usage: doge-explorer-config <blockbook|blockchair> [apiKey]" else {
+                    dogecoinWalletRepository.saveExplorerProvider(p)
+                    args.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { dogecoinWalletRepository.saveExplorerApiKey(it) }
+                    "explorer provider=$p keySet=${dogecoinWalletRepository.loadExplorerApiKey() != null}"  // key never echoed
+                }
+            }
+            "doge-explorer-balance" -> {
+                val net = currentDogecoinNetwork()
+                val addr = args.firstOrNull() ?: dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                viewModelScope.launch {
+                    runCatching {
+                        val bal = debugExplorerClient().getBalance(addr, net)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-balance conf=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-balance ERR ${it.message}") }
+                }
+                "explorer-balance ${addr.take(12)} net=${net.id} -> DbgConsole"
+            }
+            "doge-explorer-utxos" -> {
+                val net = currentDogecoinNetwork()
+                val addr = args.firstOrNull() ?: dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                viewModelScope.launch {
+                    runCatching {
+                        val utxos = debugExplorerClient().listUtxos(addr, net)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-utxos count=${utxos.size} total=${utxos.sumOf { it.amountKoinu }}k")
+                        utxos.take(5).forEachIndexed { i, u -> android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "  [$i] ${u.txid}:${u.vout} ${u.amountKoinu}k conf=${u.confirmations}") }
+                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-utxos ERR ${it.message}") }
+                }
+                "explorer-utxos ${addr.take(12)} net=${net.id} -> DbgConsole"
+            }
+            "doge-explorer-broadcast" -> {
+                val raw = args.firstOrNull()
+                val net = currentDogecoinNetwork()
+                when {
+                    raw == null -> "usage: doge-explorer-broadcast <rawTxHex>"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
+                    else -> {
+                        viewModelScope.launch {
+                            runCatching {
+                                val txid = debugExplorerClient().broadcast(raw, net)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-broadcast OK txid=$txid")
+                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-broadcast ERR ${it.message}") }
+                        }
+                        "explorer-broadcast launched net=${net.id} -> DbgConsole"
+                    }
+                }
+            }
+            "doge-explorer-send" -> {
+                val to = args.getOrNull(0); val amt = args.getOrNull(1)
+                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+                val net = currentDogecoinNetwork()
+                when {
+                    to == null || amt == null -> "usage: doge-explorer-send <addr> <amountDoge> [feePerKbKoinu]"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
+                    else -> {
+                        viewModelScope.launch {
+                            runCatching {
+                                val explorer = debugExplorerClient()
+                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
+                                val utxos = explorer.listUtxos(snap.key.address, net)
+                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
+                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
+                                    network = net, feePerKbKoinu = feeKb,
+                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send signed txid=${signed.txid} fee=${signed.feeKoinu} utxos=${utxos.size}")
+                                val txid = explorer.broadcast(signed.rawTransactionHex, net)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send BROADCAST OK txid=$txid")
+                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send ERR ${it.message}") }
+                        }
+                        "explorer-send launched net=${net.id} (no-node: explorer UTXOs + explorer broadcast) -> DbgConsole"
+                    }
                 }
             }
             // ---- mesh / connectivity ----

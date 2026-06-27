@@ -210,6 +210,21 @@ class DogecoinWalletRepository(context: Context) {
             .apply()
     }
 
+    // ---- Explorer-backed ("no-node") mode config: which public-explorer provider + optional API key ----
+    fun loadExplorerProvider(): DogecoinExplorerProvider =
+        runCatching { DogecoinExplorerProvider.valueOf(prefs.getString("explorer_provider", null) ?: "") }
+            .getOrDefault(DogecoinExplorerProvider.BLOCKBOOK)
+
+    fun saveExplorerProvider(provider: DogecoinExplorerProvider) {
+        prefs.edit().putString("explorer_provider", provider.name).apply()
+    }
+
+    fun loadExplorerApiKey(): String? = prefs.getString("explorer_api_key", null)?.trim()?.takeIf { it.isNotBlank() }
+
+    fun saveExplorerApiKey(key: String) {
+        prefs.edit().putString("explorer_api_key", key.trim()).apply()
+    }
+
     /**
      * Whether the helper only serves mutual-favorite peers. Defaults to true (favorites-only) to keep
      * the privacy-linkage and Sybil/amplification surface small for a privacy-first app.
