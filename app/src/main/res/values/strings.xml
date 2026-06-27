@@ -332,6 +332,8 @@
   <string name="dogecoin_balance_max_spendable">Max send after fee: %1$s DOGE. Estimated fee: %2$s DOGE.</string>
   <string name="dogecoin_confirmed_utxos_title">Spendable coins</string>
   <string name="dogecoin_pending_utxos_title">Incoming (not yet spendable)</string>
+  <string name="dogecoin_show_coins">Show coins (%1$d)</string>
+  <string name="dogecoin_hide_coins">Hide coin details</string>
   <string name="dogecoin_utxo_row">%1$s:%2$d - %3$s DOGE - %4$d conf</string>
   <string name="dogecoin_utxo_more">+%1$d more UTXOs</string>
   <string name="dogecoin_activity_title">Recent node activity</string>

@@ -233,6 +233,7 @@ fun DogecoinWalletSheet(
     // Node/developer settings (connection, network, helper, corroboration, danger zone) collapse into one
     // expander so first-time users see balance/receive/send first; auto-open when no node is configured yet.
     var advancedExpanded by remember { mutableStateOf(rpcUrlBlank) }
+    var showUtxoDetails by remember { mutableStateOf(false) }
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
         !rpcUrlBlank && DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
     }
@@ -1790,7 +1791,7 @@ fun DogecoinWalletSheet(
                                     R.string.dogecoin_balance_available,
                                     DogecoinAmount.formatKoinu(balance.confirmedKoinu)
                                 ),
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.headlineMedium,
                                 fontFamily = FontFamily.Monospace
                             )
                             Text(
@@ -1826,17 +1827,26 @@ fun DogecoinWalletSheet(
                             }
                             if (balance.utxos.isNotEmpty()) {
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                                if (balance.confirmedUtxos.isNotEmpty()) {
-                                    DogecoinUtxoSection(
-                                        title = stringResource(R.string.dogecoin_confirmed_utxos_title),
-                                        utxos = balance.confirmedUtxos
-                                    )
-                                }
-                                if (balance.unconfirmedUtxos.isNotEmpty()) {
-                                    DogecoinUtxoSection(
-                                        title = stringResource(R.string.dogecoin_pending_utxos_title),
-                                        utxos = balance.unconfirmedUtxos
-                                    )
+                                Text(
+                                    text = if (showUtxoDetails) stringResource(R.string.dogecoin_hide_coins)
+                                    else stringResource(R.string.dogecoin_show_coins, balance.utxoCount),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.clickable { showUtxoDetails = !showUtxoDetails }
+                                )
+                                if (showUtxoDetails) {
+                                    if (balance.confirmedUtxos.isNotEmpty()) {
+                                        DogecoinUtxoSection(
+                                            title = stringResource(R.string.dogecoin_confirmed_utxos_title),
+                                            utxos = balance.confirmedUtxos
+                                        )
+                                    }
+                                    if (balance.unconfirmedUtxos.isNotEmpty()) {
+                                        DogecoinUtxoSection(
+                                            title = stringResource(R.string.dogecoin_pending_utxos_title),
+                                            utxos = balance.unconfirmedUtxos
+                                        )
+                                    }
                                 }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
