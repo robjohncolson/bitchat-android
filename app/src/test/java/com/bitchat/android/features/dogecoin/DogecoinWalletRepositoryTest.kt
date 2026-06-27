@@ -130,6 +130,19 @@ class DogecoinWalletRepositoryTest {
     }
 
     @Test
+    fun `wallet backend defaults to RPC and persists scoped per network across instances`() {
+        var repository = DogecoinWalletRepository(context)
+        assertEquals(DogecoinBackend.RPC, repository.loadBackend(DogecoinNetwork.MAINNET))
+        assertEquals(DogecoinBackend.RPC, repository.loadBackend(DogecoinNetwork.TESTNET))
+
+        repository.saveBackend(DogecoinNetwork.TESTNET, DogecoinBackend.SPV)
+        repository = DogecoinWalletRepository(context)
+        // Per-network scope: testnet changed, mainnet still the default.
+        assertEquals(DogecoinBackend.SPV, repository.loadBackend(DogecoinNetwork.TESTNET))
+        assertEquals(DogecoinBackend.RPC, repository.loadBackend(DogecoinNetwork.MAINNET))
+    }
+
+    @Test
     fun `loadWalletIfPresent is read-only and never generates a key`() {
         val repository = DogecoinWalletRepository(context)
 

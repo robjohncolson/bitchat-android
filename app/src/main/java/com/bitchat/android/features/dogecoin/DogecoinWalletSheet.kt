@@ -146,6 +146,13 @@ fun DogecoinWalletSheet(
     val clipboardManager = LocalClipboardManager.current
     val repository = remember(context) { DogecoinWalletRepository(context) }
     val rpcClient = remember { DogecoinRpcClient() }
+    // Phase 1 read seam: balance/UTXO reads go through DogecoinWalletDataSource so a later phase can swap
+    // in the SPV light-client backend without re-touching these call sites. Only RPC is wired now (the
+    // persisted default, repository.loadBackend); using the caller's already-captured rpcConfig keeps each
+    // read byte-identical to the prior direct rpcClient call. Node-specific ops (status/watch/mempool/
+    // rescan), rich activity, and broadcast stay on rpcClient until later phases.
+    fun walletReadSource(rpcConfig: DogecoinRpcConfig): DogecoinWalletDataSource =
+        DogecoinRpcDataSource(rpcClient, rpcConfig)
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // Only mainnet and testnet are user-selectable in release builds. Debug builds also expose
@@ -547,7 +554,7 @@ fun DogecoinWalletSheet(
         repository.saveRpcConfig(network, config)
         coroutineScope.launch {
             runCatching {
-                rpcClient.getWalletBalance(config, address, network)
+                walletReadSource(config).getBalance(address, network)
             }.onSuccess {
                 if (
                     selectedNetwork == network &&
@@ -619,7 +626,7 @@ fun DogecoinWalletSheet(
         coroutineScope.launch {
             runCatching {
                 rpcClient.rescanWalletHistory(config, address, network, startHeight)
-                val balance = rpcClient.getWalletBalance(config, address, network)
+                val balance = walletReadSource(config).getBalance(address, network)
                 val watchStatus = runCatching {
                     rpcClient.getAddressWatchStatus(config, address, network)
                 }
@@ -722,7 +729,7 @@ fun DogecoinWalletSheet(
         repository.saveRpcConfig(network, config)
         coroutineScope.launch {
             runCatching {
-                val utxos = rpcClient.listUnspent(config, wallet.address, network)
+                val utxos = walletReadSource(config).listUnspent(wallet.address, network)
                 refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
                 val signedTransaction = DogecoinTransactionBuilder.createSignedTransaction(
                     wallet = wallet,
@@ -803,7 +810,7 @@ fun DogecoinWalletSheet(
         repository.saveRpcConfig(network, config)
         coroutineScope.launch {
             runCatching {
-                val utxos = rpcClient.listUnspent(config, wallet.address, network)
+                val utxos = walletReadSource(config).listUnspent(wallet.address, network)
                 refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
                 DogecoinTransactionBuilder.maxSpendable(
                     wallet = wallet,
@@ -913,7 +920,7 @@ fun DogecoinWalletSheet(
         coroutineScope.launch {
             runCatching {
                 transaction.requireConsistentRawTransactionId()
-                val currentUtxos = rpcClient.listUnspent(config, address, network)
+                val currentUtxos = walletReadSource(config).listUnspent(address, network)
                 transaction.requireSelectedInputsStillSpendable(currentUtxos)
                 refreshAddressWatchStatusFromNode(config, address, network, configRevision)
                 rpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
@@ -945,7 +952,7 @@ fun DogecoinWalletSheet(
                         Toast.LENGTH_SHORT
                     ).show()
                     runCatching {
-                        rpcClient.getWalletBalance(config, address, network)
+                        walletReadSource(config).getBalance(address, network)
                     }.onSuccess { balance ->
                         if (
                             selectedNetwork == network &&
@@ -1083,7 +1090,7 @@ fun DogecoinWalletSheet(
         coroutineScope.launch {
             runCatching {
                 transaction.requireConsistentRawTransactionId()
-                val currentUtxos = rpcClient.listUnspent(config, address, network)
+                val currentUtxos = walletReadSource(config).listUnspent(address, network)
                 transaction.requireSelectedInputsStillSpendable(currentUtxos)
                 refreshAddressWatchStatusFromNode(config, address, network, configRevision)
                 when (action) {

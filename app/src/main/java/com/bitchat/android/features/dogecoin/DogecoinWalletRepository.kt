@@ -210,6 +210,16 @@ class DogecoinWalletRepository(context: Context) {
             .apply()
     }
 
+    // ---- Which backend serves balance/UTXO reads (and later broadcast) for a network. Default RPC.
+    // SPV (bitcoinj/libdohj) is wired in a later phase; see docs/dogecoin-spv-integration-plan.md. ----
+    fun loadBackend(network: DogecoinNetwork): DogecoinBackend =
+        runCatching { DogecoinBackend.valueOf(prefs.getString(backendKey(network), null) ?: "") }
+            .getOrDefault(DogecoinBackend.RPC)
+
+    fun saveBackend(network: DogecoinNetwork, backend: DogecoinBackend) {
+        prefs.edit().putString(backendKey(network), backend.name).apply()
+    }
+
     // ---- Explorer-backed ("no-node") mode config: which public-explorer provider + optional API key ----
     fun loadExplorerProvider(): DogecoinExplorerProvider =
         runCatching { DogecoinExplorerProvider.valueOf(prefs.getString("explorer_provider", null) ?: "") }
@@ -503,6 +513,7 @@ class DogecoinWalletRepository(context: Context) {
 
         fun privateKeyKey(network: DogecoinNetwork): String = "${network.id}_private_key_hex"
         fun helperEnabledKey(network: DogecoinNetwork): String = "${network.id}_helper_enabled"
+        fun backendKey(network: DogecoinNetwork): String = "${network.id}_backend"
         fun compressedKey(network: DogecoinNetwork): String = "${network.id}_compressed"
         fun createdAtKey(network: DogecoinNetwork): String = "${network.id}_created_at"
         fun rpcUrlKey(network: DogecoinNetwork): String = "${network.id}_rpc_url"
