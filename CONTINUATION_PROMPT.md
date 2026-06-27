@@ -15,7 +15,7 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `101fb0b`** (`:app:testDebugUnitTest` +
+`dogecoin-m2-pay-nickname`. **Last green commit: `3256ea2`** (`:app:testDebugUnitTest` +
 `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 > **CRITICAL: the app now uses bitcoinj/libdohj `0.14.7` (spongycastle), NOT `0.15.9`.** bitcoinj 0.15+
@@ -25,8 +25,16 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
 > is isolated + never signs (Option B). The feasibility-spike numbers below were on 0.15.9; re-validated on
 > 0.14.7 (199,710 testnet headers through AuxPoW, zero errors).
 
-### The SPV arc so far (newest first) — feasibility PROVEN; Phases 0+1 + nearly all of Phase 2 SHIPPED
+### The SPV arc so far (newest first) — feasibility PROVEN; Phases 0, 1, AND 2 (read-only SPV) SHIPPED
 
+- **`3256ea2` — SPV Phase 2 (FINAL): wallet-sheet backend selector + sync status — PHASE 2 COMPLETE.**
+  `DogecoinSpvService` is now a process SINGLETON (`getInstance`) so the sheet + console share ONE
+  PeerGroup/SPVBlockStore. `DogecoinWalletSheet`: a "Connection" selector under Advanced settings ("My node"
+  RPC default / "Built-in" SPV; hidden for REGTEST); `walletReadSource()` branches on backend (SPV→
+  `DogecoinSpvDataSource`, RPC byte-identical); SPV start-on-select / stop-on-dispose; a visible "Built-in
+  node" card shows sync progress (`StateFlow`); balance fills in reactively. **Sending DISABLED under SPV**
+  (broadcast is Phase 3) with an inline note. Behavior-preserving for default RPC. The read-only SPV backend
+  is now FULLY USABLE in the app.
 - **`101fb0b` — SPV Phase 2: DbgConsole drivers.** ChatViewModel owns a lazy `DogecoinSpvService` (stopped
   in onCleared); DEBUG console commands `doge-spv-start/-stop/-status/-balance/-unspents` (REGTEST refused;
   broadcast still throws). The on-device driver surface for SPV.
@@ -101,30 +109,28 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
   Doubles as a re-validation tool + basis for a `BuildCheckpoints` generator. Run: `gradlew -p
   tools/spv-spike run` (default local node, or `-PnoLocalhost`, or `-PpeerHost=127.0.0.1`).
 
-### NEXT STEP: finish PHASE 2 — only the sheet selector UI remains (read path PROVEN)
+### NEXT STEP: PHASE 3 — SPV broadcast (testnet first, fail-closed)
 
-DONE: 0.14.7 foundation + key-import gate (`d8b3f25`), `spv_birthdate` (`5e776b5`), `DogecoinSpvService` +
-`DogecoinSpvDataSource` (`0459bd6`), smart RPC checkpoint generator + validated asset (`f94262a`), **LIVE
-read validation (`a2d7bae` — SPV found 12.34 in a funded testnet addr end-to-end)**, and **DbgConsole
-drivers (`101fb0b` — `doge-spv-*`)**. REMAINING:
-- **Sheet selector UI (production wiring) — the last Phase-2 piece.** Expand `DogecoinWalletSheet.walletReadSource()`
-  to branch on `repository.loadBackend(network)` (RPC→`DogecoinRpcDataSource`, SPV→`DogecoinSpvDataSource`
-  over the ChatViewModel-owned `DogecoinSpvService`); add a backend selector control; OBSERVE the
-  `StateFlow<DogecoinSpvStatus>` to show sync progress (the one-shot Refresh UX must become an observed
-  display or it misreports mid-sync). Hide SPV for REGTEST. The service must be reachable from the sheet
-  (thread it from ChatViewModel, or have the sheet create/own one keyed on backend==SPV).
-- **Optional on-device console confirmation** (the desktop proof already validates the logic): build+install
-  the debug APK, `doge-network testnet` → `doge-address` → fund that addr via node `sendtoaddress` → relaunch
-  → `doge-spv-start` → watch `doge-spv-status` → `doge-spv-balance` shows the funds. (Phone sync ≈ ~50k headers.)
+PHASE 2 (read-only SPV) is COMPLETE — the built-in light client reads balance/UTXOs and is selectable in
+the wallet sheet. Phase 3 lets SPV BROADCAST (build+sign STILL on-device via `DogecoinTransactionBuilder`
+— Option B). Per docs/dogecoin-spv-integration-plan.md:
+- Un-throw `DogecoinSpvDataSource.broadcast()`: run `DogecoinRawTxValidator.normalize`, deserialize the
+  signed hex into a libdohj `Transaction`, RE-SERIALIZE + recompute the txid via
+  `DogecoinTransactionBuilder.transactionId`, and **FAIL CLOSED** on ANY byte/txid divergence — never hand
+  bitcoinj's bytes to `peerGroup.broadcastTransaction` unless they exactly match bitchat's signed hex.
+- Pin bitcoinj `minBroadcastConnections` to the peer floor (single-peer `TransactionBroadcast` can deadlock).
+- In the sheet send path, when backend==SPV set `mempoolAcceptance.checked=false` so the EXISTING
+  `requiresPolicyUnavailableAcknowledgement` gate fires (no testmempoolaccept for SPV); RE-ENABLE the send
+  button for SPV (currently gated off at `DogecoinWalletSheet` send `Button` + the inline note). Render the
+  peerGroup return as **Claimed ONLY** — require the existing Claimed→Confirmed on-chain corroboration before
+  a success receipt. MAINNET stays hard-blocked in Phase 3.
 - OPEN (need user/live test): exact `spv_birthdate` floor for OLD imported keys; whether bitcoinj `PeerGroup`
   can route over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; Arti couldn't build Nostr
   circuits) → default clearnet-with-disclosure, NEVER silent fallback.
-- OPEN (need user/live test): exact `spv_birthdate` floor for OLD imported keys; whether bitcoinj `PeerGroup`
-  can route over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; Arti couldn't build Nostr
-  circuits) → default clearnet-with-disclosure, NEVER silent fallback.
+- Optional Phase-2 on-device confirmation first: build+install → pick "Built-in" in the sheet (Advanced →
+  Connection), or `doge-network testnet`→`doge-address`→fund via node→`doge-spv-start`→`doge-spv-balance`.
 
-Later: Phase 3 (testnet broadcast — fail-closed re-verify txid, render Claimed-not-Confirmed), Phase 4
-(mainnet, user-gated, after a read-only soak). MAINNET is the last switch, per-spend authorized.
+Later: Phase 4 (mainnet, user-gated, after a read-only soak). MAINNET is the last switch, per-spend authorized.
 
 ### Node state + deferred balance-match spike (Task 3)
 **The testnet node is now HEALTHY** (user closed the mainnet instance 2026-06-27; only testnet runs —
@@ -221,7 +227,7 @@ Debug console: `debug/DebugConsole.kt` + `app/src/debug/AndroidManifest.xml` + `
 .\gradlew.bat -p "C:\Users\rober\Downloads\Projects\bitchat-android" :app:testDebugUnitTest :app:assembleDebug --console=plain
 git diff --check
 ```
-Last green at `101fb0b`. The `DogecoinSignerRegressionTest` (app signer) AND `DogecoinSpvKeyImportTest`
+Last green at `3256ea2`. The `DogecoinSignerRegressionTest` (app signer) AND `DogecoinSpvKeyImportTest`
 (bitcoinj derives the app's address) are the money-path canaries — if either ever fails
 after a dep change, the audited ECDSA signer changed; REJECT the change, do not re-baseline.
 
