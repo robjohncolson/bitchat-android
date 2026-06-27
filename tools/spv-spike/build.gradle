@@ -1,0 +1,48 @@
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+java {
+    // bitcoinj 0.15.9 predates modern JDKs; compile + run on JDK 17 regardless of the dev's JAVA_HOME.
+    toolchain { languageVersion = JavaLanguageVersion.of(17) }
+}
+
+dependencies {
+    // The make-or-break dependency: libdohj (Dogecoin params for bitcoinj) from JitPack.
+    // This transitively pulls org.bitcoinj:bitcoinj-core:0.15.9 from Maven Central.
+    implementation 'com.github.dogecoin:libdohj:v0.15.9'
+    // bitcoinj exposes Guava types (ListenableFuture via waitForPeers/startAsync) in its public API
+    // but declares Guava as `implementation`, so it isn't on our compile classpath. Pin the exact
+    // version bitcoinj 0.15.9 resolves (28.2-android) so we compile against the same Guava it runs on.
+    implementation 'com.google.guava:guava:28.2-android'
+    // So we actually SEE bitcoinj/libdohj log lines (VerificationException, retarget, peer handshake).
+    implementation 'org.slf4j:slf4j-simple:1.7.36'
+}
+
+application {
+    mainClass = 'SpvSpike'
+    applicationDefaultJvmArgs = [
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+        '--add-opens=java.base/java.nio=ALL-UNNAMED',
+        '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn',
+        '-Dorg.slf4j.simpleLogger.logFile=System.out',
+        '-Dorg.slf4j.simpleLogger.showThreadName=false',
+        '-Dorg.slf4j.simpleLogger.showDateTime=true',
+        '-Dorg.slf4j.simpleLogger.dateTimeFormat=HH:mm:ss'
+    ]
+}
+
+run {
+    // Timebox via a Gradle project property: -PrunMinutes=15 (default 8). Avoids -D arg-parsing pitfalls.
+    systemProperty 'spike.minutes', (project.findProperty('runMinutes') ?: '8').toString()
+    // Optional peer override: -PpeerHost=127.0.0.1 (e.g. point at the local node for the balance spike).
+    if (project.hasProperty('peerHost')) systemProperty 'spike.peerHost', project.property('peerHost').toString()
+    // -PnoLocalhost forces the public DNS path (don't auto-prefer a detected 127.0.0.1 node).
+    if (project.hasProperty('noLocalhost')) systemProperty 'spike.noLocalhost', '1'
+}
