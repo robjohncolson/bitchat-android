@@ -191,6 +191,64 @@ class DogecoinSpvService private constructor(
         )
     }
 
+    /**
+     * Phase 3: FAIL-CLOSED SPV broadcast (Option B — bitcoinj only relays; the bytes were signed by
+     * [DogecoinTransactionBuilder]). Returns the txid as CLAIMED (inputs reserved, tx handed to peers),
+     * or null if SPV cannot broadcast here (mainnet/regtest/unsynced/too-few-peers). THROWS only via
+     * [DogecoinSpvBroadcastVerifier] when the bytes are wrong (then nothing is ever broadcast).
+     *
+     * All fail-closed checks (network, sync, peer floor, verifier) run UNDER the lock, before the tx
+     * reaches the wire. [normalizedHex] MUST already be [DogecoinRawTxValidator.normalize]d, and
+     * [expectedTxid] MUST be [DogecoinTransactionBuilder.transactionId] of it.
+     *
+     * The blocking future await is a BEST-EFFORT propagation confirmation done OFF-lock — a timeout is
+     * NOT a failure (thin testnet peer sets often don't re-announce to the originator), so we never
+     * throw on timeout (that would invite a same-input double-spend retry). On-chain depth via
+     * [confirmationDepth] is the real proof of acceptance.
+     *
+     * If [PeerGroup.broadcastTransaction] itself throws after [Wallet.receivePending] (effectively
+     * unreachable behind the synced + peer-floor guards), the inputs stay locally reserved with nothing on
+     * the wire; a [stop]/[start] cycle rebuilds the wallet from the chain and clears the stale reservation.
+     */
+    fun broadcast(network: DogecoinNetwork, normalizedHex: String, expectedTxid: String): String? {
+        val prepared = synchronized(lock) {
+            if (network == DogecoinNetwork.MAINNET) return null          // Phase-3 hard block (Phase 4 lifts)
+            val params = paramsFor(network) ?: return null               // REGTEST has no SPV
+            val pg = peerGroup?.takeIf { activeNetwork == network } ?: return null
+            val w = wallet ?: return null
+            val st = _status.value
+            if (!st.synced || st.peerCount < MIN_PEERS) return null       // not caught up / eclipse floor
+            org.bitcoinj.core.Context.propagate(bitcoinjContext)
+            // Fail closed: bitcoinj must round-trip the signed bytes byte-for-byte AND agree on the txid.
+            val tx = DogecoinSpvBroadcastVerifier.verifiedTransaction(params, normalizedHex, expectedTxid)
+            // Reserve the spent inputs NOW so reads stop showing them as spendable (anti double-spend).
+            // receivePending does not alter the verified serialization, so the wire bytes stay canonical.
+            w.receivePending(tx, null)
+            pg.minBroadcastConnections = MIN_PEERS                        // avoid single-peer broadcast deadlock
+            pg.broadcastTransaction(tx) to tx                             // sends immediately; returns now
+        }
+        val (broadcast, tx) = prepared
+        // Completion = MIN_PEERS re-announced; timeout = still in flight. Either way the tx is CLAIMED.
+        runCatching {
+            broadcast.future().get(BROADCAST_TIMEOUT_SECS, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        return tx.hashAsString
+    }
+
+    /**
+     * Phase 3 corroboration: confirmation depth of OUR broadcast [txid] as the SPV chain catches up —
+     * no third party, no API key. Returns null if SPV is not the active backend for [network], the txid is
+     * malformed, or the tx is not (yet) known to the wallet; 0 if known but unconfirmed; the block depth
+     * (>=1) once it is mined. Callers keep polling on null/0 and treat >=1 as corroborated.
+     */
+    fun confirmationDepth(network: DogecoinNetwork, txid: String): Int? = synchronized(lock) {
+        val w = wallet?.takeIf { activeNetwork == network } ?: return null
+        org.bitcoinj.core.Context.propagate(bitcoinjContext)
+        val hash = runCatching { org.bitcoinj.core.Sha256Hash.wrap(txid.trim()) }.getOrNull() ?: return null
+        val tx = w.getTransaction(hash) ?: return null
+        runCatching { tx.confidence?.depthInBlocks }.getOrNull()
+    }
+
     private fun walletAddress(network: DogecoinNetwork): String =
         repository.loadWalletIfPresent(network)?.key?.address ?: ""
 
@@ -272,7 +330,8 @@ class DogecoinSpvService private constructor(
         const val USER_AGENT = "bitchat-dogecoin-spv"
         const val USER_AGENT_VERSION = "0.1"
         const val MAX_PEERS = 6
-        const val MIN_PEERS = 4 // eclipse-resistance floor for "synced"; broadcast (later) needs >=this too
+        const val MIN_PEERS = 4 // eclipse-resistance floor for "synced"; broadcast needs >=this too
         const val SYNCED_WITHIN_BLOCKS = 2L
+        const val BROADCAST_TIMEOUT_SECS = 25L // best-effort re-announce wait; timeout != failure (Claimed)
     }
 }

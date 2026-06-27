@@ -163,6 +163,7 @@ class ChatViewModel(
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
+                "doge-spv-start | doge-spv-stop | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
                 "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
@@ -344,6 +345,35 @@ class ChatViewModel(
                     }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents ERR ${it.message}") }
                 }
                 "spv unspents net=${net.id} -> DbgConsole"
+            }
+            "doge-spv-broadcast" -> {
+                val to = args.getOrNull(0); val amt = args.getOrNull(1)
+                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+                val net = currentDogecoinNetwork()
+                when {
+                    to == null || amt == null -> "usage: doge-spv-broadcast <addr> <amountDoge> [feePerKbKoinu]"
+                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
+                    else -> {
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
+                                // Node-free: build + sign from the SPV UTXO view, then relay via SPV peers.
+                                val utxos = dogecoinSpv().snapshotUnspents(net)
+                                    ?: error("spv not active for ${net.id} (run doge-spv-start first)")
+                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
+                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
+                                    network = net, feePerKbKoinu = feeKb,
+                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+                                )
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} change=${signed.changeKoinu}")
+                                val txid = com.bitchat.android.features.dogecoin.DogecoinSpvDataSource(dogecoinSpv())
+                                    .broadcast(signed.rawTransactionHex, net)
+                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast CLAIMED txid=$txid (poll doge-spv-status for depth)")
+                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast ERR ${it.message}") }
+                        }
+                        "spv-broadcast launched net=${net.id} (on-device SPV peers; Claimed only) -> DbgConsole"
+                    }
+                }
             }
             "doge-self-broadcast" -> {
                 val to = args.getOrNull(0); val amt = args.getOrNull(1)

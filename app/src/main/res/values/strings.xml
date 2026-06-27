@@ -247,6 +247,7 @@
   <string name="dogecoin_peer_broadcast_pending">Asking a peer to broadcast…</string>
   <string name="dogecoin_send_receipt_via_peer">Relayed by one peer\'s node — its claim only, not corroborated or confirmed on-chain by this device. Verify the txid in a block explorer before treating it as settled.</string>
   <string name="dogecoin_send_receipt_via_peer_corroborated">Relayed and corroborated by two or more peers\' nodes. Not independently confirmed on-chain by this device — verify the txid to treat it as fully settled.</string>
+  <string name="dogecoin_send_receipt_via_spv_claimed">Claimed — broadcast to the Dogecoin network via the built-in light client. Not yet confirmed in a block; verify the txid in a block explorer before treating it as settled.</string>
   <string name="cd_send_doge">Send DOGE</string>
   <string name="dogecoin_request_share_text">Dogecoin %1$s payment request:\n%2$s</string>
   <string name="dogecoin_request_qr_description">Dogecoin payment request QR code</string>

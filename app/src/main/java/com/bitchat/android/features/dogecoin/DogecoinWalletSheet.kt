@@ -115,9 +115,11 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -752,7 +754,9 @@ fun DogecoinWalletSheet(
         coroutineScope.launch {
             runCatching {
                 val utxos = walletReadSource(config).listUnspent(wallet.address, network)
-                refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
+                if (dogecoinBackend != DogecoinBackend.SPV) {
+                    refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
+                }
                 val signedTransaction = DogecoinTransactionBuilder.createSignedTransaction(
                     wallet = wallet,
                     utxos = utxos,
@@ -762,11 +766,18 @@ fun DogecoinWalletSheet(
                     feePerKbKoinu = feePerKbKoinu,
                     minimumOutputKoinu = minimumOutputKoinu
                 )
-                val mempoolAcceptance = rpcClient.testMempoolAcceptance(
-                    config = config,
-                    rawTransactionHex = signedTransaction.rawTransactionHex,
-                    network = network
-                )
+                val mempoolAcceptance = if (dogecoinBackend == DogecoinBackend.SPV) {
+                    // No testmempoolaccept under SPV. checked=false records "no node policy check ran"
+                    // (honest), satisfies the check below, and auto-engages the MAINNET ack in Phase 4.
+                    // requiresPolicyUnavailableAcknowledgement() is MAINNET-gated, so no ack pops on testnet.
+                    DogecoinMempoolAcceptance(checked = false, allowed = null)
+                } else {
+                    rpcClient.testMempoolAcceptance(
+                        config = config,
+                        rawTransactionHex = signedTransaction.rawTransactionHex,
+                        network = network
+                    )
+                }
                 check(!mempoolAcceptance.checked || mempoolAcceptance.allowed == true) {
                     mempoolAcceptance.error ?: context.getString(R.string.dogecoin_send_policy_rejected)
                 }
@@ -944,8 +955,14 @@ fun DogecoinWalletSheet(
                 transaction.requireConsistentRawTransactionId()
                 val currentUtxos = walletReadSource(config).listUnspent(address, network)
                 transaction.requireSelectedInputsStillSpendable(currentUtxos)
-                refreshAddressWatchStatusFromNode(config, address, network, configRevision)
-                rpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
+                if (dogecoinBackend == DogecoinBackend.SPV) {
+                    // Built-in light client: peers relay only; a returned txid is CLAIMED, not accepted.
+                    // The receipt below stays Claimed until the on-chain confirmationDepth poll corroborates.
+                    spvDataSource.broadcast(transaction.rawTransactionHex, network)
+                } else {
+                    refreshAddressWatchStatusFromNode(config, address, network, configRevision)
+                    rpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
+                }
             }.onSuccess { txid ->
                 if (
                     selectedNetwork == network &&
@@ -965,8 +982,31 @@ fun DogecoinWalletSheet(
                         changeKoinu = transaction.changeKoinu,
                         changeAddress = transaction.changeAddress,
                         requestLabel = transaction.requestLabel,
-                        requestMessage = transaction.requestMessage
+                        requestMessage = transaction.requestMessage,
+                        viaSpvClaimedOnly = dogecoinBackend == DogecoinBackend.SPV
                     )
+                    if (dogecoinBackend == DogecoinBackend.SPV && txid == transaction.txid) {
+                        // Claimed -> Confirmed corroboration from our OWN synced chain (no third party).
+                        // Leaves the receipt Claimed if depth never reaches 1 within the poll budget.
+                        coroutineScope.launch {
+                            repeat(DOGECOIN_SPV_CORROBORATION_POLLS) {
+                                // Stop promptly if the receipt was dismissed/replaced or the backend switched.
+                                if (dogecoinBackend != DogecoinBackend.SPV || sentReceipt?.txid != txid) return@launch
+                                val depth = withContext(Dispatchers.IO) {
+                                    spvService.confirmationDepth(network, txid)
+                                }
+                                if (depth != null && depth >= 1) {
+                                    val latest = sentReceipt
+                                    if (selectedNetwork == network && snapshot.key.address == address &&
+                                        latest != null && latest.txid == txid) {
+                                        sentReceipt = latest.copy(viaSpvClaimedOnly = false)
+                                    }
+                                    return@launch
+                                }
+                                delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+                            }
+                        }
+                    }
                     sendAmount = ""
                     Toast.makeText(
                         context,
@@ -983,9 +1023,12 @@ fun DogecoinWalletSheet(
                         ) {
                             walletBalance = balance
                             walletBalanceError = null
-                            refreshAddressWatchStatusFromNode(config, address, network, configRevision)
+                            if (dogecoinBackend != DogecoinBackend.SPV) {
+                                refreshAddressWatchStatusFromNode(config, address, network, configRevision)
+                            }
                             runCatching {
-                                rpcClient.getWalletActivity(config, address, network)
+                                if (dogecoinBackend == DogecoinBackend.SPV) emptyList()
+                                else rpcClient.getWalletActivity(config, address, network)
                             }.onSuccess { activity ->
                                 if (
                                     selectedNetwork == network &&
@@ -1354,9 +1397,10 @@ fun DogecoinWalletSheet(
     LaunchedEffect(dogecoinBackend, selectedNetwork) {
         if (dogecoinBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
             walletBalance = null  // show "syncing" until the light client reads a balance
-            spvService.start(selectedNetwork)
+            // start() opens the mmap block store + loads checkpoints + builds the chain — keep it off Main.
+            withContext(Dispatchers.IO) { spvService.start(selectedNetwork) }
         } else {
-            spvService.stop()
+            withContext(Dispatchers.IO) { spvService.stop() }
         }
     }
     DisposableEffect(Unit) { onDispose { spvService.stop() } }
@@ -1468,7 +1512,7 @@ fun DogecoinWalletSheet(
                         }
                         Text(
                             text = if (dogecoinBackend == DogecoinBackend.SPV)
-                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. Read-only for now (sending still uses a node)."
+                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. Sending is testnet-only for now and connects to Dogecoin peers over the internet, so your address may be linkable to your IP (Tor routing isn't available yet)."
                             else "Connects to your own Dogecoin Core node over RPC.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
@@ -2488,6 +2532,14 @@ fun DogecoinWalletSheet(
                                 "\n" + stringResource(R.string.dogecoin_send_receipt_message, message)
                             }.orEmpty()
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (receipt.viaSpvClaimedOnly) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_send_receipt_via_spv_claimed),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 if (receipt.viaPeer) {
                                     Text(
                                         text = stringResource(
@@ -2570,10 +2622,12 @@ fun DogecoinWalletSheet(
                                 }
                             }
                         }
+                        val spvSendReady = dogecoinBackend == DogecoinBackend.SPV &&
+                            spvStatus.synced && selectedNetwork != DogecoinNetwork.MAINNET
                         Button(
                             onClick = { reviewSend() },
-                            // SPV broadcast is a later phase; sending stays on the node/mesh path for now.
-                            enabled = !sending && !rescanning && nodeReady && dogecoinBackend != DogecoinBackend.SPV,
+                            enabled = !sending && !rescanning &&
+                                ((dogecoinBackend != DogecoinBackend.SPV && nodeReady) || spvSendReady),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -2586,9 +2640,17 @@ fun DogecoinWalletSheet(
                                 }
                             )
                         }
-                        if (dogecoinBackend == DogecoinBackend.SPV) {
+                        if (dogecoinBackend == DogecoinBackend.SPV && selectedNetwork == DogecoinNetwork.MAINNET) {
                             Text(
-                                text = "Sending with the built-in node arrives in a later update — switch Connection to \"My node\" (under Advanced settings) to send for now.",
+                                text = "Built-in sending is testnet-only for now — switch Connection to \"My node\" (under Advanced settings) to send on mainnet.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                lineHeight = 18.sp
+                            )
+                        } else if (dogecoinBackend == DogecoinBackend.SPV && !spvStatus.synced) {
+                            Text(
+                                text = "Syncing the built-in light client… sending unlocks once it catches up " +
+                                    "(peers ${spvStatus.peerCount}, ${spvStatus.blocksBehind} blocks behind).",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
@@ -2957,6 +3019,12 @@ fun DogecoinWalletSheet(
             nodeReady = nodeReady
         )
         val canBroadcastThroughConfiguredNode = transaction.network == selectedNetwork && broadcastNodeReady
+        val canBroadcastViaSpv = dogecoinBackend == DogecoinBackend.SPV && spvStatus.synced &&
+            transaction.network == selectedNetwork && transaction.network != DogecoinNetwork.MAINNET
+        // Route-mirroring: gate the confirm button on EXACTLY the backend broadcastSignedTransaction will use,
+        // so each layer mainnet-blocks SPV independently and the button can't enable via a configured node
+        // while routing actually goes to an unsynced SPV.
+        val canBroadcastNow = if (dogecoinBackend == DogecoinBackend.SPV) canBroadcastViaSpv else canBroadcastThroughConfiguredNode
 
         AlertDialog(
             onDismissRequest = {
@@ -3253,7 +3321,8 @@ fun DogecoinWalletSheet(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(stringResource(R.string.dogecoin_share_raw_transaction))
                     }
-                    if (!transactionReviewExpired && !canBroadcastThroughConfiguredNode && hasHelperCandidate) {
+                    if (!transactionReviewExpired && !canBroadcastThroughConfiguredNode &&
+                        hasHelperCandidate && dogecoinBackend != DogecoinBackend.SPV) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                         Text(
                             text = stringResource(R.string.dogecoin_peer_broadcast_explainer),
@@ -3312,7 +3381,7 @@ fun DogecoinWalletSheet(
                     onClick = { broadcastSignedTransaction(transaction) },
                         enabled = !sending &&
                         canExportOrBroadcastAfterAcknowledgements &&
-                        canBroadcastThroughConfiguredNode
+                        canBroadcastNow
                 ) {
                     Text(
                         stringResource(
@@ -4241,7 +4310,10 @@ private data class DogecoinBroadcastReceipt(
     val viaPeer: Boolean = false,  // 3b: broadcast was relayed by a peer's node, not this device's node
     // 3b.1: when relayed by a peer, whether two or more helpers independently corroborated it. A single
     // helper's claim (false) is not chain-verified by this device and gets the stronger "verify" warning.
-    val peerCorroborated: Boolean = false
+    val peerCorroborated: Boolean = false,
+    // Phase 3: SPV self-broadcast was relayed to peers but is not yet chain-confirmed. Renders "Claimed"
+    // until the on-chain confirmationDepth poll flips it to false (then it shows as a normal receipt).
+    val viaSpvClaimedOnly: Boolean = false
 ) {
     val totalDebitKoinu: Long
         get() = dogecoinSaturatingAddKoinu(sendAmountKoinu, feeKoinu)
@@ -4329,6 +4401,8 @@ private const val DOGECOIN_CONFIRM_UTXO_PREVIEW_LIMIT = 3
 private const val DOGECOIN_ACTIVITY_PREVIEW_LIMIT = 5
 private const val DOGECOIN_SEND_ITEM_INDEX = 6
 private const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
+private const val DOGECOIN_SPV_CORROBORATION_POLLS = 40
+private const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
 private const val DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS = 650L
 
 private class DogecoinQrCodeAnalyzer(
