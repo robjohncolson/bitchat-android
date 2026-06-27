@@ -1613,146 +1613,6 @@ fun DogecoinWalletSheet(
                 }
                 }
 
-                item(key = "address") {
-                    WalletCard {
-                        Text(
-                            text = stringResource(R.string.dogecoin_receive_address),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                        SelectionContainer {
-                            Text(
-                                text = snapshot.key.address,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 15.sp,
-                                lineHeight = 20.sp
-                            )
-                        }
-                        DogecoinQrCodeImage(
-                            data = receiveUri,
-                            contentDescription = stringResource(R.string.dogecoin_address_qr_description),
-                            size = 160.dp,
-                            modifier = Modifier.align(Alignment.CenterHorizontally)
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    copy(
-                                        snapshot.key.address,
-                                        context.getString(R.string.dogecoin_address_copied)
-                                    )
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(stringResource(R.string.copy_address))
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    copy(
-                                        receiveUri,
-                                        context.getString(R.string.dogecoin_receive_uri_copied)
-                                    )
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(stringResource(R.string.dogecoin_copy_receive_uri))
-                            }
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                shareExternal(
-                                    receiveShareText,
-                                    context.getString(R.string.dogecoin_share_address_external_title),
-                                    context.getString(R.string.dogecoin_address_share_failed)
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.dogecoin_share_address))
-                        }
-                        Button(
-                            onClick = {
-                                onShareToChat(receiveShareText)
-                                Toast.makeText(
-                                    context,
-                                    context.getString(R.string.dogecoin_address_shared),
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.share_to_chat))
-                        }
-                        OutlinedButton(
-                            onClick = { pendingWifCopy = snapshot.key },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.copy_wif))
-                        }
-                        Text(
-                            text = if (wifCopyRecorded) {
-                                stringResource(
-                                    R.string.dogecoin_wif_copy_recorded,
-                                    formatDogecoinWalletTime(wifCopyState.copiedAtMillis)
-                                )
-                            } else {
-                                stringResource(R.string.dogecoin_wif_copy_missing)
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (!wifCopyRecorded && selectedNetwork == DogecoinNetwork.MAINNET) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                            },
-                            lineHeight = 18.sp
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = stringResource(R.string.dogecoin_advertise_address_title),
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                                Text(
-                                    text = stringResource(
-                                        R.string.dogecoin_advertise_address_warning,
-                                        selectedNetwork.displayName
-                                    ),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                                    lineHeight = 16.sp
-                                )
-                            }
-                            Switch(
-                                checked = advertiseAddressEnabled,
-                                onCheckedChange = { enabled ->
-                                    advertiseAddressEnabled = enabled
-                                    repository.saveAdvertiseAddressEnabled(enabled)
-                                    onAdvertisedAddressChanged()
-                                }
-                            )
-                        }
-                    }
-                }
-
                 item(key = "balance") {
                     WalletCard {
                         Text(
@@ -1949,6 +1809,146 @@ fun DogecoinWalletSheet(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.tertiary,
                                 lineHeight = 18.sp
+                            )
+                        }
+                    }
+                }
+
+                item(key = "address") {
+                    WalletCard {
+                        Text(
+                            text = stringResource(R.string.dogecoin_receive_address),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = snapshot.key.address,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 15.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                        DogecoinQrCodeImage(
+                            data = receiveUri,
+                            contentDescription = stringResource(R.string.dogecoin_address_qr_description),
+                            size = 160.dp,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    copy(
+                                        snapshot.key.address,
+                                        context.getString(R.string.dogecoin_address_copied)
+                                    )
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.copy_address))
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    copy(
+                                        receiveUri,
+                                        context.getString(R.string.dogecoin_receive_uri_copied)
+                                    )
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(stringResource(R.string.dogecoin_copy_receive_uri))
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                shareExternal(
+                                    receiveShareText,
+                                    context.getString(R.string.dogecoin_share_address_external_title),
+                                    context.getString(R.string.dogecoin_address_share_failed)
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.dogecoin_share_address))
+                        }
+                        Button(
+                            onClick = {
+                                onShareToChat(receiveShareText)
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.dogecoin_address_shared),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.share_to_chat))
+                        }
+                        OutlinedButton(
+                            onClick = { pendingWifCopy = snapshot.key },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.copy_wif))
+                        }
+                        Text(
+                            text = if (wifCopyRecorded) {
+                                stringResource(
+                                    R.string.dogecoin_wif_copy_recorded,
+                                    formatDogecoinWalletTime(wifCopyState.copiedAtMillis)
+                                )
+                            } else {
+                                stringResource(R.string.dogecoin_wif_copy_missing)
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (!wifCopyRecorded && selectedNetwork == DogecoinNetwork.MAINNET) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            },
+                            lineHeight = 18.sp
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_advertise_address_title),
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_advertise_address_warning,
+                                        selectedNetwork.displayName
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                    lineHeight = 16.sp
+                                )
+                            }
+                            Switch(
+                                checked = advertiseAddressEnabled,
+                                onCheckedChange = { enabled ->
+                                    advertiseAddressEnabled = enabled
+                                    repository.saveAdvertiseAddressEnabled(enabled)
+                                    onAdvertisedAddressChanged()
+                                }
                             )
                         }
                     }
