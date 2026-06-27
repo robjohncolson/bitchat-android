@@ -15,7 +15,7 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `5e776b5`** (`:app:testDebugUnitTest` +
+`dogecoin-m2-pay-nickname`. **Last green commit: `0459bd6`** (`:app:testDebugUnitTest` +
 `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 > **CRITICAL: the app now uses bitcoinj/libdohj `0.14.7` (spongycastle), NOT `0.15.9`.** bitcoinj 0.15+
@@ -25,8 +25,19 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
 > is isolated + never signs (Option B). The feasibility-spike numbers below were on 0.15.9; re-validated on
 > 0.14.7 (199,710 testnet headers through AuxPoW, zero errors).
 
-### The SPV arc so far (newest first) — feasibility PROVEN; Phase 0, 1, and Phase-2 foundation SHIPPED
+### The SPV arc so far (newest first) — feasibility PROVEN; Phases 0, 1, and most of Phase 2 SHIPPED
 
+- **`0459bd6` — SPV Phase 2: `DogecoinSpvService` + `DogecoinSpvDataSource` (read-only, no money path).**
+  The on-device light client (bitcoinj 0.14.7). Compiled CLEANLY on 0.14.7 first try. Service: imports the
+  EXISTING key via `ECKey.fromPrivate` (key creation time = `loadSpvBirthdateMillis`); `SPVBlockStore` in
+  filesDir seeded by `CheckpointManager.checkpoint` from a `dogecoin-checkpoints-<net>.txt` asset IF present
+  (else slow sync); `BlockChain`+`PeerGroup` (bloom on); `HighestHeightDownloadPeerGroup.selectDownloadPeer`
+  override (no-SegWit); `DownloadProgressTracker`+peer listeners → `StateFlow<DogecoinSpvStatus>` (`synced` =
+  caught-up-within-2-blocks AND ≥4 peers); `snapshotBalance`/`snapshotUnspents` propagate the bitcoinj
+  Context. DataSource `broadcast()` THROWS this phase. REGTEST disabled. **0.14 read APIs that worked:
+  `wallet.unspents`, `out.parentTransactionHash`/`parentTransaction.confidence.depthInBlocks`/`value.value`/
+  `scriptBytes`, `Wallet.BalanceType.AVAILABLE`/`ESTIMATED` (NOT `AVAILABLE_SPENDABLE`).** NOT yet wired into
+  UI/console (backbone only, like Phase 1's adapters).
 - **`5e776b5` — SPV Phase 2: conservative `spv_birthdate` policy.** Separate per-network pref
   (`"${id}_spv_birthdate"`): generate → set to generation time (exact, fast); import → lower to a
   conservative floor (`DEFAULT_SPV_IMPORT_BIRTHDATE_MILLIS` = 2021-01-01, TUNABLE), NEVER the import
@@ -70,50 +81,42 @@ agreed end state: free, no user-run node, no paid explorer key, keys on-device. 
   Doubles as a re-validation tool + basis for a `BuildCheckpoints` generator. Run: `gradlew -p
   tools/spv-spike run` (default local node, or `-PnoLocalhost`, or `-PpeerHost=127.0.0.1`).
 
-### NEXT STEP: finish PHASE 2 — read-only SPV service (foundation + birthdate DONE)
+### NEXT STEP: finish PHASE 2 — read-only SPV (service DONE; wire it up + validate)
 
-Phase 2 = the on-device SPV service, READ-ONLY (broadcast disabled), no money path. DONE so far: the
-0.14.7 foundation + key-import gate (`d8b3f25`) and the `spv_birthdate` policy (`5e776b5`). REMAINING:
-- **`DogecoinSpvService`** (the big new file; **sync-on-demand while the wallet sheet is open — NOT a
-  foreground service in v1**, per the critique; owned at ChatViewModel/app scope, start on
-  SPV-select/sheet-open, pause/stop on close): libdohj params per network, `Context`, `new Wallet(params)`
-  + `wallet.importKey(ECKey.fromPrivate(hexDecode(privateKeyHex), isCompressed))` — NEVER
-  `Wallet.createDeterministic`; share the EXISTING key; set the key creation time from
-  `repository.loadSpvBirthdateMillis(network)`. `SPVBlockStore` (in `context.filesDir`) +
-  `CheckpointManager.checkpoint(params, assetStream, store, spvBirthdateSecs)` + `BlockChain` + `PeerGroup`.
-  Witness wart: override `selectDownloadPeer` to pick the highest-height peer (see the spike's
-  `HighestHeightDownloadPeerGroup`; 0.14.7 supports the override). Peer floor >1 (target 3-4). REGTEST →
-  SPV disabled. Clearnet default; Arti-Tor-over-P2P is UNVERIFIED (build-or-disclose, never silent clearnet).
-  `DownloadProgressTracker` → a `StateFlow{height,headers,peerCount,verification,syncedAsOf}`.
-- **`DogecoinSpvDataSource`** (implements `DogecoinWalletDataSource`): `listUnspent` from
-  `wallet.getUnspents()` (own-P2PKH, honest depth→confirmations); `getBalance` AVAILABLE vs ESTIMATED;
-  `broadcast()` THROWS this phase. Then expand the sheet's `walletReadSource()` to branch on `loadBackend`,
-  add a backend selector, and OBSERVE the sync StateFlow. Cross-check via `DbgConsole`, not sheet UI.
-- **CHECKPOINTS — user chose: GENERATE FROM THE TESTNET NODE** via bitcoinj `BuildCheckpoints` (needs the
-  synced testnet node reachable — but P2P 44556 suffices, which works even with RPC down). Testnet is
-  ~65.7M blocks; checkpoint-less sync is infeasible. Ship
-  per-network assets; a fresh on-device key (recent birthdate) then syncs near-instant. A Bitcoin
-  checkpoints file will NOT validate against libdohj (AuxPoW/Scrypt) — must be libdohj-generated.
-- `DogecoinSpvDataSource` (implements `DogecoinWalletDataSource`): `listUnspent` maps
-  `wallet.getUnspents()`→`DogecoinUtxo` (own P2PKH, depth→confirmations HONEST), balance AVAILABLE vs
-  ESTIMATED; `broadcast()` throws this phase. Peer floor >1 (target 3-4). Witness wart needs a
-  `selectDownloadPeer` override (Dogecoin has no SegWit — see the spike's `HighestHeightDownloadPeerGroup`).
-- Status via a `DownloadProgressTracker` → `StateFlow{height,headers,peerCount,verification,syncedAsOf}`;
-  sheet OBSERVES it; expand `walletReadSource()` to branch on `loadBackend`; add a backend selector UI.
-- **Cross-check is a DbgConsole/soak tool, not production sheet UI this phase.** Oracle = the RPC NODE on
-  testnet (there is NO public testnet explorer); explorer cross-check reserved for the mainnet soak.
-- OPEN (need user/live test): exact `spv_birthdate` floor date; whether bitcoinj `PeerGroup` can route
-  over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; last session Arti couldn't build
-  Nostr circuits) → default clearnet-with-disclosure, NEVER silent fallback.
+DONE: 0.14.7 foundation + key-import gate (`d8b3f25`), `spv_birthdate` policy (`5e776b5`), and the
+`DogecoinSpvService` + `DogecoinSpvDataSource` (`0459bd6`, read-only, compiles, NOT yet wired into UI).
+REMAINING (in order):
+- **Checkpoints — SMART RPC approach, NOT stock `BuildCheckpoints`.** Testnet is ~65.7M blocks, so bitcoinj
+  `BuildCheckpoints` (header-syncs the WHOLE chain) would take HOURS — impractical. Instead build a SMALL
+  checkpoints file straight from the node's RPC: `getblockheader <hash>` returns the header fields PLUS the
+  cumulative `chainwork`, so construct a bitcoinj `StoredBlock` at a recent height (tip−N) directly and
+  serialize it in the CheckpointManager text format (`TXT CHECKPOINTS 1`), bypassing the full sync. Ship as
+  `app/src/main/assets/dogecoin-checkpoints-{mainnet,testnet}.txt`; the service already loads it. A fresh key
+  (recent birthdate) then seeds near the tip → fast. A Bitcoin checkpoints file will NOT validate against
+  libdohj (AuxPoW/Scrypt). (Mainnet: the langerhans `dogecoin-wallet-new` asset is a ready vendor option.)
+- **DbgConsole SPV drivers** (the validation surface, NOT sheet UI this phase): own one `DogecoinSpvService`
+  at ChatViewModel/app scope (alongside `debugExplorerClient`/`txConfirmationChecker`); add console commands
+  `doge-spv-start/-status/-balance/-unspents` (+ a SPV-vs-node-oracle cross-check). Then the **live read
+  validation**: SPV balance/UTXO for a funded testnet address must agree with the node oracle. Oracle = the
+  RPC NODE on testnet (there is NO public testnet explorer); explorer cross-check reserved for the mainnet soak.
+- **Sheet selector UI (production wiring), AFTER console validation:** expand `walletReadSource()` to branch
+  on `repository.loadBackend(network)` (RPC→`DogecoinRpcDataSource`, SPV→`DogecoinSpvDataSource`); add a
+  backend selector; OBSERVE the `StateFlow<DogecoinSpvStatus>` to show sync progress (the one-shot Refresh UX
+  must become an observed display or it misreports mid-sync). Hide SPV for REGTEST.
+- OPEN (need user/live test): exact `spv_birthdate` floor for OLD imported keys; whether bitcoinj `PeerGroup`
+  can route over the embedded Arti Tor SOCKS (UNVERIFIED — spike was clearnet-only; Arti couldn't build Nostr
+  circuits) → default clearnet-with-disclosure, NEVER silent fallback.
 
 Later: Phase 3 (testnet broadcast — fail-closed re-verify txid, render Claimed-not-Confirmed), Phase 4
 (mainnet, user-gated, after a read-only soak). MAINNET is the last switch, per-spend authorized.
 
-### Deferred: balance-match spike (Task 3)
-Closes the last feasibility sub-step: point the spike at the local testnet node (`-PpeerHost=127.0.0.1`),
-watch a funded address, assert SPV balance == node oracle. **Blocked: two `dogecoin-qt` instances were
-running and RPC hung** (P2P 44556 was fine — the spike connected over it). Clear the duplicate so
-`dogecoin-cli -testnet getblockchaininfo` responds, then run it (also needed to GENERATE checkpoints).
+### Node state + deferred balance-match spike (Task 3)
+**The testnet node is now HEALTHY** (user closed the mainnet instance 2026-06-27; only testnet runs —
+synced to block ~65.7M, verifyprogress 1.0, RPC responds; P2P 44556 also fine). This unblocks the smart
+RPC checkpoint generation AND the balance-match validation. Balance-match spike: point the spike at the
+local node (`-PpeerHost=127.0.0.1`), watch a funded address, assert SPV balance == node oracle — but it
+needs a checkpoint near that address's funding height first (testnet from genesis is infeasible), so it
+follows the smart-checkpoint step.
 
 ## Older shipped milestones (background — all committed pre-`f9d13c1`)
 - **M0/M1** — UX hardening (fee presets, address book, payment requests). **M2 — Pay @nickname**
@@ -181,7 +184,9 @@ Gotchas (hard-won):
   (don't `>`-redirect — UTF-16 mangles).
 
 ## Key Files
-SPV (new): `features/dogecoin/{DogecoinWalletDataSource,DogecoinRpcDataSource,DogecoinExplorerDataSource}.kt`;
+SPV (new): `features/dogecoin/{DogecoinWalletDataSource,DogecoinRpcDataSource,DogecoinExplorerDataSource,
+DogecoinSpvService,DogecoinSpvDataSource}.kt` + `spv_birthdate`/`DogecoinBackend` in `DogecoinWalletRepository.kt`;
+tests `DogecoinSpvKeyImportTest`/`DogecoinSignerRegressionTest`/`DogecoinWalletDataSourceTest`;
 plan `docs/dogecoin-spv-integration-plan.md`; spike `tools/spv-spike/` (+ its README). Reference SPV
 wallet: `C:\Users\rober\Downloads\Projects\dogecoin-wallet-new` (Langerhans, bitcoinj+libdohj) —
 `wallet/src/de/schildbach/wallet/service/{BlockchainService,NonWitnessPeerGroup}.java` + `Constants.java`
@@ -198,7 +203,7 @@ Debug console: `debug/DebugConsole.kt` + `app/src/debug/AndroidManifest.xml` + `
 .\gradlew.bat -p "C:\Users\rober\Downloads\Projects\bitchat-android" :app:testDebugUnitTest :app:assembleDebug --console=plain
 git diff --check
 ```
-Last green at `5e776b5`. The `DogecoinSignerRegressionTest` (app signer) AND `DogecoinSpvKeyImportTest`
+Last green at `0459bd6`. The `DogecoinSignerRegressionTest` (app signer) AND `DogecoinSpvKeyImportTest`
 (bitcoinj derives the app's address) are the money-path canaries — if either ever fails
 after a dep change, the audited ECDSA signer changed; REJECT the change, do not re-baseline.
 
