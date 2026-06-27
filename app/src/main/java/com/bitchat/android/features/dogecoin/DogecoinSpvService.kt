@@ -274,8 +274,23 @@ class DogecoinSpvService private constructor(
         val assetName = "dogecoin-checkpoints-${networkAssetId(activeNetworkOr(params))}.txt"
         runCatching {
             appContext.assets.open(assetName).use { stream ->
-                org.bitcoinj.core.CheckpointManager.checkpoint(params, stream, store, birthdateSecs)
-                Log.i(TAG, "Loaded SPV checkpoints from $assetName for birthdate ${Date(birthdateSecs * 1000L)}")
+                // Seed at the LATEST checkpoint at-or-before the birthdate via getCheckpointBefore (= floorEntry,
+                // NO extra margin). The static CheckpointManager.checkpoint(...,time) pushes the seed ~a week
+                // earlier, which on testnet is ~1M extra headers (~50 min on-device) — getCheckpointBefore is the
+                // spike-proven fast path. SAFE: a freshly-generated key's birthdate IS its creation time and no
+                // funds can predate it, so seeding at-or-before the birthdate never skips funds; an imported key's
+                // conservative floor (e.g. 2021) still yields genesis when no checkpoint precedes it.
+                val cp = org.bitcoinj.core.CheckpointManager(params, stream).getCheckpointBefore(birthdateSecs)
+                val headHeight = runCatching { store.chainHead.height }.getOrDefault(0)
+                if (cp.height > headHeight) {
+                    // Forward-only: never regress a store already synced past the checkpoint (preserves progress
+                    // across stop/start; on a fresh store headHeight=0 so the first seed always applies).
+                    store.put(cp)
+                    store.setChainHead(cp)
+                    Log.i(TAG, "Seeded SPV store from $assetName at checkpoint height=${cp.height} (birthdate ${Date(birthdateSecs * 1000L)})")
+                } else {
+                    Log.i(TAG, "SPV store head $headHeight already at/after checkpoint ${cp.height}; not reseeding")
+                }
             }
         }.onFailure {
             Log.i(TAG, "No checkpoints asset $assetName (continuing without; first sync may be slow): ${it.message}")
