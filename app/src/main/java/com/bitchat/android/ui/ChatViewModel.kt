@@ -109,7 +109,7 @@ class ChatViewModel(
     // onCleared. Currently driven only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
     private var dogecoinSpvService: com.bitchat.android.features.dogecoin.DogecoinSpvService? = null
     private fun dogecoinSpv(): com.bitchat.android.features.dogecoin.DogecoinSpvService =
-        dogecoinSpvService ?: com.bitchat.android.features.dogecoin.DogecoinSpvService(getApplication(), dogecoinWalletRepository)
+        com.bitchat.android.features.dogecoin.DogecoinSpvService.getInstance(getApplication(), dogecoinWalletRepository)
             .also { dogecoinSpvService = it }
 
     // --- Milestone 3b: broadcast-over-mesh (node-optional sender + opt-in helper) ---

@@ -146,13 +146,11 @@ fun DogecoinWalletSheet(
     val clipboardManager = LocalClipboardManager.current
     val repository = remember(context) { DogecoinWalletRepository(context) }
     val rpcClient = remember { DogecoinRpcClient() }
-    // Phase 1 read seam: balance/UTXO reads go through DogecoinWalletDataSource so a later phase can swap
-    // in the SPV light-client backend without re-touching these call sites. Only RPC is wired now (the
-    // persisted default, repository.loadBackend); using the caller's already-captured rpcConfig keeps each
-    // read byte-identical to the prior direct rpcClient call. Node-specific ops (status/watch/mempool/
-    // rescan), rich activity, and broadcast stay on rpcClient until later phases.
-    fun walletReadSource(rpcConfig: DogecoinRpcConfig): DogecoinWalletDataSource =
-        DogecoinRpcDataSource(rpcClient, rpcConfig)
+    // Phase 2: the on-device SPV light client (process singleton — shared with the debug console). Read-only;
+    // started on demand when the user selects the "Built-in" backend, stopped on close. See walletReadSource.
+    val spvService = remember { DogecoinSpvService.getInstance(context, repository) }
+    val spvStatus by spvService.status.collectAsState()
+    val spvDataSource = remember(spvService) { DogecoinSpvDataSource(spvService) }
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // Only mainnet and testnet are user-selectable in release builds. Debug builds also expose
@@ -167,6 +165,14 @@ fun DogecoinWalletSheet(
 
     var snapshot by remember { mutableStateOf(repository.loadOrCreateWallet()) }
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
+    // Phase 2 backend selector: which source serves balance/UTXO reads for the selected network. Default RPC.
+    // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
+    var dogecoinBackend by remember(selectedNetwork) { mutableStateOf(repository.loadBackend(selectedNetwork)) }
+    // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
+    // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
+    // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
+    fun walletReadSource(rpcConfig: DogecoinRpcConfig): DogecoinWalletDataSource =
+        if (dogecoinBackend == DogecoinBackend.SPV) spvDataSource else DogecoinRpcDataSource(rpcClient, rpcConfig)
     var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
     var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
     var advertiseAddressEnabled by remember { mutableStateOf(repository.loadAdvertiseAddressEnabled()) }
@@ -543,6 +549,22 @@ fun DogecoinWalletSheet(
     }
 
     fun refreshWalletBalance() {
+        if (dogecoinBackend == DogecoinBackend.SPV) {
+            // SPV: balance comes from the light-client wallet (driven reactively by the sync-status effect);
+            // pull a fresh snapshot here too. Skip the RPC-only watch/activity calls entirely.
+            val net = selectedNetwork
+            val addr = snapshot.key.address
+            coroutineScope.launch {
+                runCatching { spvDataSource.getBalance(addr, net) }
+                    .onSuccess {
+                        if (selectedNetwork == net && snapshot.key.address == addr) {
+                            walletBalance = it; walletBalanceError = null
+                            walletActivity = emptyList(); walletActivityError = null
+                        }
+                    }  // onFailure: not synced yet — the sync-status card shows progress
+            }
+            return
+        }
         refreshingBalance = true
         walletBalanceError = null
         walletActivityError = null
@@ -1327,6 +1349,35 @@ fun DogecoinWalletSheet(
         applyPaymentRequest(request)
     }
 
+    // Phase 2 SPV lifecycle: start the built-in light client when selected (and supported), stop otherwise.
+    // Sync-on-demand — also stopped when the sheet leaves composition.
+    LaunchedEffect(dogecoinBackend, selectedNetwork) {
+        if (dogecoinBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
+            walletBalance = null  // show "syncing" until the light client reads a balance
+            spvService.start(selectedNetwork)
+        } else {
+            spvService.stop()
+        }
+    }
+    DisposableEffect(Unit) { onDispose { spvService.stop() } }
+
+    // Reactively pull the SPV balance/UTXOs as the light client syncs (chainHeight climbs as it finds our
+    // funding txs). RPC/explorer balances are driven by refreshWalletBalance() instead.
+    LaunchedEffect(dogecoinBackend, spvStatus.chainHeight, spvStatus.synced) {
+        if (dogecoinBackend != DogecoinBackend.SPV) return@LaunchedEffect
+        val net = selectedNetwork
+        val addr = snapshot.key.address
+        runCatching { spvDataSource.getBalance(addr, net) }
+            .onSuccess {
+                if (selectedNetwork == net && snapshot.key.address == addr) {
+                    walletBalance = it
+                    walletBalanceError = null
+                    walletActivity = emptyList()  // SPV has no rich activity history yet
+                    walletActivityError = null
+                }
+            }  // onFailure: not synced/active enough to read yet — the sync status conveys progress
+    }
+
     BitchatBottomSheet(
         modifier = modifier,
         onDismissRequest = onDismiss
@@ -1389,6 +1440,42 @@ fun DogecoinWalletSheet(
                     }
                 }
                 if (advancedExpanded) {
+                item(key = "backend") {
+                    WalletCard {
+                        Text(
+                            text = "Connection",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        val backendOptions = buildList {
+                            add(DogecoinBackend.RPC to "My node")
+                            if (selectedNetwork != DogecoinNetwork.REGTEST) add(DogecoinBackend.SPV to "Built-in")
+                        }
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            backendOptions.forEachIndexed { index, option ->
+                                SegmentedButton(
+                                    selected = dogecoinBackend == option.first,
+                                    onClick = {
+                                        dogecoinBackend = option.first
+                                        repository.saveBackend(selectedNetwork, option.first)
+                                        // SPV is driven by its own lifecycle/sync effects; for a node backend
+                                        // re-pull the balance immediately on switch.
+                                        if (option.first != DogecoinBackend.SPV) refreshWalletBalance()
+                                    },
+                                    shape = SegmentedButtonDefaults.itemShape(index = index, count = backendOptions.size)
+                                ) { Text(option.second) }
+                            }
+                        }
+                        Text(
+                            text = if (dogecoinBackend == DogecoinBackend.SPV)
+                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. Read-only for now (sending still uses a node)."
+                            else "Connects to your own Dogecoin Core node over RPC.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
                 item(key = "network") {
                     WalletCard {
                         Text(
@@ -1616,6 +1703,40 @@ fun DogecoinWalletSheet(
                             Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(stringResource(R.string.refresh_node_status))
+                        }
+                    }
+                }
+                }
+
+                if (dogecoinBackend == DogecoinBackend.SPV) {
+                item(key = "spv_status") {
+                    WalletCard {
+                        Text(
+                            text = "Built-in node",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        val s = spvStatus
+                        val line = when {
+                            !s.running -> "Starting…"
+                            s.peerCount == 0 -> "Connecting to the Dogecoin network…"
+                            s.synced -> "Synced · block ${s.chainHeight} · ${s.peerCount} peer(s)"
+                            s.bestPeerHeight > 0L -> "Syncing… ${s.blocksBehind} blocks behind · ${s.peerCount} peer(s)"
+                            else -> "Syncing… block ${s.chainHeight} · ${s.peerCount} peer(s)"
+                        }
+                        Text(
+                            text = line,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (s.synced) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                        )
+                        if (!s.synced) {
+                            Text(
+                                text = "Your balance appears as the headers catch up to the tip.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                lineHeight = 18.sp
+                            )
                         }
                     }
                 }
@@ -2451,7 +2572,8 @@ fun DogecoinWalletSheet(
                         }
                         Button(
                             onClick = { reviewSend() },
-                            enabled = !sending && !rescanning && nodeReady,
+                            // SPV broadcast is a later phase; sending stays on the node/mesh path for now.
+                            enabled = !sending && !rescanning && nodeReady && dogecoinBackend != DogecoinBackend.SPV,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -2462,6 +2584,14 @@ fun DogecoinWalletSheet(
                                 } else {
                                     stringResource(R.string.dogecoin_send_review)
                                 }
+                            )
+                        }
+                        if (dogecoinBackend == DogecoinBackend.SPV) {
+                            Text(
+                                text = "Sending with the built-in node arrives in a later update — switch Connection to \"My node\" (under Advanced settings) to send for now.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                lineHeight = 18.sp
                             )
                         }
                     }

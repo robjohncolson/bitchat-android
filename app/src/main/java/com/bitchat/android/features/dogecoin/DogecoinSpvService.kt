@@ -47,7 +47,7 @@ data class DogecoinSpvStatus(
  * sheet re-open within a session. REGTEST is unsupported (no peers). bitcoinj's crypto is spongycastle,
  * isolated from the app's bcprov 1.70. See docs/dogecoin-spv-integration-plan.md.
  */
-class DogecoinSpvService(
+class DogecoinSpvService private constructor(
     private val appContext: Context,
     private val repository: DogecoinWalletRepository
 ) {
@@ -258,7 +258,16 @@ class DogecoinSpvService(
         }
     }
 
-    private companion object {
+    companion object {
+        @Volatile private var INSTANCE: DogecoinSpvService? = null
+
+        /** Process-wide singleton so the wallet sheet and the debug console share ONE PeerGroup/SPVBlockStore
+         *  (the store is a single-writer mmap file — two services would corrupt it). */
+        fun getInstance(context: Context, repository: DogecoinWalletRepository): DogecoinSpvService =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: DogecoinSpvService(context.applicationContext, repository).also { INSTANCE = it }
+            }
+
         const val TAG = "DogecoinSpv"
         const val USER_AGENT = "bitchat-dogecoin-spv"
         const val USER_AGENT_VERSION = "0.1"
