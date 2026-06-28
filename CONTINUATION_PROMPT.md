@@ -54,9 +54,10 @@ bitcoinj never signs):
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `487ee90`** (UnifiedMeshService payment-broadcast forward; on
-top of `38735de` Option B GATT-write retry, `f5780e3` Option A binary TLV; offline Bluetooth send PROVEN
-end-to-end on-device — see the DONE section above; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
+`dogecoin-m2-pay-nickname`. **Last green commit: `2348972`** (Phase 4 prep: doge-spv-crosscheck soak surface +
+DogecoinRpcClient.getTxOut, validated on-device; on top of `487ee90` UnifiedMeshService payment-broadcast
+forward, `38735de` Option B GATT-write retry, `f5780e3` Option A binary TLV — offline Bluetooth send PROVEN
+end-to-end on-device, see the DONE section above; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
 SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
@@ -226,6 +227,22 @@ wallet "disappears"; just relaunch (data persists).
   tools/spv-spike run` (default local node, or `-PnoLocalhost`, or `-PpeerHost=127.0.0.1`).
 
 ### NEXT STEP: PHASE 4 — mainnet broadcast (user-gated, per-spend authorized)
+
+**Phase 4 progress (2026-06-28):** first SAFE prep step DONE — the **SPV-vs-node cross-check** (the
+read-only soak validation surface) is shipped (`2348972`) + validated on-device. User decisions locked in:
+oracle = **local node (RPC)**; proceed with the cross-check tool first (no mainnet node restart yet). New
+`DogecoinRpcClient.getTxOut` (gettxout, read-only — Dogecoin Core 1.14.9 has NO `scantxoutset`, and a full
+address rescan on the ~65.7M-block chain is impractical, so per-outpoint gettxout is the oracle) +
+`DogecoinSpvCrossCheck` (pure, unit-tested) + console `doge-spv-crosscheck`. It checks the safety-critical
+direction (no spent/forged UTXO is ever presented as spendable). **Proven both ways on testnet:** an OFFLINE
+S24 SPV still showing the already-spent `638c253e…:1` → `result=FAIL SPENT_OR_MISSING`; after wifi-on resync
+to the `3e1f64af…:1` change UTXO → `result=PASS nodeConfirmed=396000000k`. Oracle reachability on the S24 =
+`adb reverse tcp:44555` + `doge-rpc-set http://127.0.0.1:44555 apstats <pw>` (the S24's stored RPC pointed at
+the unreachable LAN IP). **Still TODO for Phase 4 (in order):** mainnet checkpoint asset (needs the mainnet
+node up — also confirms the chainwork/12-byte feasibility); then the actual mainnet read-only soak (run SPV on
+mainnet, `doge-spv-crosscheck` vs the mainnet node over the user's agreement window); then — only with explicit
+per-spend authorization — lift the 4-layer block + add the WIF-backup gate. Soak duration/agreement criteria
+are a USER decision (not yet set).
 
 PHASE 3 (testnet broadcast, fail-closed) is SHIPPED + **PROVEN ON-DEVICE** (`a6fba67`): a fresh testnet key
 synced cp→tip in ~4.5 min and broadcast 5 DOGE via SPV peers (`5e8b4163…`) → local node mempool → mined →
