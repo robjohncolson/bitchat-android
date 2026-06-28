@@ -10,53 +10,54 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ⏩ IMMEDIATE NEXT (in-flight as of 2026-06-27, HEAD `cec3edc`) — fix offline Bluetooth send
+## ✅ DONE (2026-06-28, HEAD `487ee90`) — offline Bluetooth send PROVEN end-to-end; NEXT = Phase 4 mainnet
 
-We were making "send testdoge phone-to-phone with the SENDER fully offline" work over BLE mesh. State:
-- **PROVEN:** SPV builds+signs OFFLINE (airplane mode); node-less sender → helper → chain **mined twice**
-  (txids `7b1be7ae`, `638c253e`, 3 DOGE each) — **but via NOSTR (sender had internet)**, not Bluetooth.
-- **FAILING:** the truly-offline (Bluetooth-only) relay. Two warm-up fixes shipped (`6c7222d` send-time,
-  `71e19d5` proactive) and VERIFIED to route the relay **via mesh** after a Noise session is warmed
-  (`MessageRouter: Routing payment-broadcast REQUEST via mesh`, `session=true` both sides) — but the
-  **payment-broadcast payload never reaches the Pixel's `BroadcastHelperService`** (`didReceivePaymentBroadcast`
-  never fires); coordinator times out → `Failed: No connected peer accepted`. BLE link is healthy (announce
-  `type 1` + keepalive `type 33` packets flow both ways); only OUR large payment-broadcast NoisePayload doesn't
-  arrive.
-- **KEY REFRAME (user's insight):** the mesh payment-broadcast is **OUR** code (M3b, commit `754b404`), NOT
-  original bitchat. `sendNoisePayloadToPeer` IS original bitchat (added for QR **verification**, `c663e8e`).
-  bitchat's private messages + verification deliver over the SAME BLE mesh; ours doesn't → **the bug is in OUR
-  integration wiring**, most likely the **receive-side dispatch not routing the new `PAYMENT_BROADCAST_REQUEST`
-  NoisePayloadType to `didReceivePaymentBroadcast`** (decrypted then dropped), OR a **send-side
-  fragmentation/size** gap for the larger payload (a signed tx ~250B vs tiny verification payloads).
-- **PENDING WORKFLOW (get its result FIRST):** `compare-payment-broadcast-vs-verification-noisepayload` — task
-  id `wnawt6hha`, runId `wf_904600f7-6ca`. It compares our payment-broadcast NoisePayload send+receive path to
-  bitcoin verification's (working) path and returns `{maps, diag}` with the root cause + fix. Output file:
-  `…/5b83521c-…/tasks/wnawt6hha.output` (was 0 bytes / still running at refresh). If empty, re-run the
-  Workflow (scriptPath in `…/workflows/scripts/compare-payment-broadcast-vs-verification-noisepayload-wf_904600f7-6ca.js`).
-- **PLAN:** read the workflow's `diag` → implement the fix (align our payment-broadcast with the proven
-  verification NoisePayload path — wire the receive-side type dispatch and/or fragmentation) → `:app:assembleDebug`
-  → **install on BOTH phones** (they currently run `6c7222d`, NOT the latest) → re-test the offline send.
-- **DEVICE STATE for the re-test:** S24 `RFCX81GNBRE` = sender, currently airplane OFF + wifi OFF + data OFF
-  (offline) + BT ON, SPV wallet ~8.97 TESTDOGE at `nUEBj7Wi…`. Pixel 3 `89VX0HPX1` = helper, RPC pointed at
-  `http://127.0.0.1:44555` via **USB tunnel `adb reverse tcp:44555`**, helper-enabled, wallet `nceDCkWAP9…`
-  (node-owned). Both mesh-connected + mutual favorites (`forcemutual` not needed). Node = testnet on
-  `127.0.0.1:44555` (Pixel reaches it through the tunnel). Console send: `doge-spv-peer-broadcast <addr> <amt>`
-  (offline SPV build → mesh relay). **Restore later:** Pixel `doge-rpc-set http://10.0.0.24:44555 apstats <pw>`
-  + `doge-helper-enable 0`; re-enable S24 wifi/airplane.
-- **S24 BLE ops quirks:** `adb svc wifi disable` DROPS the S24's BLE mesh (needs app restart); but
-  `cmd connectivity airplane-mode disable` + `cmd -w wifi set-wifi-enabled disabled` (and airplane+BT) PRESERVE
-  it. testnet mines ~1 block/30-40s → verify with `getrawtransaction <txid>` not `getrawmempool`. Full trail:
-  `docs/dogecoin-offline-mesh-relay-findings.md`. (After this offline thread: Phase 4 mainnet — see NEXT STEP.)
+The "send testdoge phone-to-phone with the SENDER fully offline (Bluetooth-only)" thread is **COMPLETE and
+PROVEN ON-DEVICE** (tx mined, 1 conf). It took THREE transport-only fixes (tx still SPV-built+signed on-device,
+bitcoinj never signs):
+- **`f5780e3` (Option A)** — `PaymentBroadcastPacket` carries the raw tx + txid as **bytes, not ASCII hex**, so
+  a typical send is ~420 B ≤ 512 → **single packet, no BLE fragmentation** (was ~680 B → 2 fragments → the 2nd
+  was silently dropped, so the helper never reassembled).
+- **`38735de` (Option B)** — retry busy GATT writes in `BluetoothPacketBroadcaster`
+  (`notifyDeviceWithRetry`/`writeToDeviceConnWithRetry`, 8×50 ms, DIRECTED sends only) + retry-the-fragment
+  (not abort-the-set) in `FragmentingPacketSender`. Hardens multi-input/larger fragmented sends.
+- **`487ee90` (the actual final blocker)** — `UnifiedMeshService` (the `BluetoothMeshService → ChatViewModel`
+  delegate bridge) forwarded `didReceiveVerifyChallenge/Response` but was **MISSING the forwards for
+  `didReceivePaymentBroadcastRequest/Result`** → a decrypted request was silently dropped at the bridge (empty
+  `MeshDelegate` defaults) in BOTH directions. That's why verification works over mesh but payment-broadcast
+  never completed — independent of fragmentation. The `💸 received` log fired but `handleRequest` never ran
+  until this was added.
+- **PROOF:** sender (S24) Wi-Fi OFF + BLE ON → `Routing REQUEST via mesh` + `ENCRYPT 308→328` (single packet,
+  NO `Fragmenting…`) → helper `💸 received (307 bytes)` → node `sendrawtransaction` → `Routing RESULT via mesh`
+  → node mempool tx `3e1f64af1159c29a0aa04915d1fa8d9d8c036b73286251590518907a253136b9` (5.0 DOGE) → **mined (1
+  conf)** → sender `TERMINAL=Claimed(txid=3e1f64af…)`. Claimed = correct single-helper terminal state.
+- **On-device gotchas (also in `docs/dogecoin-offline-mesh-relay-findings.md`):** both phones MUST run the same
+  build (binary TLV fails-closed cross-version); a FRESH SYMMETRIC Noise session is required — restarting ONE
+  app desyncs it (sender `session=true`, helper `session=false` → helper can't decrypt → no `💸`), so restart
+  BOTH for one clean warm-up handshake; the helper's `ChatViewModel` must be a LIVE instance (a stale VM held by
+  the mesh service no-ops the delegate → force-stop+relaunch); `adb shell settings put global
+  stay_on_while_plugged_in 7` keeps the phones awake/unlocked over adb (PINs: Pixel 5555, S24 5555); the warm-up
+  awaits only 3.5 s so the FIRST send may fall to Nostr while the handshake finishes in bg — a 2nd send rides
+  mesh; `broadcast-test` does NOT warm up (calls the coordinator directly) — only `doge-spv-peer-broadcast` does.
+- **Optional deeper Option-B follow-up (DEFERRED, not needed now):** true `onCharacteristicWrite`/
+  `onNotificationSent` write-completion flow control + fragment-level ACK/retransmit + MTU-keyed fragment size.
+- **DEVICE STATE after the proof:** S24 `RFCX81GNBRE` = sender, Wi-Fi OFF + BT ON (offline), SPV ~3.97 TESTDOGE
+  at `nUEBj7Wi…` (was 8.97, sent 5). Pixel 3 `89VX0HPX1` = helper, node via USB tunnel `adb reverse tcp:44555`
+  → `127.0.0.1:44555`, helper-enabled, mutual favorites. Both run HEAD `487ee90`. Node = testnet. **Restore for
+  normal use:** re-enable S24 Wi-Fi; Pixel `doge-rpc-set http://10.0.0.24:44555 apstats <pw>` if you drop the
+  USB tunnel; `doge-helper-enable 0` to stop helping.
+
+**⏩ IMMEDIATE NEXT = Phase 4 (mainnet broadcast, user-gated per-spend) — see "NEXT STEP: PHASE 4" below.**
 
 ## CURRENT FOCUS: self-contained SPV wallet (no node, no paid key)
 
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `71e19d5`** (proactive Noise-session warm-up on wallet open;
-on top of `6c7222d` send-time warm-up, `c1354ce` console cmd, `0383ae5` UX, `2d4271b` persistence; Phase 3
-PROVEN on-device; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean).
-Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `487ee90`** (UnifiedMeshService payment-broadcast forward; on
+top of `38735de` Option B GATT-write retry, `f5780e3` Option A binary TLV; offline Bluetooth send PROVEN
+end-to-end on-device — see the DONE section above; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
+SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
