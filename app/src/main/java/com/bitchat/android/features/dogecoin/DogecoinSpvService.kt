@@ -274,7 +274,10 @@ class DogecoinSpvService private constructor(
     }
 
     private fun maybeLoadCheckpoints(params: NetworkParameters, store: SPVBlockStore, birthdateSecs: Long) {
-        val assetName = "dogecoin-checkpoints-${networkAssetId(activeNetworkOr(params))}.txt"
+        // Key the asset off `params` (the network being started) — NOT activeNetwork, which start() assigns
+        // AFTER this point and can still hold a prior network here. Reading the stale field loaded the TESTNET
+        // checkpoint while starting MAINNET, seeding the wrong chain (a bogus "synced" head vs mainnet peers).
+        val assetName = "dogecoin-checkpoints-${if (params.id == NetworkParameters.ID_MAINNET) "mainnet" else "testnet"}.txt"
         runCatching {
             appContext.assets.open(assetName).use { stream ->
                 // Seed at the LATEST checkpoint at-or-before the birthdate via getCheckpointBefore (= floorEntry,
@@ -356,12 +359,6 @@ class DogecoinSpvService private constructor(
         DogecoinNetwork.TESTNET -> DogecoinTestNet3Params.get()
         DogecoinNetwork.REGTEST -> null // no public peers / params for regtest SPV
     }
-
-    private fun activeNetworkOr(params: NetworkParameters): DogecoinNetwork =
-        activeNetwork ?: if (params.id == NetworkParameters.ID_MAINNET) DogecoinNetwork.MAINNET else DogecoinNetwork.TESTNET
-
-    private fun networkAssetId(network: DogecoinNetwork): String =
-        if (network == DogecoinNetwork.MAINNET) "mainnet" else "testnet"
 
     /**
      * bitcoinj's default download-peer selection prefers a witness-capable peer; Dogecoin has no SegWit, so
