@@ -98,7 +98,7 @@ class DogecoinSpvService private constructor(
             val store = SPVBlockStore(params, blockStoreFile(network))
             // Seed the header store near the key birthdate from a shipped checkpoints asset (if present), so
             // a recent key syncs near-instantly instead of from genesis (testnet is ~65.7M blocks).
-            maybeLoadCheckpoints(params, store, birthdateSecs)
+            maybeLoadCheckpoints(network, params, store, birthdateSecs)
 
             val chain = BlockChain(params, w, store)
             val pg = HighestHeightDownloadPeerGroup(params, chain)
@@ -273,11 +273,12 @@ class DogecoinSpvService private constructor(
         )
     }
 
-    private fun maybeLoadCheckpoints(params: NetworkParameters, store: SPVBlockStore, birthdateSecs: Long) {
-        // Key the asset off `params` (the network being started) — NOT activeNetwork, which start() assigns
-        // AFTER this point and can still hold a prior network here. Reading the stale field loaded the TESTNET
-        // checkpoint while starting MAINNET, seeding the wrong chain (a bogus "synced" head vs mainnet peers).
-        val assetName = "dogecoin-checkpoints-${if (params.id == NetworkParameters.ID_MAINNET) "mainnet" else "testnet"}.txt"
+    private fun maybeLoadCheckpoints(network: DogecoinNetwork, params: NetworkParameters, store: SPVBlockStore, birthdateSecs: Long) {
+        // Key the asset off the [network] being started — the authoritative source of truth. (Earlier this
+        // read activeNetwork, assigned AFTER this point, or params.id; the latter is the BITCOINJ id and does
+        // NOT equal NetworkParameters.ID_MAINNET for libdohj's Dogecoin params, so mainnet silently loaded the
+        // testnet checkpoint and seeded the wrong chain.)
+        val assetName = "dogecoin-checkpoints-${if (network == DogecoinNetwork.MAINNET) "mainnet" else "testnet"}.txt"
         runCatching {
             appContext.assets.open(assetName).use { stream ->
                 // Seed at the LATEST checkpoint at-or-before the birthdate via getCheckpointBefore (= floorEntry,
