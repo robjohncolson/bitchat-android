@@ -251,3 +251,56 @@ favorite, sender Connection = "Built-in" (SPV). Console: `doge-spv-peer-broadcas
   helper logs `💸 Payment broadcast request received from … (N bytes)` → broadcasts → `ACCEPTED` txid returns.
 - If it still fragments (e.g. a multi-input tx) you'll see "Fragmenting … into 2 fragments" then "Stopping
   fragmented send … after 1/2" on the sender + a lone "Received fragment 0/2" on the helper = the Option-B defect.
+
+## ⚡ Quick retry runbook (BLE offline send) — copy/paste
+
+Distilled from the 2026-06-28 re-test. **The whole thing hinges on the Noise SESSION establishing over BLE.**
+On a congested/slow link (other BLE devices nearby, phones far apart) the handshake **does not complete** and the
+relay silently falls back to **Nostr** (`Routing … REQUEST via Nostr`) — which needs internet, so it is NOT the
+air-gapped proof. Best success conditions: **phones within ~1 m, quiet RF (close other BLE apps), same build.**
+
+Serials/PINs here: S24 `RFCX81GNBRE` (PIN 5555, the SENDER), Pixel 3 `89VX0HPX1` (the HELPER). ADB at
+`C:\Users\rober\AppData\Local\Android\Sdk\platform-tools\adb`. Testnet node = `dogecoin-qt -testnet`
+(RPC 127.0.0.1:44555, user `apstats`, pw in `%APPDATA%\Dogecoin\dogecoin.conf` — never echo it).
+
+```bash
+ADB=".../platform-tools/adb.exe"; S24=RFCX81GNBRE; PIX=89VX0HPX1
+sj(){ "$ADB" -s "$1" shell "am broadcast -n com.bitchat.droid.debug/com.bitchat.android.debug.DebugCommandReceiver --es cmd '$2'" >/dev/null 2>&1; }
+
+# 0) node up?  ("...\dogecoin-cli.exe" -testnet getblockcount)   helper tunnel:
+"$ADB" -s $PIX reverse tcp:44555 tcp:44555
+"$ADB" -s $S24 shell settings put global stay_on_while_plugged_in 7   # don't sleep/relock mid-test
+
+# 1) HELPER (Pixel): testnet + node RPC + helper on
+sj $PIX "doge-network testnet"
+PW=$(grep -i '^rpcpassword=' "$APPDATA/Dogecoin/dogecoin.conf"|cut -d= -f2-|tr -d '\r')
+"$ADB" -s $PIX shell "am broadcast -n com.bitchat.droid.debug/com.bitchat.android.debug.DebugCommandReceiver --es cmd 'doge-rpc-set http://127.0.0.1:44555 apstats $PW'"
+sj $PIX "doge-helper-enable 1"
+
+# 2) SENDER (S24): unlock if Samsung killed it behind the keyguard, then testnet + SPV
+"$ADB" -s $S24 shell input keyevent KEYCODE_WAKEUP; "$ADB" -s $S24 shell input swipe 540 1600 540 600
+"$ADB" -s $S24 shell input text 5555; "$ADB" -s $S24 shell input keyevent KEYCODE_ENTER
+"$ADB" -s $S24 shell monkey -p com.bitchat.droid.debug -c android.intent.category.LAUNCHER 1
+sj $S24 "doge-network testnet"; sj $S24 "doge-spv-start"
+sj $S24 "myid"; sj $PIX "myid"   # BOTH must show connectedPeers=1 (BLE linked). favorites must be mutual=true.
+
+# 3) BOOTSTRAP THE SESSION, then VERIFY it (the make-or-break step)
+sj $S24 "candidates"                                  # note the helper's noise prefix from `favorites`
+sj $S24 "sendfav <helperNoisePrefix> 1"               # e.g. a3cefc1e — triggers initiateNoiseHandshake
+sleep 40
+"$ADB" -s $S24 logcat -d | grep -a "hasEstablishedSession(<helperPeerID>)"   # MUST read true
+#   false → handshake didn't complete → move the phones closer / kill other BLE / restart BOTH apps and retry.
+#   Do NOT proceed to step 4 until it reads true, or the send will go over Nostr.
+
+# 4) (only after session=true) GO OFFLINE on the S24, then send.
+"$ADB" -s $S24 shell cmd connectivity airplane-mode enable    # then make sure Bluetooth is ON (toggle in UI;
+#   `svc wifi disable` is WRONG on the S24 — it drops BLE. Airplane + BT-on preserves the mesh.)
+sj $S24 "doge-spv-peer-broadcast nceDCkWAP9tSktE5TJ5X6LVmD2r3HwiAXN 1"
+```
+
+**PASS:** S24 logs `Routing payment-broadcast REQUEST via mesh` (NOT "via Nostr") + NO `Fragmenting…`; Pixel logs
+`💸 Payment broadcast request received (N bytes)` → node `sendrawtransaction`; `TERMINAL=Claimed(txid=…)`; the node
+has the tx (`dogecoin-cli -testnet getrawtransaction <txid>`). **FALL-BACK seen as Nostr** ⇒ the session wasn't up
+(step 3 lied or regressed) — that path still relays the tx but over the internet, so it does NOT prove air-gapped BLE.
+
+**Restore after:** `"$ADB" -s $S24 shell cmd connectivity airplane-mode disable`; `sj $PIX "doge-helper-enable 0"`.
