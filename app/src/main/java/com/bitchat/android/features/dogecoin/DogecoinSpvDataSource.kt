@@ -29,14 +29,25 @@ class DogecoinSpvDataSource(
                 ?: throw IllegalStateException("Dogecoin SPV is not active for ${network.displayName}.")
         }
 
-    override suspend fun broadcast(rawTransactionHex: String, network: DogecoinNetwork): String {
-        require(network != DogecoinNetwork.MAINNET) {                           // defense-in-depth (service also refuses)
-            "Dogecoin SPV broadcast is testnet-only in this version."
+    override suspend fun broadcast(rawTransactionHex: String, network: DogecoinNetwork): String =
+        broadcast(rawTransactionHex, network, mainnetAuthorized = false)
+
+    /**
+     * Phase 4: MAINNET broadcast requires explicit per-spend authorization ([mainnetAuthorized]) — passed
+     * true ONLY by the wallet send flow AFTER its mainnet gates have all passed (WIF-backup, plus the
+     * mainnet / high-fee / policy-unavailable acknowledgements). The interface [broadcast] keeps
+     * mainnetAuthorized=false, so no other caller can silently mainnet-broadcast. On-device build+sign and
+     * the fail-closed [DogecoinSpvBroadcastVerifier] are unchanged; this flag only decides whether the
+     * already-signed bytes may reach mainnet peers (the [DogecoinSpvService] enforces it again, under lock).
+     */
+    suspend fun broadcast(rawTransactionHex: String, network: DogecoinNetwork, mainnetAuthorized: Boolean): String {
+        require(network != DogecoinNetwork.MAINNET || mainnetAuthorized) {       // defense-in-depth (service also refuses)
+            "Dogecoin SPV mainnet broadcast requires explicit authorization."
         }
         val normalized = DogecoinRawTxValidator.normalize(rawTransactionHex)     // fail closed on malformed/non-standard
         val expectedTxid = DogecoinTransactionBuilder.transactionId(normalized)  // canonical on-device txid (Option B)
         return withContext(Dispatchers.IO) {                                    // blocking peer await off the main thread
-            service.broadcast(network, normalized, expectedTxid)
+            service.broadcast(network, normalized, expectedTxid, mainnetAuthorized)
                 ?: throw IllegalStateException(
                     "Dogecoin SPV is not synced/active for ${network.displayName}; cannot broadcast."
                 )

@@ -901,6 +901,13 @@ fun DogecoinWalletSheet(
 
     fun broadcastSignedTransaction(transaction: DogecoinSignedTransaction) {
         val nowMillis = System.currentTimeMillis()
+        if (transaction.network == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
+            // Defense-in-depth: a MAINNET broadcast must never proceed without a WIF backup, independently of
+            // reviewSend()'s identical gate — so the broadcast path itself enforces every mainnet precondition
+            // (this + the acks below) before mainnetAuthorized=true is passed to the SPV broadcast.
+            sendError = context.getString(R.string.dogecoin_send_backup_required)
+            return
+        }
         if (transaction.network != selectedNetwork) {
             pendingTransaction = null
             mainnetBroadcastAcknowledged = false
@@ -960,7 +967,10 @@ fun DogecoinWalletSheet(
                 if (dogecoinBackend == DogecoinBackend.SPV) {
                     // Built-in light client: peers relay only; a returned txid is CLAIMED, not accepted.
                     // The receipt below stays Claimed until the on-chain confirmationDepth poll corroborates.
-                    spvDataSource.broadcast(transaction.rawTransactionHex, network)
+                    // mainnetAuthorized = true is SAFE here: this line is reached only AFTER the send flow's
+                    // mainnet gates have all passed — WIF-backup (above), and the mainnet / high-fee /
+                    // policy-unavailable acknowledgements enforced by canExportOrBroadcastSignedDogecoinTransaction.
+                    spvDataSource.broadcast(transaction.rawTransactionHex, network, mainnetAuthorized = true)
                 } else {
                     refreshAddressWatchStatusFromNode(config, address, network, configRevision)
                     rpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
@@ -1514,7 +1524,7 @@ fun DogecoinWalletSheet(
                         }
                         Text(
                             text = if (dogecoinBackend == DogecoinBackend.SPV)
-                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. Sending is testnet-only for now and connects to Dogecoin peers over the internet, so your address may be linkable to your IP (Tor routing isn't available yet)."
+                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. It connects to Dogecoin peers over the internet, so your address may be linkable to your IP (Tor routing isn't available yet)."
                             else "Connects to your own Dogecoin Core node over RPC.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
@@ -2624,8 +2634,10 @@ fun DogecoinWalletSheet(
                                 }
                             }
                         }
-                        val spvSendReady = dogecoinBackend == DogecoinBackend.SPV &&
-                            spvStatus.synced && selectedNetwork != DogecoinNetwork.MAINNET
+                        // Phase 4: mainnet SPV sending is enabled. The mainnet-specific safety gates (WIF-backup
+                        // + mainnet/high-fee/policy-unavailable acks) are enforced in reviewSend()/the broadcast
+                        // flow, mirroring the configured-node mainnet path — so the button only needs a synced SPV.
+                        val spvSendReady = dogecoinBackend == DogecoinBackend.SPV && spvStatus.synced
                         Button(
                             onClick = { reviewSend() },
                             enabled = !sending && !rescanning &&
@@ -2642,14 +2654,7 @@ fun DogecoinWalletSheet(
                                 }
                             )
                         }
-                        if (dogecoinBackend == DogecoinBackend.SPV && selectedNetwork == DogecoinNetwork.MAINNET) {
-                            Text(
-                                text = "Built-in sending is testnet-only for now — switch Connection to \"My node\" (under Advanced settings) to send on mainnet.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                lineHeight = 18.sp
-                            )
-                        } else if (dogecoinBackend == DogecoinBackend.SPV && !spvStatus.synced) {
+                        if (dogecoinBackend == DogecoinBackend.SPV && !spvStatus.synced) {
                             Text(
                                 text = "Syncing the built-in light client… sending unlocks once it catches up " +
                                     "(peers ${spvStatus.peerCount}, ${spvStatus.blocksBehind} blocks behind).",
@@ -3022,10 +3027,11 @@ fun DogecoinWalletSheet(
         )
         val canBroadcastThroughConfiguredNode = transaction.network == selectedNetwork && broadcastNodeReady
         val canBroadcastViaSpv = dogecoinBackend == DogecoinBackend.SPV && spvStatus.synced &&
-            transaction.network == selectedNetwork && transaction.network != DogecoinNetwork.MAINNET
+            transaction.network == selectedNetwork
         // Route-mirroring: gate the confirm button on EXACTLY the backend broadcastSignedTransaction will use,
-        // so each layer mainnet-blocks SPV independently and the button can't enable via a configured node
-        // while routing actually goes to an unsynced SPV.
+        // so the button can't enable via a configured node while routing actually goes to an unsynced SPV.
+        // (Phase 4: mainnet SPV broadcast is allowed; its WIF-backup + mainnet/high-fee/policy acks are enforced
+        // separately by canExportOrBroadcastSignedDogecoinTransaction before the tx reaches the wire.)
         val canBroadcastNow = if (dogecoinBackend == DogecoinBackend.SPV) canBroadcastViaSpv else canBroadcastThroughConfiguredNode
 
         AlertDialog(
