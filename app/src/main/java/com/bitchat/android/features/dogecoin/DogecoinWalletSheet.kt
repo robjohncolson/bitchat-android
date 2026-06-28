@@ -131,6 +131,9 @@ import java.util.TimeZone
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+/** Which focal flow the wallet is showing — the "Coin" one-thing-at-a-time view-state. */
+private enum class DogeWalletAction { NONE, SEND, RECEIVE }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DogecoinWalletSheet(
@@ -261,6 +264,8 @@ fun DogecoinWalletSheet(
     // Node/developer settings (connection, network, helper, corroboration, danger zone) collapse into one
     // expander so first-time users see balance/receive/send first; auto-open when no node is configured yet.
     var advancedExpanded by remember { mutableStateOf(rpcUrlBlank) }
+    // "Coin" focal-swap: the default shows the ring; Send/Receive replace the focal area, one at a time.
+    var walletAction by remember { mutableStateOf(DogeWalletAction.NONE) }
     var showUtxoDetails by remember { mutableStateOf(false) }
     var showRequest by remember { mutableStateOf(false) }
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
@@ -1217,9 +1222,11 @@ fun DogecoinWalletSheet(
     }
 
     fun revealSendForm() {
+        walletAction = DogeWalletAction.SEND
+        advancedExpanded = false
         coroutineScope.launch {
             try {
-                listState.animateScrollToItem(DOGECOIN_SEND_ITEM_INDEX)
+                listState.animateScrollToItem(0)
             } catch (_: IllegalArgumentException) {
             }
         }
@@ -1492,6 +1499,22 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                // Back affordance shown only inside a Send/Receive flow.
+                if (walletAction != DogeWalletAction.NONE) {
+                    item(key = "action_back") {
+                        Text(
+                            text = "‹  " + if (walletAction == DogeWalletAction.SEND) "Send" else "Receive",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = dogeWalletColors.ink,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { walletAction = DogeWalletAction.NONE }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
+                }
+
+                if (walletAction == DogeWalletAction.NONE) {
                 // "Coin" hero: the balance lives inside the one gold ring (idle solid / syncing arc).
                 item(key = "focal") {
                     val spv = dogecoinBackend == DogecoinBackend.SPV
@@ -1580,6 +1603,22 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                item(key = "actions") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { walletAction = DogeWalletAction.SEND; advancedExpanded = false },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Send") }
+                        OutlinedButton(
+                            onClick = { walletAction = DogeWalletAction.RECEIVE; advancedExpanded = false },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Receive") }
+                    }
+                }
+
                 item(key = "advanced_header") {
                     WalletCard {
                         Row(
@@ -1600,6 +1639,7 @@ fun DogecoinWalletSheet(
                             )
                         }
                     }
+                }
                 }
                 if (advancedExpanded) {
                 item(key = "backend") {
@@ -2130,6 +2170,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
+                if (walletAction == DogeWalletAction.RECEIVE) {
                 item(key = "address") {
                     WalletCard {
                         Text(
@@ -2393,7 +2434,8 @@ fun DogecoinWalletSheet(
                         }
                     }
                 }
-
+                }
+                if (walletAction == DogeWalletAction.SEND) {
                 item(key = "send") {
                     WalletCard {
                         Text(
@@ -2800,6 +2842,7 @@ fun DogecoinWalletSheet(
                             )
                         }
                     }
+                }
                 }
 
                 if (advancedExpanded) {

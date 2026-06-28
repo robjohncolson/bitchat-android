@@ -90,6 +90,8 @@ fun DogecoinWalletTheme(
         darkColorScheme(
             primary = c.gold, onPrimary = c.onGold,
             secondary = c.muted, onSecondary = c.onGold,
+            // Selected segmented-button / chip state reads as gold, not the Material default purple.
+            secondaryContainer = c.gold.copy(alpha = 0.26f), onSecondaryContainer = c.ink,
             background = c.paper, onBackground = c.ink,
             surface = c.surface, onSurface = c.ink,
             surfaceVariant = c.surface, onSurfaceVariant = c.muted,
@@ -100,6 +102,8 @@ fun DogecoinWalletTheme(
         lightColorScheme(
             primary = c.gold, onPrimary = c.onGold,
             secondary = c.muted, onSecondary = c.onGold,
+            // Selected segmented-button / chip state reads as gold, not the Material default purple.
+            secondaryContainer = c.gold.copy(alpha = 0.26f), onSecondaryContainer = c.ink,
             background = c.paper, onBackground = c.ink,
             surface = c.surface, onSurface = c.ink,
             surfaceVariant = c.surface, onSurfaceVariant = c.muted,
