@@ -399,6 +399,9 @@ fun ChatScreen(
         onShowDogecoinWallet = {
             dogecoinPaymentRequest = null
             showDogecoinWalletSheet = true
+            // Proactive: start helper Noise handshakes now so a BLE session is ready by send time (the BLE
+            // handshake can take many seconds — too slow to start only at send). See docs/dogecoin-offline-mesh-relay-findings.md.
+            viewModel.prewarmBroadcastHelperSessions()
         },
         onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
         onPrivateRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = false) },

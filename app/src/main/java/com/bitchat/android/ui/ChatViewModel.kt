@@ -1688,6 +1688,17 @@ class ChatViewModel(
     }
 
     /**
+     * Proactive entry (call when the wallet opens): start Noise handshakes with connected helper peers so a
+     * BLE session is READY before the user sends. The BLE handshake can take many seconds — far longer than
+     * the send-time warm-up window — so doing it early lets an offline sender's relay take the mesh path
+     * instead of falling back to Nostr. Fire-and-forget + best-effort; no-op when no session-less helper is
+     * connected. See docs/dogecoin-offline-mesh-relay-findings.md.
+     */
+    fun prewarmBroadcastHelperSessions() {
+        viewModelScope.launch { runCatching { warmUpMeshHelperSessions(currentDogecoinNetwork()) } }
+    }
+
+    /**
      * Warm up Noise sessions with connected, session-LESS helper peers (mutual favorites or NODE_HELPER
      * advertisers) so a peer broadcast can ride BLE instead of diverting to Nostr. Noise sessions are lazy and
      * the broadcast send path (BluetoothMeshService.sendNoisePayloadToPeer) never initiates a handshake (unlike
