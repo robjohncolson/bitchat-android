@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.QrCodeScanner
@@ -132,7 +133,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /** Which focal flow the wallet is showing — the "Coin" one-thing-at-a-time view-state. */
-private enum class DogeWalletAction { NONE, SEND, RECEIVE }
+private enum class DogeWalletAction { NONE, SEND, RECEIVE, SETTINGS }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -263,8 +264,7 @@ fun DogecoinWalletSheet(
     val rpcUrlBlank = rpcUrl.trim().isEmpty()
     // Node/developer settings (connection, network, helper, corroboration, danger zone) collapse into one
     // expander so first-time users see balance/receive/send first; auto-open when no node is configured yet.
-    var advancedExpanded by remember { mutableStateOf(rpcUrlBlank) }
-    // "Coin" focal-swap: the default shows the ring; Send/Receive replace the focal area, one at a time.
+    // "Coin" focal-swap: default shows the ring; Send/Receive/Settings replace the focal area, one at a time.
     var walletAction by remember { mutableStateOf(DogeWalletAction.NONE) }
     var showUtxoDetails by remember { mutableStateOf(false) }
     var showRequest by remember { mutableStateOf(false) }
@@ -1223,7 +1223,6 @@ fun DogecoinWalletSheet(
 
     fun revealSendForm() {
         walletAction = DogeWalletAction.SEND
-        advancedExpanded = false
         coroutineScope.launch {
             try {
                 listState.animateScrollToItem(0)
@@ -1473,20 +1472,35 @@ fun DogecoinWalletSheet(
                 item(key = "header") {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.AccountBalanceWallet,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(28.dp)
-                            )
-                            Text(
-                                text = stringResource(R.string.dogecoin_wallet_title),
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.AccountBalanceWallet,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Text(
+                                    text = stringResource(R.string.dogecoin_wallet_title),
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            if (walletAction == DogeWalletAction.NONE) {
+                                IconButton(onClick = { walletAction = DogeWalletAction.SETTINGS }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Settings,
+                                        contentDescription = "Settings",
+                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
                         }
                         Text(
                             text = stringResource(
@@ -1503,7 +1517,11 @@ fun DogecoinWalletSheet(
                 if (walletAction != DogeWalletAction.NONE) {
                     item(key = "action_back") {
                         Text(
-                            text = "‹  " + if (walletAction == DogeWalletAction.SEND) "Send" else "Receive",
+                            text = "‹  " + when (walletAction) {
+                                DogeWalletAction.SEND -> "Send"
+                                DogeWalletAction.RECEIVE -> "Receive"
+                                else -> "Settings"
+                            },
                             style = MaterialTheme.typography.titleMedium,
                             color = dogeWalletColors.ink,
                             modifier = Modifier
@@ -1590,7 +1608,7 @@ fun DogecoinWalletSheet(
                             Surface(
                                 color = colors.danger.copy(alpha = 0.14f),
                                 shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.clickable { advancedExpanded = true }
+                                modifier = Modifier.clickable { walletAction = DogeWalletAction.SETTINGS }
                             ) {
                                 Text(
                                     text = "!  Back up your key",
@@ -1609,39 +1627,18 @@ fun DogecoinWalletSheet(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { walletAction = DogeWalletAction.SEND; advancedExpanded = false },
+                            onClick = { walletAction = DogeWalletAction.SEND },
                             modifier = Modifier.weight(1f)
                         ) { Text("Send") }
                         OutlinedButton(
-                            onClick = { walletAction = DogeWalletAction.RECEIVE; advancedExpanded = false },
+                            onClick = { walletAction = DogeWalletAction.RECEIVE },
                             modifier = Modifier.weight(1f)
                         ) { Text("Receive") }
                     }
                 }
 
-                item(key = "advanced_header") {
-                    WalletCard {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { advancedExpanded = !advancedExpanded },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = stringResource(R.string.dogecoin_advanced_settings_title),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                            )
-                            Icon(
-                                imageVector = if (advancedExpanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                contentDescription = null
-                            )
-                        }
-                    }
                 }
-                }
-                if (advancedExpanded) {
+                if (walletAction == DogeWalletAction.SETTINGS) {
                 item(key = "backend") {
                     WalletCard {
                         Text(
@@ -1919,7 +1916,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
-                if (dogecoinBackend == DogecoinBackend.SPV && advancedExpanded) {
+                if (dogecoinBackend == DogecoinBackend.SPV && walletAction == DogeWalletAction.SETTINGS) {
                 item(key = "spv_status") {
                     WalletCard {
                         Text(
@@ -1967,7 +1964,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
-                if (advancedExpanded) {
+                if (walletAction == DogeWalletAction.SETTINGS) {
                 item(key = "balance") {
                     WalletCard {
                         Text(
@@ -2845,7 +2842,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
-                if (advancedExpanded) {
+                if (walletAction == DogeWalletAction.SETTINGS) {
                 item(key = "helper") {
                     WalletCard {
                         Row(
