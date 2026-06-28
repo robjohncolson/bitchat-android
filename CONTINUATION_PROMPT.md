@@ -54,11 +54,11 @@ bitcoinj never signs):
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `2348972`** (Phase 4 prep: doge-spv-crosscheck soak surface +
-DogecoinRpcClient.getTxOut, validated on-device; on top of `487ee90` UnifiedMeshService payment-broadcast
-forward, `38735de` Option B GATT-write retry, `f5780e3` Option A binary TLV — offline Bluetooth send PROVEN
-end-to-end on-device, see the DONE section above; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
-SUCCESSFUL; `git diff --check` clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `9229dc7`** (Phase 4 step 2: mainnet checkpoint validated in
+libdohj 0.14.7; on top of `6a9f7df` mainnet checkpoint asset + AuxPoW generator fix, `2348972` doge-spv-crosscheck
+soak surface, `487ee90` UnifiedMeshService payment-broadcast forward, `38735de` Option B GATT retry, `f5780e3`
+Option A binary TLV — offline Bluetooth send PROVEN end-to-end on-device; `:app:testDebugUnitTest` +
+`:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
@@ -238,11 +238,23 @@ direction (no spent/forged UTXO is ever presented as spendable). **Proven both w
 S24 SPV still showing the already-spent `638c253e…:1` → `result=FAIL SPENT_OR_MISSING`; after wifi-on resync
 to the `3e1f64af…:1` change UTXO → `result=PASS nodeConfirmed=396000000k`. Oracle reachability on the S24 =
 `adb reverse tcp:44555` + `doge-rpc-set http://127.0.0.1:44555 apstats <pw>` (the S24's stored RPC pointed at
-the unreachable LAN IP). **Still TODO for Phase 4 (in order):** mainnet checkpoint asset (needs the mainnet
-node up — also confirms the chainwork/12-byte feasibility); then the actual mainnet read-only soak (run SPV on
-mainnet, `doge-spv-crosscheck` vs the mainnet node over the user's agreement window); then — only with explicit
-per-spend authorization — lift the 4-layer block + add the WIF-backup gate. Soak duration/agreement criteria
-are a USER decision (not yet set).
+the unreachable LAN IP). **Step 1 DONE (`6a9f7df`): mainnet checkpoint asset shipped + feasibility CONFIRMED.**
+Mainnet node was up+synced (block 6.27M); chainwork = `…30b699a16d67c3d04c2a` = ~78 bits, 22 leading zero
+bytes → fits bitcoinj 0.14.7's 12-byte `CHAIN_WORK_BYTES` with ~2^18 headroom (the "may eventually exceed"
+risk is decades off). Generator fix: Dogecoin **mainnet is merge-mined (AuxPoW)** so `getblockheader false`
+returns 80-byte base header **+ AuxPoW tail** (the testnet checkpoints only worked because that testnet was
+CPU-mined = plain 80-byte headers) → take the first 80 bytes (block hash = SHA256d of exactly those). Asset =
+4 cps (heights 4267104/5767104/6217104/6265104). **Step 2 partial DONE (`9229dc7`): mainnet checkpoint VALIDATED
+to load in libdohj 0.14.7** (unit test: `CheckpointManager` parses the AuxPoW base headers without throwing;
+seeded head hash == node `getblockhash 6265104` = `c5e6395c…c1c5e4a4`). The cross-check read path is already
+proven (network-agnostic code). **Step 2 REMAINING (needs real money + a fresh key):** the LIVE mainnet soak —
+SPV syncs mainnet forward from the checkpoint + `doge-spv-crosscheck` vs the mainnet node over the user's window
+— needs (a) a FRESH mainnet key (the test device's PRE-EXISTING mainnet key `DTtoTrY3qjBiMkxaJG4gBdN1jmy8kNQGhh`
+has the 2021 floor birthdate → seeds from GENESIS, stuck; **doge-reset is mainnet-REFUSED** so there's no clean
+way to regenerate it today — a Phase 4 gap to resolve), and (b) the user funding that address with real mainnet
+DOGE. **Step 3 (NOT started — gated):** lift the 4-layer block + WIF-backup gate, then a real per-spend-
+authorized mainnet broadcast. Soak duration/agreement criteria are a USER decision (not set). Mainnet node RPC =
+port 22555 (tunnel `adb reverse tcp:22555`); device switched back to testnet after the probe.
 
 PHASE 3 (testnet broadcast, fail-closed) is SHIPPED + **PROVEN ON-DEVICE** (`a6fba67`): a fresh testnet key
 synced cp→tip in ~4.5 min and broadcast 5 DOGE via SPV peers (`5e8b4163…`) → local node mempool → mined →
