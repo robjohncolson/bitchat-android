@@ -168,7 +168,7 @@ class ChatViewModel(
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
-                "doge-reset | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
+                "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
                 "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
@@ -314,11 +314,35 @@ class ChatViewModel(
             }
             "doge-reset" -> {
                 val net = currentDogecoinNetwork()
-                if (net == DogecoinNetwork.MAINNET) "refused: mainnet wallet reset is console-blocked"
+                if (net == DogecoinNetwork.MAINNET) "refused: mainnet wallet reset is console-blocked (use doge-reset-mainnet <currentAddress> to confirm)"
                 else {
                     dogecoinSpv().clearPersistedState(net)   // stop + delete SPV store + stale wallet file
                     val snap = dogecoinWalletRepository.resetWallet(net)
                     "wallet reset net=${net.id} new addr=${snap.key.address} (fresh birthdate=now; run doge-spv-start)"
+                }
+            }
+            "doge-reset-mainnet" -> {
+                // Acknowledgment-gated mainnet key regeneration: the Phase 4 read-only soak needs a FRESH
+                // mainnet key (birthdate=now) so SPV seeds at the recent checkpoint instead of genesis. This
+                // DISCARDS the current mainnet key (irreversible — any funds at it become inaccessible from
+                // this app), so it requires the caller to pass the EXACT current mainnet address as
+                // confirmation. Debug-console only; never signs, exports a key, or broadcasts.
+                val net = currentDogecoinNetwork()
+                val confirmAddr = args.getOrNull(0)?.trim()
+                val tag = com.bitchat.android.debug.DebugConsole.TAG
+                if (net != DogecoinNetwork.MAINNET) "refused: not on mainnet (use doge-reset for ${net.id})"
+                else {
+                    val cur = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                    when (confirmAddr) {
+                        null -> "DANGER: discards the current mainnet key (irreversible; funds at it become inaccessible from this app). Current mainnet address = $cur — re-run: doge-reset-mainnet $cur"
+                        cur -> {
+                            android.util.Log.w(tag, "doge-reset-mainnet: DISCARDING the current mainnet key and generating a fresh one (confirmed)")
+                            dogecoinSpv().clearPersistedState(net)
+                            val snap = dogecoinWalletRepository.resetWallet(net)
+                            "MAINNET wallet reset: new addr=${snap.key.address} (fresh birthdate=now). Fund THIS address, then doge-spv-start."
+                        }
+                        else -> "refused: confirmation address did not match the current mainnet address ($cur)"
+                    }
                 }
             }
             "doge-spv-start" -> {
