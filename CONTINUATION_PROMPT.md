@@ -72,7 +72,8 @@ valid + ~44× relay fee, awaiting a pool — mainnet block production was slow);
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `d81c5d5`** (wallet UI "Coin" redesign — see the dated UI
+`dogecoin-m2-pay-nickname`. **Last green commit: `09ba226`** (mainnet near-tip SPV catch-up fix — see below;
+on top of `d81c5d5` wallet UI "Coin" redesign — see the dated UI
 note below; on top of `933d26b` Tor-for-SPV routing + WIF-backup UX polish —
 see the dated note below; on top of `b5730c1` Phase 4 FULL UI mainnet enablement, gated +
 adversarially reviewed; on top of `f622330` gated `doge-spv-mainnet-send` console send PROVEN on mainnet, the
@@ -103,10 +104,20 @@ gate (reviewSend, broadcastSignedTransaction, the WIF/mainnet/high-fee/policy ga
 is REUSED UNTOUCHED; only VISIBILITY is gated by view-state.** Commits: `034ca7c` palette+ring, `b3e741a`
 palette adoption (+the 2 theme bugs), `2946eb8` focal ring hero, `4b96906` balance/sync cards behind settings,
 `ec73ad3` focal-swap + gold segments, `d81c5d5` Settings gear view. `:app:assembleDebug` green throughout.
-**REMAINING (data-dependent polish — deferred, needs the FUNDED/SYNCING S24 to verify, not the Pixel):** the
-ring's live balance number, the SYNCING arc with real `blocksBehind`, an estimated-time-to-sync line, and the
-CONFIRMING 0→N fill wired to `confirmationDepth` on a live send. The component + view-state plumbing are ready;
-only the live-data wiring + its on-device check remain. **On-device nav gotcha for screenshotting the wallet:
+**LIVE-DATA RING STATES VERIFIED ON THE FUNDED S24 (2026-06-28):** the IDLE solid-gold ring with the real
+balance number (testnet "2.95 DOGE", mainnet "38.81254 DOGE") AND the SYNCING gold arc with real `blocksBehind`
+("21 behind") both render correctly. **MAINNET NEAR-TIP SPV STALL FOUND + FIXED (`09ba226`):** on-device the
+mainnet header download stopped ~15-26 blocks short of the peers' tip and never resumed (only a stop/start
+nudged it) — so `synced` (needs ≤2-behind) never went true, blocking mainnet SPV sends + the IDLE balance ring.
+Root cause: bitcoinj fixes the download peer early; newer higher peers connect later but aren't re-selected, so
+the chain never chases the last blocks (too old for new-block invs, past the original download peer's served
+tip). Fix = a periodic `catchUpJob` that, while running-but-not-synced, re-requests headers DIRECTLY from the
+highest-bestHeight peer (`Peer.startBlockChainDownload()`; no public `setDownloadPeer` in 0.14.7); idles once
+synced, re-engages if a later block pushes behind; read-only + idempotent + cancelled in stopLocked. Verified:
+mainnet behind=26 → synced(behind=0) in ~40s (was stuck indefinitely). **REMAINING UI polish (small, optional):**
+an estimated-time-to-sync line in the ring during sync, and the CONFIRMING 0→N ring fill wired to
+`confirmationDepth` on a live send (needs a real testnet send to verify the 0→6 fill). The component + view-state
+plumbing are ready; only these two live-wiring bits + their checks remain. **On-device nav gotcha for screenshotting the wallet:
 app TITLE → App Info → scroll → "Dogecoin wallet" row; the wallet is a bottom sheet so a DOWNWARD swipe
 DISMISSES it (scroll content UP only); Samsung kills the backgrounded app behind the keyguard — PIN-unlock
 (5555) + relaunch to get the console host back.**
