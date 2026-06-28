@@ -1,14 +1,17 @@
 package com.bitchat.android.features.dogecoin.ui
 
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 /**
  * Dieter Rams × Dogecoin palette, scoped to the wallet surface ONLY — the rest of the app keeps its
@@ -68,12 +71,18 @@ val dogeWalletColors: DogeWalletColors
 
 /**
  * Wrap the Dogecoin wallet UI in this so it adopts the Rams/Dogecoin palette (and so `MaterialTheme.*`
- * references inside resolve to paper/ink/gold instead of the app's green). [dark] defaults to the system
- * setting; callers may pass the app's effective dark/light to stay consistent with the rest of bitchat.
+ * references inside resolve to paper/ink/gold instead of the app's green). [dark] defaults to the AMBIENT
+ * (app) theme's effective light/dark — read from the surrounding background luminance — so the wallet stays
+ * consistent with whatever the user chose in bitchat (System/Light/Dark), not the OS setting alone.
+ *
+ * Content is wrapped in a paper [Surface] so (a) the whole wallet background is paper (not the app's dark
+ * sheet showing through behind bare elements), and (b) [androidx.compose.runtime.CompositionLocal]
+ * `LocalContentColor` defaults to ink — MaterialTheme sets the color *scheme* but NOT the content color, so
+ * without this, text outside a card Surface inherits the app's green.
  */
 @Composable
 fun DogecoinWalletTheme(
-    dark: Boolean = isSystemInDarkTheme(),
+    dark: Boolean = MaterialTheme.colorScheme.background.luminance() < 0.5f,
     content: @Composable () -> Unit
 ) {
     val c = if (dark) DogeWalletDark else DogeWalletLight
@@ -99,6 +108,10 @@ fun DogecoinWalletTheme(
         )
     }
     CompositionLocalProvider(LocalDogeWalletColors provides c) {
-        MaterialTheme(colorScheme = scheme, content = content)
+        MaterialTheme(colorScheme = scheme) {
+            Surface(modifier = Modifier.fillMaxSize(), color = c.paper, contentColor = c.ink) {
+                content()
+            }
+        }
     }
 }

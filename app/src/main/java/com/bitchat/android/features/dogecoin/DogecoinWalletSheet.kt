@@ -1,5 +1,6 @@
 package com.bitchat.android.features.dogecoin
 
+import com.bitchat.android.features.dogecoin.ui.DogecoinWalletTheme
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
@@ -1450,6 +1451,8 @@ fun DogecoinWalletSheet(
         modifier = modifier,
         onDismissRequest = onDismiss
     ) {
+        // Scope the wallet to its own Rams/Dogecoin palette (gold/ink/paper); the rest of the app keeps green.
+        DogecoinWalletTheme {
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = listState,
@@ -3868,6 +3871,7 @@ fun DogecoinWalletSheet(
                 }
             }
         )
+        }
     }
 }
 
