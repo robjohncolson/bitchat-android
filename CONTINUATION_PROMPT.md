@@ -102,11 +102,19 @@ gate weakened):** a blocked mainnet send now auto-opens the backup dialog inline
 Receive-card uses non-urgent wording (testnet sends aren't gated, new `dogecoin_wif_copy_missing_testnet`). New
 `DogecoinSpvTorTransportTest` pins the no-silent-fallback decision (`torConnectionManager`), the load-bearing
 no-arg `createSocket` override, and `overTor`. Built via two workflows (grounded design→adversary; two-lens diff
-review); all REVISE findings fixed; `:app:testDebugUnitTest` + `:app:assembleDebug` green. **REMAINING: peer
-reachability over Tor is UNVERIFIED ON-DEVICE** (Dogecoin nodes accepting Tor-exit inbound is environment-
-dependent; the code fails closed if <4 peers, never a leak) — the on-device proof is the next step. Info-level
-deferred: `ArtiTorManager.applyMode(ON)` sets `mode=ON` before `socksAddr` (the SPV observer can lag a toggle by
-one self-healing emission; never a leak — left alone as shared Tor infra).
+review); all REVISE findings fixed; `:app:testDebugUnitTest` + `:app:assembleDebug` green. **PROVEN ON-DEVICE
+(S24 `RFCX81GNBRE`, MAINNET read-only, 2026-06-28; `doge-spv-status` now prints `overTor`, commit `e0d8b60`):**
+baseline Tor OFF → `overTor=false`, clearnet peer + balance 38.81254 (DRjrQ6); `tor-set on` → log
+`Tor SOCKS endpoint changed (null → /127.0.0.1:9060); rebuilding SPV transport for MAINNET` → `overTor=true`,
+**7-8 mainnet peers connected OVER TOR** (real reachability, NOT fail-closed), balance still reads 38.81254 over
+Tor; `tor-set off` → reverse rebuild log → `overTor=false` → `synced=true` in ~30s on clearnet. **HONEST CAVEAT:
+full header CATCH-UP over Tor stalled** (height frozen 165 behind for ~3.5 min; Arti `END cell MISC` circuit
+flakiness) — connection + small reads work over Tor, but the sustained getheaders bulk download is slow/unreliable
+on these circuits; the SAME backlog synced instantly on clearnet, isolating it as Tor-network quality, NOT a code
+bug. (`RESOLVEFAILED` "remote hostname lookup" errors are OTHER app traffic — Nostr relays rerouted through Tor;
+SPV connects numeric peer IPs so it's unaffected.) Info-level deferred: `ArtiTorManager.applyMode(ON)` sets
+`mode=ON` before `socksAddr` (the SPV observer can lag a toggle by one self-healing emission; never a leak — left
+alone as shared Tor infra).
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
@@ -326,9 +334,10 @@ generate a FRESH key (birthdate=now) for SPV. testnet mines ~1 block/30-40s so f
 
 Remaining TESTNET polish (optional, non-blocking): pin a known-good testnet peer via `addAddress` if
 MIN_PEERS=4 is ever hard to reach; deferred review nits (reorg one-way receipt, interruptible 25s await,
-"Use Max" under SPV). **Tor-over-SPV is now IMPLEMENTED (`933d26b`)** — routes peer connections over the
-embedded Arti SOCKS when Tor is ON, fail-closed, no silent clearnet fallback (see the dated note up top);
-on-device peer-reachability over Tor is the one UNVERIFIED piece left (fails closed if unreachable).
+"Use Max" under SPV). **Tor-over-SPV IMPLEMENTED (`933d26b`) + PROVEN ON-DEVICE (mainnet read-only, S24)** —
+routes peer connections over the embedded Arti SOCKS when Tor is ON, 7-8 mainnet peers reached over Tor +
+balance read over Tor, fail-closed, no silent clearnet fallback (full proof trail in the dated note up top).
+Only caveat: bulk header catch-up over Tor is slow on flaky circuits (a Tor-network limit, not a code bug).
 
 ### Node state + deferred balance-match spike (Task 3)
 **The testnet node is now HEALTHY** (user closed the mainnet instance 2026-06-27; only testnet runs —
