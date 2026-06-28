@@ -210,6 +210,39 @@ ONE outstanding op and fragment 1 is still draining) and was **silently dropped 
   fragment-level ACK/retransmit, and key `MAX_FRAGMENT_SIZE` to the negotiated MTU. Do that only if on-device
   shows residual loss under the retry window.
 
+## Root cause #2 (found during the on-device proof) — the bridge dropped the payment-broadcast callbacks
+
+On-device, with Option A delivering the request as a single packet, the helper logged
+`💸 Payment broadcast request received` (decrypted, in `BluetoothMeshService.MessageHandler`) but then did
+**nothing** — no `handleRequest`, no node broadcast, no result. Cause: the app's mesh delegate chain is
+`BluetoothMeshService → UnifiedMeshService (bridge) → ChatViewModel`. `UnifiedMeshService` forwards
+`didReceiveVerifyChallenge/Response` to its delegate but was **missing the forwards for
+`didReceivePaymentBroadcastRequest`/`Result`** — so they fell through to the empty `MeshDelegate` defaults and
+were silently dropped at the bridge, before ever reaching `ChatViewModel`. This dead-ended the BLE relay in
+**both** directions (the request at the helper, and the result at the sender → sender times out with "No
+connected peer accepted"). It is why verification works over mesh but payment-broadcast didn't, independent of
+fragmentation. Fix: add the two missing overrides to `UnifiedMeshService`, mirroring the verify forwards.
+
+## ✅ PROVEN END-TO-END ON-DEVICE (2026-06-28) — offline Bluetooth-only send works
+
+Two phones, sender (S24) **offline** (Wi-Fi off, BLE on), helper (Pixel 3) with a testnet node via USB
+reverse tunnel. With Option A + Option B + the UnifiedMeshService forward, and a warmed symmetric Noise
+session, `doge-spv-peer-broadcast nceDC… 5`:
+
+- Sender: `Routing payment-broadcast REQUEST via mesh`, `ANDROID ENCRYPT 308 → 328 bytes` — **single packet,
+  no `Fragmenting…` line.**
+- Helper: `💸 Payment broadcast request received (307 bytes)` → `handleRequest` → node `sendrawtransaction`
+  → `Routing payment-broadcast RESULT via mesh`.
+- Node: tx `3e1f64af1159c29a0aa04915d1fa8d9d8c036b73286251590518907a253136b9` accepted (5.00000000 DOGE to
+  the node address) — **in the mempool**.
+- Sender: `TERMINAL=Claimed(txid=3e1f64af…)` (Claimed = the correct single-helper terminal state).
+
+Operational notes from the proof: both phones must run the **same** new build; a fresh **symmetric** Noise
+session is required (restarting one app desyncs it — sender `session=true` while helper `session=false` →
+helper can't decrypt; restart **both** so the warm-up does one clean handshake); the helper's `ChatViewModel`
+must be a **live** instance (a stale/old VM held by the mesh service no-ops the delegate — force-stop +
+relaunch); set `stay_on_while_plugged_in` so the phones don't sleep/relock during the adb-driven test.
+
 ### On-device re-test (decisive measurement still pending)
 Flash the **new build to BOTH phones** (they currently run `6c7222d`/`71e19d5`). Bootstrap a Noise session
 (favorite-DM), S24 → Airplane ON + Bluetooth ON (NOT `svc wifi disable`), helper opted-in for testnet + mutual

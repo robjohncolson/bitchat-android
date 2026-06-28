@@ -344,6 +344,19 @@ class UnifiedMeshService(
         delegate?.didReceiveVerifyResponse(peerID, payload, timestampMs)
     }
 
+    // Forward the broadcast-over-mesh payment callbacks to the app delegate. Without these, an inbound
+    // PAYMENT_BROADCAST_REQUEST/RESULT that BluetoothMeshService decrypts is dropped at this bridge (the
+    // MeshDelegate defaults are empty), so the helper never runs handleRequest and the sender never sees
+    // the result — the BLE relay silently dead-ends even though the payload arrived. Mirrors the verify
+    // forwards above. See docs/dogecoin-offline-mesh-relay-findings.md.
+    override fun didReceivePaymentBroadcastRequest(peerID: String, payload: ByteArray, timestampMs: Long) {
+        delegate?.didReceivePaymentBroadcastRequest(peerID, payload, timestampMs)
+    }
+
+    override fun didReceivePaymentBroadcastResult(peerID: String, payload: ByteArray, timestampMs: Long) {
+        delegate?.didReceivePaymentBroadcastResult(peerID, payload, timestampMs)
+    }
+
     override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
         return delegate?.decryptChannelMessage(encryptedContent, channel)
     }
