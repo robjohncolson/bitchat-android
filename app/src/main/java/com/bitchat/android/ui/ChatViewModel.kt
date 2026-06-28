@@ -64,6 +64,11 @@ class ChatViewModel(
         private const val EXPLORER_POLL_ATTEMPTS = 3
         private const val EXPLORER_POLL_INTERVAL_MS = 4_000L
         private const val EXPLORER_POLL_TOTAL_BUDGET_MS = 14_000L
+
+        // Bound for warming up a Noise session with a connected, session-less helper before a peer broadcast,
+        // so the relay can ride BLE instead of falling back to Nostr. Returns early once sessions establish;
+        // only incurred when such a helper is connected. See docs/dogecoin-offline-mesh-relay-findings.md.
+        private const val PEER_BROADCAST_SESSION_WARMUP_MS = 3_500L
     }
 
     fun sendVoiceNote(toPeerIDOrNull: String?, channelOrNull: String?, filePath: String) {
@@ -1560,6 +1565,11 @@ class ChatViewModel(
         _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Pending
         viewModelScope.launch {
             val network = currentDogecoinNetwork()
+            // Warm up BLE Noise sessions with connected session-less helpers so the relay prefers mesh over
+            // Nostr (the broadcast send path never initiates a handshake itself). No-op + no delay when a
+            // helper session already exists or none is connected. Best-effort: failure just leaves the existing
+            // Nostr-fallback behavior. See docs/dogecoin-offline-mesh-relay-findings.md.
+            runCatching { warmUpMeshHelperSessions(network) }
             val outcome = try {
                 paymentBroadcastCoordinator.broadcast(
                     rawTransactionHex = signedTransaction.rawTransactionHex,
@@ -1675,6 +1685,41 @@ class ChatViewModel(
                     mesh.getPeerInfo(peerID)?.noisePublicKey?.joinToString("") { "%02x".format(it) } == want
             }
         }.getOrNull()
+    }
+
+    /**
+     * Warm up Noise sessions with connected, session-LESS helper peers (mutual favorites or NODE_HELPER
+     * advertisers) so a peer broadcast can ride BLE instead of diverting to Nostr. Noise sessions are lazy and
+     * the broadcast send path (BluetoothMeshService.sendNoisePayloadToPeer) never initiates a handshake (unlike
+     * sendPrivateMessage), so two announce-only peers stay session-less and the relay falls back to Nostr
+     * (which needs internet). This initiates those handshakes up front and awaits them, bounded, returning
+     * early once they establish; only incurred when such a peer is connected. Transport-only — no effect on tx
+     * build/sign or corroboration-by-Noise-key. See docs/dogecoin-offline-mesh-relay-findings.md.
+     */
+    private suspend fun warmUpMeshHelperSessions(network: DogecoinNetwork) {
+        val sessionLess = state.getConnectedPeersValue().filter { peerID ->
+            peerID != mesh.myPeerID &&
+                !mesh.hasEstablishedSession(peerID) &&
+                isPotentialMeshHelper(peerID, network)
+        }
+        if (sessionLess.isEmpty()) return
+        sessionLess.forEach { peerID -> runCatching { mesh.initiateNoiseHandshake(peerID) } }
+        val deadline = System.currentTimeMillis() + PEER_BROADCAST_SESSION_WARMUP_MS
+        while (System.currentTimeMillis() < deadline && sessionLess.any { !mesh.hasEstablishedSession(it) }) {
+            kotlinx.coroutines.delay(150)
+        }
+    }
+
+    /** A connected peer that could broadcast for us: advertises NODE_HELPER for [network] or is a mutual
+     *  favorite (mirrors the mesh-tier test in listBroadcastHelperCandidates, minus the session filter). */
+    private fun isPotentialMeshHelper(peerID: String, network: DogecoinNetwork): Boolean {
+        val info = mesh.getPeerInfo(peerID) ?: return false
+        val key = info.noisePublicKey ?: return false
+        val advertisesHelp = network.id in info.helperNetworks
+        val mutual = runCatching {
+            com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(key)?.isMutual == true
+        }.getOrDefault(false)
+        return advertisesHelp || mutual
     }
     
     override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
