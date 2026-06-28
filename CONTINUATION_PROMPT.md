@@ -10,6 +10,44 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
+## ⏩ IMMEDIATE NEXT (in-flight as of 2026-06-27, HEAD `cec3edc`) — fix offline Bluetooth send
+
+We were making "send testdoge phone-to-phone with the SENDER fully offline" work over BLE mesh. State:
+- **PROVEN:** SPV builds+signs OFFLINE (airplane mode); node-less sender → helper → chain **mined twice**
+  (txids `7b1be7ae`, `638c253e`, 3 DOGE each) — **but via NOSTR (sender had internet)**, not Bluetooth.
+- **FAILING:** the truly-offline (Bluetooth-only) relay. Two warm-up fixes shipped (`6c7222d` send-time,
+  `71e19d5` proactive) and VERIFIED to route the relay **via mesh** after a Noise session is warmed
+  (`MessageRouter: Routing payment-broadcast REQUEST via mesh`, `session=true` both sides) — but the
+  **payment-broadcast payload never reaches the Pixel's `BroadcastHelperService`** (`didReceivePaymentBroadcast`
+  never fires); coordinator times out → `Failed: No connected peer accepted`. BLE link is healthy (announce
+  `type 1` + keepalive `type 33` packets flow both ways); only OUR large payment-broadcast NoisePayload doesn't
+  arrive.
+- **KEY REFRAME (user's insight):** the mesh payment-broadcast is **OUR** code (M3b, commit `754b404`), NOT
+  original bitchat. `sendNoisePayloadToPeer` IS original bitchat (added for QR **verification**, `c663e8e`).
+  bitchat's private messages + verification deliver over the SAME BLE mesh; ours doesn't → **the bug is in OUR
+  integration wiring**, most likely the **receive-side dispatch not routing the new `PAYMENT_BROADCAST_REQUEST`
+  NoisePayloadType to `didReceivePaymentBroadcast`** (decrypted then dropped), OR a **send-side
+  fragmentation/size** gap for the larger payload (a signed tx ~250B vs tiny verification payloads).
+- **PENDING WORKFLOW (get its result FIRST):** `compare-payment-broadcast-vs-verification-noisepayload` — task
+  id `wnawt6hha`, runId `wf_904600f7-6ca`. It compares our payment-broadcast NoisePayload send+receive path to
+  bitcoin verification's (working) path and returns `{maps, diag}` with the root cause + fix. Output file:
+  `…/5b83521c-…/tasks/wnawt6hha.output` (was 0 bytes / still running at refresh). If empty, re-run the
+  Workflow (scriptPath in `…/workflows/scripts/compare-payment-broadcast-vs-verification-noisepayload-wf_904600f7-6ca.js`).
+- **PLAN:** read the workflow's `diag` → implement the fix (align our payment-broadcast with the proven
+  verification NoisePayload path — wire the receive-side type dispatch and/or fragmentation) → `:app:assembleDebug`
+  → **install on BOTH phones** (they currently run `6c7222d`, NOT the latest) → re-test the offline send.
+- **DEVICE STATE for the re-test:** S24 `RFCX81GNBRE` = sender, currently airplane OFF + wifi OFF + data OFF
+  (offline) + BT ON, SPV wallet ~8.97 TESTDOGE at `nUEBj7Wi…`. Pixel 3 `89VX0HPX1` = helper, RPC pointed at
+  `http://127.0.0.1:44555` via **USB tunnel `adb reverse tcp:44555`**, helper-enabled, wallet `nceDCkWAP9…`
+  (node-owned). Both mesh-connected + mutual favorites (`forcemutual` not needed). Node = testnet on
+  `127.0.0.1:44555` (Pixel reaches it through the tunnel). Console send: `doge-spv-peer-broadcast <addr> <amt>`
+  (offline SPV build → mesh relay). **Restore later:** Pixel `doge-rpc-set http://10.0.0.24:44555 apstats <pw>`
+  + `doge-helper-enable 0`; re-enable S24 wifi/airplane.
+- **S24 BLE ops quirks:** `adb svc wifi disable` DROPS the S24's BLE mesh (needs app restart); but
+  `cmd connectivity airplane-mode disable` + `cmd -w wifi set-wifi-enabled disabled` (and airplane+BT) PRESERVE
+  it. testnet mines ~1 block/30-40s → verify with `getrawtransaction <txid>` not `getrawmempool`. Full trail:
+  `docs/dogecoin-offline-mesh-relay-findings.md`. (After this offline thread: Phase 4 mainnet — see NEXT STEP.)
+
 ## CURRENT FOCUS: self-contained SPV wallet (no node, no paid key)
 
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
