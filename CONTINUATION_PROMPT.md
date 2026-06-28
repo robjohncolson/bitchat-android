@@ -10,32 +10,46 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `0f8c385`, branch `dogecoin-m2-pay-nickname`, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (HEAD `7c9dca3`, branch `dogecoin-m2-pay-nickname`, tree clean, build green)
 
 The Dogecoin wallet is feature-complete AND has a finished "Coin" UI redesign (Dieter-Rams × Dogecoin),
 all verified on-device with real money (see the **WALLET UI "COIN" REDESIGN** note + the mainnet
-**catch-up fix `09ba226`** lower down). **The two remaining focal-ring polish bits are now IMPLEMENTED +
-COMMITTED (`0f8c385`)** — presentation-only live-data wiring in the focal ring (`DogecoinWalletSheet.kt`,
-the `item(key = "focal")` block + two new top-level `LaunchedEffect`s just above `BitchatBottomSheet(`;
-`features/dogecoin/ui/ConfirmationRing.kt` unchanged). **Money-path UNCHANGED** (the only new call is the
-read-only `DogecoinSpvService.confirmationDepth()`; signer/verifier/4-layer-block/all send gates reused
-untouched — canary tests green). Built + adversarially reviewed via a 4-lens workflow (verdict: money-path
-UNCHANGED, SHIP-WITH-NITS; the two substantive findings folded in). **The ONLY remaining work is ON-DEVICE
-VERIFICATION of the two live behaviors** (needs a funded device — couldn't be done headless this session):
+**catch-up fix `09ba226`** lower down). Three small UI items shipped this session; the ONLY thing left is
+one live-send verification (below).
 
-1. **Sync-ETA line** ✅ coded — during sync the ring center shows "~N min left" under "N behind" (+ a11y
-   text). A slow-ticked effect averages headers/sec since the run's anchor, reading `spvService.status.value`
-   directly so a stall AGES the ETA up (not frozen); skipped once `blocksBehind<=0`; re-anchored on a rescan
-   regression; keyed on the network. **Verify** on a fresh sync (`doge-spv-rescan` on testnet, or watch a
-   mainnet start before catch-up converges): the "~N min left" line appears and counts down sanely.
-2. **Confirmation 0→6 ring fill** ✅ coded — a pending SPV-sent tx drives the ring into `RingMode.CONFIRMING`
-   (`progress = confDepth/6`, center "Confirming / D of 6"), reverting to the idle balance ring at 6 confs or
-   when the budget/receipt clears. A `null` depth (tx unknown/lost) shows NO confirming ring (not a fake
-   "0 of 6"). NOTE: the focal ring only composes in the default (NONE) view — after a send, tap `‹` back from
-   the SEND receipt to watch the fill. **Verifying this needs a REAL testnet send** to watch 0→6 as blocks
-   confirm (~3–4 min, testnet ~1 block/30–40s).
+**✅ KEY-BACKUP FLOW REDESIGN — SHIPPED + ON-DEVICE VERIFIED (`7c9dca3`).** The "! Back up your key" chip
+used to dump you into the FULL Settings menu (hunt among many options), and the only way to RECORD a backup
+was "Copy" (forced clipboard). Now: the chip opens the backup dialog DIRECTLY (`pendingWifCopy = snapshot.key`,
+`DogecoinWalletSheet.kt:~1707`); the dialog is de-jargoned (no "WIF" — "Back up your Dogecoin <net> key",
+"Show my key", "Key backed up"), reveal-first (reveal is freely available behind the existing FLAG_SECURE +
+secret warning; the mainnet ack now FOLLOWS the reveal), and adds a first-class **"I've written it down"**
+confirm that records the backup WITHOUT touching the clipboard, alongside "Copy". **Presentation-only:** both
+record paths call the SAME `repository.markWifCopied()`; the send gate (`wifCopyState.matches`) + ack gate
+(`canRecordWifBackup`) are UNTOUCHED; "I've written it down" is STRICTER than old Copy (also requires reveal).
+Strings reworded in `app/src/main/res/values/strings.xml`. Adversarial gate-check: GATE-PRESERVED, no WIF leak.
+**Verified on Pixel 3 (mainnet):** chip→dialog directly; the redesigned content confirmed via `uiautomator dump`
+(screenshots are correctly BLACK — FLAG_SECURE blocks screen capture of the key, so use uiautomator, not
+screencap, to inspect the open dialog); clean dismiss. Build+tests green.
 
-Both are cosmetic and block nothing. Everything else this branch ships is done + committed + documented below.
+**The two focal-ring polish bits are IMPLEMENTED + COMMITTED (`0f8c385`)** — presentation-only live-data wiring
+in the focal ring (`DogecoinWalletSheet.kt`, the `item(key = "focal")` block + two new top-level
+`LaunchedEffect`s just above `BitchatBottomSheet(`; `ConfirmationRing.kt` unchanged). Money-path UNCHANGED (the
+only new call is the read-only `confirmationDepth()`; canary tests green). Built + 4-lens adversarial review
+(money-path UNCHANGED, SHIP-WITH-NITS, findings folded in):
+
+1. **Sync-ETA line** ✅ coded + **VERIFIED ON-DEVICE** (user confirmed the "~N min left" line renders/works).
+   A slow-ticked effect averages headers/sec since the run's anchor, reading `spvService.status.value` directly
+   so a stall AGES the ETA up (not frozen); skipped once `blocksBehind<=0`; re-anchored on rescan; network-keyed.
+2. **Confirmation 0→6 ring fill** ✅ coded — **STILL NEEDS ITS ON-DEVICE VERIFY (the one open item).** A pending
+   SPV-sent tx drives the ring into `RingMode.CONFIRMING` (`progress = confDepth/6`, center "Confirming / D of
+   6"), reverting to the idle balance ring at 6 confs or when the budget/receipt clears. A `null` depth (tx
+   unknown/lost) shows NO confirming ring (not a fake "0 of 6"). NOTE: the focal ring only composes in the
+   default (NONE) view — after a send, tap `‹` back from the SEND receipt to watch the fill. **Verifying needs a
+   REAL UI send** (testnet is the safe way, ~3–4 min, ~1 block/30–40s) — a console `doge-spv-broadcast` does NOT
+   set `sentReceipt`, so it WON'T drive the ring; the send must go through the wallet UI. Reserved for the user
+   (live send button; blind adb taps risk a real/mis-amount send + address entry mangles via `input text`).
+
+Everything else this branch ships is done + committed + documented below.
 Standard verify: `.\gradlew.bat -p "<repo>" :app:testDebugUnitTest :app:assembleDebug --console=plain`; on-device
 screenshot the wallet via app TITLE → App Info → "Dogecoin wallet" row (Pixel `89VX0HPX1` for layout, funded
 S24 `RFCX81GNBRE` for live data; PIN 5555; bottom-sheet ⇒ scroll content UP only, a downward swipe dismisses).
