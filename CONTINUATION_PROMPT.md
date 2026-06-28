@@ -57,17 +57,24 @@ fixed TWO real SPV bugs (checkpoint asset loaded the wrong chain — see below) 
 (acknowledgment-gated fresh mainnet key) and `doge-spv-mainnet-send` (the ONE confirmation-gated mainnet
 broadcast channel; `mainnetAuthorized` flag, default false; DataSource/UI 4-layer block UNTOUCHED). See the
 "NEXT STEP: PHASE 4" section below + memory for the full trail.
-**⏩ REMAINING (optional): full UI mainnet enablement** — lift the DataSource/sheet 4-layer block behind a
-WIF-backup gate + the policy-ack/high-fee UI gates (only the deliberate console channel is open today); confirm
-the live mainnet send mined (was in-mempool at handoff, valid + good fee, awaiting a pool).
+**✅ FULL UI MAINNET ENABLEMENT DONE (`b5730c1`)** — mainnet sending now works from the WALLET UI, behind the
+already-wired gates: `DogecoinSpvDataSource` 3-param `broadcast(…, mainnetAuthorized)` (2-param interface stays
+false); `broadcastSignedTransaction` passes true ONLY after WIF-backup (re-checked there for defense-in-depth)
++ mainnet/high-fee/policy-unavailable acks (`canExportOrBroadcastSignedDogecoinTransaction`); `spvSendReady` +
+`canBroadcastViaSpv` no longer exclude mainnet; DataSource `require` + under-lock service check kept as
+defense-in-depth. Adversarially reviewed (subagent): SHIP, no gate-bypass, all 4 gates enforced. NOT tapped
+through on-device (the send button is LIVE → blind adb taps risk a real send; user does the UI send). **⏩
+REMAINING (optional, non-blocking):** confirm the console 10-DOGE send `829d219b…` mined (in-mempool at handoff,
+valid + ~44× relay fee, awaiting a pool — mainnet block production was slow); WIF-backup/Tor-for-SPV polish.
 
 ## CURRENT FOCUS: self-contained SPV wallet (no node, no paid key)
 
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `f622330`** (Phase 4 step 3: gated `doge-spv-mainnet-send`,
-real mainnet send PROVEN; on top of the SPV checkpoint-network fixes `ec73ea9`/`c5526b2`, `doge-reset-mainnet`,
+`dogecoin-m2-pay-nickname`. **Last green commit: `b5730c1`** (Phase 4 FULL UI mainnet enablement, gated +
+adversarially reviewed; on top of `f622330` gated `doge-spv-mainnet-send` console send PROVEN on mainnet, the
+SPV checkpoint-network fixes `ec73ea9`/`c5526b2`, `doge-reset-mainnet`,
 `9229dc7` mainnet checkpoint validated, `6a9f7df` mainnet checkpoint asset, `2348972` doge-spv-crosscheck,
 `487ee90`/`38735de`/`f5780e3` offline Bluetooth send; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
 SUCCESSFUL; `git diff --check` clean). Working tree clean.
