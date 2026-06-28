@@ -4,7 +4,9 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -79,6 +81,8 @@ class DogecoinSpvService private constructor(
      *  observer never tears the PeerGroup down mid-broadcast (the tx is already reserved + handed to peers). */
     @Volatile private var broadcasting = false
     private val torScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    /** Periodic near-tip catch-up nudge (re-requests headers from the highest peer while not synced). */
+    private var catchUpJob: Job? = null
 
     private val _status = MutableStateFlow(DogecoinSpvStatus(network = DogecoinNetwork.TESTNET))
     val status: StateFlow<DogecoinSpvStatus> = _status.asStateFlow()
@@ -184,6 +188,28 @@ class DogecoinSpvService private constructor(
                 }
             })
             Log.i(TAG, "SPV started for $network (birthdate=${Date(birthdateSecs * 1000L)})")
+
+            // Near-tip catch-up: bitcoinj's header download can stop a few blocks short of the real tip (the
+            // download peer is fixed early; newer higher peers connect later but aren't re-selected), so on a
+            // thin mainnet peer set the chain can hang "N behind" indefinitely — and since `synced` requires
+            // ≤SYNCED_WITHIN_BLOCKS, SPV would never go ready and sends would be blocked. While running but not
+            // synced, periodically re-request headers DIRECTLY from the highest-height connected peer to chase
+            // the tip; once synced it idles (re-engaging if a later block pushes us behind again).
+            catchUpJob?.cancel()
+            catchUpJob = torScope.launch {
+                while (true) {
+                    delay(SYNC_CATCHUP_INTERVAL_MS)
+                    synchronized(lock) {
+                        val livePg = peerGroup ?: return@launch          // stopped → end the coroutine
+                        if (activeNetwork != network) return@launch       // switched network → end
+                        if (_status.value.synced) return@synchronized     // caught up → skip this tick
+                        org.bitcoinj.core.Context.propagate(bitcoinjContext)
+                        runCatching {
+                            livePg.connectedPeers.maxByOrNull { it.bestHeight }?.startBlockChainDownload()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -191,6 +217,8 @@ class DogecoinSpvService private constructor(
     fun stop() = synchronized(lock) { stopLocked() }
 
     private fun stopLocked() {
+        catchUpJob?.cancel()
+        catchUpJob = null
         // Final flush + stop the autosave thread so the latest UTXO set is persisted before teardown.
         wallet?.let { w -> runCatching { w.shutdownAutosaveAndWait() } }
         peerGroup?.let { pg ->
@@ -521,6 +549,7 @@ class DogecoinSpvService private constructor(
         const val MIN_PEERS = 4 // eclipse-resistance floor for "synced"; broadcast needs >=this too
         const val SYNCED_WITHIN_BLOCKS = 2L
         const val BROADCAST_TIMEOUT_SECS = 25L // best-effort re-announce wait; timeout != failure (Claimed)
+        const val SYNC_CATCHUP_INTERVAL_MS = 10_000L // re-poke the highest peer for headers while not synced
         const val TOR_CONNECT_TIMEOUT_MILLIS = 60_000 // Tor circuit + peer handshake is slow; BlockingClientManager defaults to 1s
 
         /**
