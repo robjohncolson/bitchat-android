@@ -43,11 +43,18 @@ foreach ($depth in ($DepthsFromTip | Sort-Object -Descending)) {
     $height = $tip - $depth
     if ($height -lt 1) { Write-Output "[gen] skip depth $depth (height < 1)"; continue }
     $hash = (DogeRpc @("getblockhash", "$height")).Trim()
-    $headerHex = (DogeRpc @("getblockheader", $hash, "false")).Trim()           # raw 80-byte header
+    $fullHeaderHex = (DogeRpc @("getblockheader", $hash, "false")).Trim()       # 80-byte base header, + AuxPoW tail on merge-mined blocks
     $info = DogeRpc @("getblockheader", $hash, "true") | ConvertFrom-Json       # chainwork + fields
     $chainworkHex = $info.chainwork
 
-    if ($headerHex.Length -ne 160) { throw "height ${height}: header is $($headerHex.Length/2) bytes, expected 80" }
+    # Dogecoin MAINNET blocks are merge-mined (AuxPoW): getblockheader appends the parent-coinbase + merkle
+    # branch after the 80-byte base header (testnet here was CPU-mined, so its headers are a plain 80 bytes).
+    # bitcoinj's StoredBlock stores only the 80-byte BASE header, and a block's hash is SHA256d of exactly
+    # those 80 bytes, so truncating keeps the StoredBlock hash == the node's getblockhash. The AuxPoW tail is
+    # not needed in a checkpoint — it only seeds the store; SPV validates AuxPoW PoW for blocks it downloads
+    # AFTER the checkpoint.
+    if ($fullHeaderHex.Length -lt 160) { throw "height ${height}: header is $($fullHeaderHex.Length/2) bytes, expected >= 80" }
+    $headerHex = $fullHeaderHex.Substring(0, 160)
     if ($chainworkHex.Length -ne 64) { throw "height ${height}: chainwork is $($chainworkHex.Length/2) bytes, expected 32" }
     if ($chainworkHex.Substring(0,40) -ne ('0'*40)) {
         throw "height ${height}: chainwork $chainworkHex exceeds bitcoinj 0.14.7's 12-byte limit (CHAIN_WORK_BYTES=12)"
