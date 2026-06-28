@@ -1456,6 +1456,69 @@ fun DogecoinWalletSheet(
             }  // onFailure: not synced/active enough to read yet — the sync status conveys progress
     }
 
+    // Sync ETA (presentation-only): while syncing, average headers/sec since this run's anchor and surface the
+    // minutes-left. Recomputed on a slow tick (not only on chainHeight changes) so a stall AGES the estimate up
+    // (dMs grows while dHeight is frozen -> rate falls -> ETA rises) instead of freezing an optimistic number;
+    // re-anchored on a chain regression (rescan); skipped entirely once essentially caught up. Reads the
+    // StateFlow directly so each tick sees the fresh height. Cosmetic — never gates anything.
+    var syncEtaMinutes by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(dogecoinBackend, selectedNetwork) {
+        var anchorHeight = -1
+        var anchorTimeMs = 0L
+        while (true) {
+            val st = spvService.status.value
+            val isSyncing = dogecoinBackend == DogecoinBackend.SPV && st.running && !st.synced
+            if (!isSyncing || st.chainHeight <= 0 || st.blocksBehind <= 0) {
+                anchorHeight = -1
+                syncEtaMinutes = null
+            } else {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (anchorHeight < 0 || st.chainHeight < anchorHeight) {
+                    // Start (or restart on a regression) the measurement window.
+                    anchorHeight = st.chainHeight
+                    anchorTimeMs = now
+                    syncEtaMinutes = null
+                } else {
+                    val dHeight = st.chainHeight - anchorHeight
+                    val dMs = now - anchorTimeMs
+                    // Wait for a meaningful window so the first jumpy samples don't flash a wild ETA.
+                    if (dHeight >= 10 && dMs >= 4_000L) {
+                        val rate = dHeight.toDouble() / (dMs / 1000.0)  // headers/sec
+                        if (rate > 0.0) {
+                            syncEtaMinutes = kotlin.math.ceil(st.blocksBehind / rate / 60.0)
+                                .toInt().coerceIn(1, 24 * 60)
+                        }
+                    }
+                }
+            }
+            delay(5_000L)
+        }
+    }
+
+    // Confirmation ring fill (presentation-only): track an SPV-sent tx's depth 0..target so the focal ring can
+    // fill 0->6 as blocks land. Independent of the receipt's Claimed->Confirmed corroboration poll above (which
+    // flips at depth 1); this one runs to the target. Bounded so a never-confirming tx eventually reverts the
+    // ring to the idle balance. Reads only confirmationDepth() — never touches the money path.
+    var confirmingDepth by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(sentReceipt?.txid, dogecoinBackend, selectedNetwork) {
+        val receipt = sentReceipt
+        if (receipt == null || dogecoinBackend != DogecoinBackend.SPV || receipt.network != selectedNetwork) {
+            confirmingDepth = null
+            return@LaunchedEffect
+        }
+        val txid = receipt.txid
+        repeat(DOGECOIN_SPV_CONFIRM_POLLS) {
+            // null = the tx isn't (yet) known to the SPV wallet (e.g. lost/replaced) — show NO confirming ring
+            // rather than a fake, never-progressing "0 of 6"; a known tx reports depth 0..target and drives the fill.
+            val depth = withContext(Dispatchers.IO) { spvService.confirmationDepth(selectedNetwork, txid) }
+            confirmingDepth = depth?.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET)
+            if (depth != null && depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
+            delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+        }
+        // Budget exhausted without reaching the target — stop showing a stale count; revert to idle/balance.
+        confirmingDepth = null
+    }
+
     BitchatBottomSheet(
         modifier = modifier,
         onDismissRequest = onDismiss
@@ -1539,15 +1602,30 @@ fun DogecoinWalletSheet(
                     val s = spvStatus
                     val syncing = spv && s.running && !s.synced
                     val colors = dogeWalletColors
+                    // A pending SPV send fills the ring 0..target as confirmations land — only while synced
+                    // (depths aren't trustworthy mid-sync). Once it reaches the target the ring returns to idle.
+                    val confDepth = confirmingDepth
+                    val confirming = spv && !syncing && confDepth != null && confDepth < DOGECOIN_SPV_CONFIRM_TARGET
                     val syncProgress = if (syncing) {
                         val behind = s.blocksBehind.coerceAtLeast(0).toFloat()
                         (1f - behind / (behind + 1500f)).coerceIn(0.04f, 0.97f)
                     } else 1f
                     val bal = walletBalance
-                    val ringDesc = if (syncing) {
-                        "Syncing, ${s.blocksBehind} blocks behind"
-                    } else {
-                        bal?.let { "Balance ${DogecoinAmount.formatKoinu(it.confirmedKoinu)} DOGE" }
+                    val ringMode = when {
+                        syncing -> RingMode.SYNCING
+                        confirming -> RingMode.CONFIRMING
+                        else -> RingMode.IDLE
+                    }
+                    val ringProgress = when {
+                        syncing -> syncProgress
+                        confirming -> confDepth!!.toFloat() / DOGECOIN_SPV_CONFIRM_TARGET
+                        else -> 1f
+                    }
+                    val ringDesc = when {
+                        syncing -> "Syncing, ${s.blocksBehind} blocks behind" +
+                            (syncEtaMinutes?.let { ", about $it minutes left" } ?: "")
+                        confirming -> "$confDepth of $DOGECOIN_SPV_CONFIRM_TARGET confirmations"
+                        else -> bal?.let { "Balance ${DogecoinAmount.formatKoinu(it.confirmedKoinu)} DOGE" }
                             ?: "Balance not loaded"
                     }
                     Column(
@@ -1556,45 +1634,63 @@ fun DogecoinWalletSheet(
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         ConfirmationRing(
-                            mode = if (syncing) RingMode.SYNCING else RingMode.IDLE,
-                            progress = syncProgress,
+                            mode = ringMode,
+                            progress = ringProgress,
                             diameter = 210.dp,
+                            segments = DOGECOIN_SPV_CONFIRM_TARGET,
                             contentDescription = ringDesc
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                if (syncing) {
-                                    Text("Syncing", style = MaterialTheme.typography.titleMedium, color = colors.ink)
-                                    Text(
-                                        "${s.blocksBehind} behind",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = colors.muted
-                                    )
-                                } else if (bal != null) {
-                                    val balText = DogecoinAmount.formatKoinu(bal.confirmedKoinu)
-                                    Text(
-                                        text = balText,
-                                        // Adapt to length so a large balance still fits inside the ring.
-                                        fontSize = when {
-                                            balText.length <= 8 -> 30.sp
-                                            balText.length <= 12 -> 24.sp
-                                            balText.length <= 16 -> 19.sp
-                                            else -> 15.sp
-                                        },
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = colors.ink,
-                                        maxLines = 1
-                                    )
-                                    Text("DOGE", style = MaterialTheme.typography.labelMedium, color = colors.muted)
-                                    if (bal.unconfirmedKoinu > 0L) {
+                                when {
+                                    syncing -> {
+                                        Text("Syncing", style = MaterialTheme.typography.titleMedium, color = colors.ink)
                                         Text(
-                                            "+${DogecoinAmount.formatKoinu(bal.unconfirmedKoinu)} pending",
+                                            "${s.blocksBehind} behind",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.muted
+                                        )
+                                        syncEtaMinutes?.let { eta ->
+                                            Text(
+                                                "~$eta min left",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colors.muted
+                                            )
+                                        }
+                                    }
+                                    confirming -> {
+                                        Text("Confirming", style = MaterialTheme.typography.titleMedium, color = colors.ink)
+                                        Text(
+                                            "$confDepth of $DOGECOIN_SPV_CONFIRM_TARGET",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = colors.muted
                                         )
                                     }
-                                } else {
-                                    Text("—", style = MaterialTheme.typography.headlineMedium, color = colors.muted)
+                                    bal != null -> {
+                                        val balText = DogecoinAmount.formatKoinu(bal.confirmedKoinu)
+                                        Text(
+                                            text = balText,
+                                            // Adapt to length so a large balance still fits inside the ring.
+                                            fontSize = when {
+                                                balText.length <= 8 -> 30.sp
+                                                balText.length <= 12 -> 24.sp
+                                                balText.length <= 16 -> 19.sp
+                                                else -> 15.sp
+                                            },
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.ink,
+                                            maxLines = 1
+                                        )
+                                        Text("DOGE", style = MaterialTheme.typography.labelMedium, color = colors.muted)
+                                        if (bal.unconfirmedKoinu > 0L) {
+                                            Text(
+                                                "+${DogecoinAmount.formatKoinu(bal.unconfirmedKoinu)} pending",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = colors.muted
+                                            )
+                                        }
+                                    }
+                                    else -> Text("—", style = MaterialTheme.typography.headlineMedium, color = colors.muted)
                                 }
                             }
                         }
@@ -4588,6 +4684,10 @@ private const val DOGECOIN_SEND_ITEM_INDEX = 6
 private const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
 private const val DOGECOIN_SPV_CORROBORATION_POLLS = 40
 private const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
+// Focal-ring confirmation fill (presentation-only): how many confirmations the ring shows as "done" (a full
+// gold ring), and the poll budget before a never-confirming tx reverts the ring to the idle balance.
+private const val DOGECOIN_SPV_CONFIRM_TARGET = 6
+private const val DOGECOIN_SPV_CONFIRM_POLLS = 80
 private const val DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS = 650L
 
 private class DogecoinQrCodeAnalyzer(
