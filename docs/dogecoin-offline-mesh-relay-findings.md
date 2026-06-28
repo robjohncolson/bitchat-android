@@ -103,3 +103,31 @@ Bootstrap the Noise session out-of-band first, then go offline:
 `doge-spv-peer-broadcast <addr> <amt> [feeKb]` — signs from the persisted SPV UTXO set (offline-capable) and
 relays the signed tx over the mesh via `requestPeerBroadcast` (twin of `doge-peer-broadcast`, which builds via
 RPC). Committed `c1354ce`.
+
+## Fix implemented (commit `6c7222d`) — warm up Noise sessions (option 1)
+
+`ChatViewModel.requestPeerBroadcast` now calls `warmUpMeshHelperSessions(network)` before
+`paymentBroadcastCoordinator.broadcast`: for each connected, session-less mutual-favorite / NODE_HELPER peer it
+calls `mesh.initiateNoiseHandshake` and awaits `hasEstablishedSession` up to `PEER_BROADCAST_SESSION_WARMUP_MS`
+(3.5s), returning early; no-op/no-delay when a session already exists or no helper is connected; best-effort
+(`runCatching`). Transport-only — tx build/sign and corroboration-by-Noise-key are unchanged.
+
+**Result on-device (S24 airplane mode → Pixel helper):**
+- ✅ The warm-up **establishes the BLE Noise session** (`session=true`, symmetric on both phones).
+- ✅ With a session, the relay now **routes over mesh, not Nostr**: `MessageRouter: Routing payment-broadcast
+  REQUEST via mesh to 74424755…` (previously it went to `NostrTransport`). The routing root cause is fixed.
+- ❌ **End-to-end BLE delivery did not complete in this environment.** The Pixel never received the payload
+  (no `BroadcastHelperService` / `didReceivePaymentBroadcast`), so the coordinator timed out (`Failed: No
+  connected peer accepted`). The BLE link between these two phones in airplane mode is very slow — the Noise
+  handshake alone took **~30s** (far exceeding the 3.5s warm-up window, so the *first* send still fell to Nostr;
+  the second send, with the session already up, routed via mesh but the larger payment-broadcast payload still
+  didn't arrive within the coordinator's ~30s attempt window). This is a **BLE link-reliability limit**
+  (airplane mode, Samsung S24 ↔ Pixel 3, a third "doge-bobby" device sharing airtime), not a logic bug.
+
+**Implications / follow-ups (separate from this fix):**
+- The 3.5s warm-up window is fine for a healthy link (handshake <1s) but useless against a ~30s handshake. For
+  slow links, warm up **proactively** (when the wallet/CTA opens, not at send time) so the session is ready
+  before the user sends — and/or lengthen the coordinator's mesh attempt window.
+- The deeper limiter is BLE **payload** delivery between these specific phones; a cleaner test (phones close,
+  no third device, not airplane-throttled) is needed to confirm the warmed-session mesh path end-to-end. The
+  code change is correct and proven at the routing layer.
