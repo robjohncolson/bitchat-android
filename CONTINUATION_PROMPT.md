@@ -72,12 +72,41 @@ valid + ~44× relay fee, awaiting a pool — mainnet block production was slow);
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `b5730c1`** (Phase 4 FULL UI mainnet enablement, gated +
+`dogecoin-m2-pay-nickname`. **Last green commit: `933d26b`** (Tor-for-SPV routing + WIF-backup UX polish —
+see the dated note below; on top of `b5730c1` Phase 4 FULL UI mainnet enablement, gated +
 adversarially reviewed; on top of `f622330` gated `doge-spv-mainnet-send` console send PROVEN on mainnet, the
 SPV checkpoint-network fixes `ec73ea9`/`c5526b2`, `doge-reset-mainnet`,
 `9229dc7` mainnet checkpoint validated, `6a9f7df` mainnet checkpoint asset, `2348972` doge-spv-crosscheck,
 `487ee90`/`38735de`/`f5780e3` offline Bluetooth send; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
 SUCCESSFUL; `git diff --check` clean). Working tree clean.
+
+**✅ TOR-FOR-SPV + WIF-BACKUP POLISH SHIPPED (`933d26b`, 2026-06-28).** SPV peer connections now route over
+the embedded Arti SOCKS proxy when Tor is ON. `DogecoinSpvService.start()` decides transport on Tor INTENT
+(`ArtiTorManager.currentSocksAddress() != null`, set the instant the mode flips, BEFORE bootstrap): non-null ⇒
+`PeerGroup(params, chain, BlockingClientManager(SocksProxySocketFactory))` so every peer socket is a SOCKS5
+CONNECT through Arti; null ⇒ the default clearnet `NioClientManager` path, **byte-for-byte unchanged**. A
+clearnet socket is NEVER opened while Tor is on; can't-reach-peers fails closed (no balance/broadcast), never a
+clearnet retry. `DnsDiscovery` in BOTH modes (numeric `PeerAddress` only — a hostname-only `PeerAddress` crashes
+`PeerAddress.equals`, verified in the 0.14.7 bytecode at offset 29-37); the one-time seed DNS lookup stays on the
+local resolver (honestly disclosed). A `statusFlow` observer rebuilds the transport on the SOCKS **address**
+(`distinctUntilChanged`, so OFF⇄ON + Arti port-bump 9060→9061 are handled, not just on/off); it never tears down
+mid-broadcast (`broadcasting` guard, reset throw-safe) and the rebuild is **non-throwing** (`runCatching`) so it
+can't mask an already-CLAIMED txid in `broadcast()`'s finally or kill the observer coroutine. New `overTor`
+status field surfaces the ACTUAL transport. **Money-path UNTOUCHED:** bitcoinj never signs (Option B); the
+fail-closed verifier, 4-layer mainnet block, MIN_PEERS=4 floor, `mainnetAuthorized` gate, and all send/WIF gates
+are intact (confirmed by a two-lens adversarial diff review). Disclosure at `DogecoinWalletSheet.kt:~1527`
+replaced the "Tor routing isn't available yet" string with Tor-state-aware text — "your IP is hidden" is claimed
+ONLY when `overTor && torReady` (actual transport, not mere intent). **WIF-backup polish (strictly additive, no
+gate weakened):** a blocked mainnet send now auto-opens the backup dialog inline (was a dead-end) in both
+`reviewSend` + `broadcastSignedTransaction`; the send-card warning reuses the gate string; the testnet
+Receive-card uses non-urgent wording (testnet sends aren't gated, new `dogecoin_wif_copy_missing_testnet`). New
+`DogecoinSpvTorTransportTest` pins the no-silent-fallback decision (`torConnectionManager`), the load-bearing
+no-arg `createSocket` override, and `overTor`. Built via two workflows (grounded design→adversary; two-lens diff
+review); all REVISE findings fixed; `:app:testDebugUnitTest` + `:app:assembleDebug` green. **REMAINING: peer
+reachability over Tor is UNVERIFIED ON-DEVICE** (Dogecoin nodes accepting Tor-exit inbound is environment-
+dependent; the code fails closed if <4 peers, never a leak) — the on-device proof is the next step. Info-level
+deferred: `ArtiTorManager.applyMode(ON)` sets `mode=ON` before `socksAddr` (the SPV observer can lag a toggle by
+one self-healing emission; never a leak — left alone as shared Tor infra).
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
@@ -297,8 +326,9 @@ generate a FRESH key (birthdate=now) for SPV. testnet mines ~1 block/30-40s so f
 
 Remaining TESTNET polish (optional, non-blocking): pin a known-good testnet peer via `addAddress` if
 MIN_PEERS=4 is ever hard to reach; deferred review nits (reorg one-way receipt, interruptible 25s await,
-"Use Max" under SPV); whether bitcoinj `PeerGroup` can route over the embedded Arti Tor SOCKS (UNVERIFIED —
-clearnet-with-disclosure ships now, NEVER silent fallback).
+"Use Max" under SPV). **Tor-over-SPV is now IMPLEMENTED (`933d26b`)** — routes peer connections over the
+embedded Arti SOCKS when Tor is ON, fail-closed, no silent clearnet fallback (see the dated note up top);
+on-device peer-reachability over Tor is the one UNVERIFIED piece left (fails closed if unreachable).
 
 ### Node state + deferred balance-match spike (Task 3)
 **The testnet node is now HEALTHY** (user closed the mainnet instance 2026-06-27; only testnet runs —
