@@ -1879,7 +1879,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
-                if (dogecoinBackend == DogecoinBackend.SPV) {
+                if (dogecoinBackend == DogecoinBackend.SPV && advancedExpanded) {
                 item(key = "spv_status") {
                     WalletCard {
                         Text(
@@ -1927,6 +1927,7 @@ fun DogecoinWalletSheet(
                 }
                 }
 
+                if (advancedExpanded) {
                 item(key = "balance") {
                     WalletCard {
                         Text(
@@ -2126,6 +2127,7 @@ fun DogecoinWalletSheet(
                             )
                         }
                     }
+                }
                 }
 
                 item(key = "address") {
