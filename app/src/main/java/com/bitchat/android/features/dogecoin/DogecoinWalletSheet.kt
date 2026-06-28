@@ -1704,7 +1704,9 @@ fun DogecoinWalletSheet(
                             Surface(
                                 color = colors.danger.copy(alpha = 0.14f),
                                 shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.clickable { walletAction = DogeWalletAction.SETTINGS }
+                                // Straight to the backup flow (not the full Settings menu) — backing up the key
+                                // is one focused action, not a settings hunt.
+                                modifier = Modifier.clickable { pendingWifCopy = snapshot.key }
                             ) {
                                 Text(
                                     text = "!  Back up your key",
@@ -3696,12 +3698,24 @@ fun DogecoinWalletSheet(
         var wifQrRevealed by remember(key.address, key.network) { mutableStateOf(false) }
         val needsBackupAcknowledgement = key.network == DogecoinNetwork.MAINNET
         val canRecordWifBackup = !needsBackupAcknowledgement || mainnetWifBackupAcknowledged
+        val dismissBackup = {
+            pendingWifCopy = null
+            mainnetWifBackupAcknowledged = false
+            wifQrRevealed = false
+        }
+        // Record the backup (a timestamp that satisfies the mainnet send gate) two ways: "I've written it down"
+        // (NO clipboard — safer for a hand-copied key) and "Copy" (also puts it on the clipboard). Both record
+        // identically; only the optional clipboard write differs. The signer and send gates are untouched.
+        val recordBackup = { toClipboard: Boolean ->
+            if (toClipboard) copy(key.wif, context.getString(R.string.dogecoin_wif_copied))
+            val copyState = repository.markWifCopied(key)
+            if (selectedNetwork == key.network && snapshot.key.address == key.address) {
+                wifCopyState = copyState
+            }
+            dismissBackup()
+        }
         AlertDialog(
-            onDismissRequest = {
-                pendingWifCopy = null
-                mainnetWifBackupAcknowledged = false
-                wifQrRevealed = false
-            },
+            onDismissRequest = dismissBackup,
             title = {
                 Text(
                     stringResource(
@@ -3711,45 +3725,22 @@ fun DogecoinWalletSheet(
                 )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         text = stringResource(R.string.dogecoin_confirm_wif_body),
                         style = MaterialTheme.typography.bodyMedium,
                         lineHeight = 20.sp
                     )
-                    if (needsBackupAcknowledgement) {
-                        Text(
-                            text = stringResource(R.string.dogecoin_confirm_wif_mainnet_body),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            lineHeight = 18.sp
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Checkbox(
-                                checked = mainnetWifBackupAcknowledged,
-                                onCheckedChange = { mainnetWifBackupAcknowledged = it }
-                            )
-                            Text(
-                                text = stringResource(R.string.dogecoin_confirm_wif_mainnet_acknowledge),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                lineHeight = 18.sp,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
                     Text(
                         text = stringResource(R.string.dogecoin_wif_qr_secret_warning),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                         lineHeight = 18.sp
                     )
+                    // Reveal is freely available (it sits behind the secret warning + a screenshot block); only
+                    // RECORDING the backup is gated by the mainnet acknowledgement below.
                     OutlinedButton(
                         onClick = { wifQrRevealed = !wifQrRevealed },
-                        enabled = canRecordWifBackup,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
@@ -3789,33 +3780,51 @@ fun DogecoinWalletSheet(
                             )
                         }
                     }
+                    if (needsBackupAcknowledgement) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_confirm_wif_mainnet_body),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Checkbox(
+                                checked = mainnetWifBackupAcknowledged,
+                                onCheckedChange = { mainnetWifBackupAcknowledged = it }
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_confirm_wif_mainnet_acknowledge),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        copy(key.wif, context.getString(R.string.dogecoin_wif_copied))
-                        val copyState = repository.markWifCopied(key)
-                        if (selectedNetwork == key.network && snapshot.key.address == key.address) {
-                            wifCopyState = copyState
-                        }
-                        pendingWifCopy = null
-                        mainnetWifBackupAcknowledged = false
-                        wifQrRevealed = false
-                    },
-                    enabled = canRecordWifBackup
-                ) {
-                    Text(stringResource(R.string.dogecoin_confirm_wif_copy))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { recordBackup(false) },
+                        // Must have actually SEEN the key before claiming to have written it down.
+                        enabled = canRecordWifBackup && wifQrRevealed
+                    ) {
+                        Text(stringResource(R.string.dogecoin_backup_written_down))
+                    }
+                    OutlinedButton(
+                        onClick = { recordBackup(true) },
+                        enabled = canRecordWifBackup
+                    ) {
+                        Text(stringResource(R.string.dogecoin_confirm_wif_copy))
+                    }
                 }
             },
             dismissButton = {
-                TextButton(
-                    onClick = {
-                        pendingWifCopy = null
-                        mainnetWifBackupAcknowledged = false
-                        wifQrRevealed = false
-                    }
-                ) {
+                TextButton(onClick = dismissBackup) {
                     Text(stringResource(R.string.cancel))
                 }
             }
