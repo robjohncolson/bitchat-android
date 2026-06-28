@@ -153,6 +153,13 @@ fun DogecoinWalletSheet(
     val spvService = remember { DogecoinSpvService.getInstance(context, repository) }
     val spvStatus by spvService.status.collectAsState()
     val spvDataSource = remember(spvService) { DogecoinSpvDataSource(spvService) }
+    // Tor state drives the SPV connection disclosure: with Tor ON the light client routes peers over Tor and
+    // never connects clearnet (intent = mode != OFF; ready = bootstrapped + RUNNING). See DogecoinSpvService.
+    val torStatus by com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.collectAsState()
+    val torIntentOn = torStatus.mode != com.bitchat.android.net.TorMode.OFF
+    val torReady = torIntentOn &&
+        torStatus.bootstrapPercent >= 100 &&
+        torStatus.state == com.bitchat.android.net.ArtiTorManager.TorState.RUNNING
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // Only mainnet and testnet are user-selectable in release builds. Debug builds also expose
@@ -735,7 +742,11 @@ fun DogecoinWalletSheet(
             return
         }
         if (selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
+            // Make the dead-end actionable: open the WIF-backup dialog inline so the user can act here instead of
+            // hunting up to the Receive card. This records NOTHING on its own — the gate still returns, and the
+            // send still requires the recorded backup (matches()) plus the mainnet ack before any tx is built.
             sendError = context.getString(R.string.dogecoin_send_backup_required)
+            pendingWifCopy = snapshot.key
             return
         }
         if (shouldConfirmImportingRefresh && !allowWatchImport) {
@@ -906,6 +917,7 @@ fun DogecoinWalletSheet(
             // reviewSend()'s identical gate — so the broadcast path itself enforces every mainnet precondition
             // (this + the acks below) before mainnetAuthorized=true is passed to the SPV broadcast.
             sendError = context.getString(R.string.dogecoin_send_backup_required)
+            pendingWifCopy = snapshot.key   // open the backup dialog inline; still requires Copy + the mainnet ack to record
             return
         }
         if (transaction.network != selectedNetwork) {
@@ -1523,9 +1535,18 @@ fun DogecoinWalletSheet(
                             }
                         }
                         Text(
-                            text = if (dogecoinBackend == DogecoinBackend.SPV)
-                                "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. It connects to Dogecoin peers over the internet, so your address may be linkable to your IP (Tor routing isn't available yet)."
-                            else "Connects to your own Dogecoin Core node over RPC.",
+                            text = when {
+                                dogecoinBackend != DogecoinBackend.SPV ->
+                                    "Connects to your own Dogecoin Core node over RPC."
+                                !torIntentOn ->
+                                    "Built-in light client: syncs block headers from the Dogecoin network on-device — no node or API key needed. It connects to Dogecoin peers directly over the internet, so your address may be linkable to your IP. Turn on Tor in Settings to route the light client over Tor."
+                                // Claim "IP hidden" only when the live PeerGroup was ACTUALLY built over Tor (overTor)
+                                // AND Tor is bootstrapped — never on mere intent, so the text can't over-promise.
+                                spvStatus.overTor && torReady ->
+                                    "Built-in light client: syncs block headers on-device — no node or API key needed. Peer connections are routed over Tor, so your IP is hidden from Dogecoin peers. (The one-time seed-node lookup uses your device's normal DNS.)"
+                                else ->
+                                    "Built-in light client: starting up over Tor — it never connects directly while Tor is on. Your balance appears once Tor is ready and the headers sync."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                             lineHeight = 18.sp
@@ -1789,6 +1810,20 @@ fun DogecoinWalletSheet(
                         if (!s.synced) {
                             Text(
                                 text = "Your balance appears as the headers catch up to the tip.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                lineHeight = 18.sp
+                            )
+                        }
+                        // Honest transport line: overTor reflects how the PeerGroup was actually built, not just intent.
+                        val torNote = when {
+                            s.overTor && !torReady -> "Routing over Tor — waiting for Tor to finish starting…"
+                            s.overTor -> "Connections are routed over Tor."
+                            else -> null
+                        }
+                        if (torNote != null) {
+                            Text(
+                                text = torNote,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
@@ -2089,13 +2124,16 @@ fun DogecoinWalletSheet(
                             Text(stringResource(R.string.copy_wif))
                         }
                         Text(
-                            text = if (wifCopyRecorded) {
-                                stringResource(
+                            // Sends are gated by the backup ONLY on mainnet, so don't imply a hard requirement on
+                            // testnet ("before funding or sending"). Mainnet keeps the urgent wording.
+                            text = when {
+                                wifCopyRecorded -> stringResource(
                                     R.string.dogecoin_wif_copy_recorded,
                                     formatDogecoinWalletTime(wifCopyState.copiedAtMillis)
                                 )
-                            } else {
-                                stringResource(R.string.dogecoin_wif_copy_missing)
+                                selectedNetwork == DogecoinNetwork.MAINNET ->
+                                    stringResource(R.string.dogecoin_wif_copy_missing)
+                                else -> stringResource(R.string.dogecoin_wif_copy_missing_testnet)
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = if (!wifCopyRecorded && selectedNetwork == DogecoinNetwork.MAINNET) {
@@ -2472,7 +2510,9 @@ fun DogecoinWalletSheet(
                         }
                         if (selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
                             Text(
-                                text = stringResource(R.string.dogecoin_wif_copy_missing),
+                                // Same string the send gate sets, so the user never sees two different sentences
+                                // for one missing-backup condition.
+                                text = stringResource(R.string.dogecoin_send_backup_required),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
                                 lineHeight = 18.sp

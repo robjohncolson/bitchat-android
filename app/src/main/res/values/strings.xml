@@ -315,6 +315,7 @@
   <string name="dogecoin_wif_copied">Dogecoin WIF copied</string>
   <string name="dogecoin_wif_copy_recorded">WIF backup recorded for this key: %1$s.</string>
   <string name="dogecoin_wif_copy_missing">No WIF backup is recorded for this key. Copy and store the WIF before funding or sending from this address.</string>
+  <string name="dogecoin_wif_copy_missing_testnet">No WIF backup recorded for this testnet key. Backing it up is optional on testnet, but recommended to practice the flow.</string>
   <string name="dogecoin_request_copied">Dogecoin request copied</string>
   <string name="dogecoin_request_share_failed">Unable to share Dogecoin request</string>
   <string name="dogecoin_request_shared">Dogecoin request shared to chat</string>

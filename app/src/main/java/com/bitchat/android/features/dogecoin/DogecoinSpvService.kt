@@ -2,9 +2,15 @@ package com.bitchat.android.features.dogecoin
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import org.bitcoinj.core.BlockChain
 import org.bitcoinj.core.ECKey
 import org.bitcoinj.core.NetworkParameters
@@ -12,12 +18,15 @@ import org.bitcoinj.core.Peer
 import org.bitcoinj.core.PeerGroup
 import org.bitcoinj.core.VersionMessage
 import org.bitcoinj.core.listeners.DownloadProgressTracker
+import org.bitcoinj.net.BlockingClientManager
+import org.bitcoinj.net.ClientConnectionManager
 import org.bitcoinj.net.discovery.DnsDiscovery
 import org.bitcoinj.store.SPVBlockStore
 import org.bitcoinj.wallet.Wallet
 import org.libdohj.params.DogecoinMainNetParams
 import org.libdohj.params.DogecoinTestNet3Params
 import java.io.File
+import java.net.InetSocketAddress
 import java.util.Date
 
 /** Sync status for the on-device SPV light client, observed by the wallet UI. */
@@ -30,7 +39,10 @@ data class DogecoinSpvStatus(
     val syncedToDateMillis: Long = 0L,
     /** True once the chain has caught up to within a small window of the best-known peer height AND a peer
      *  floor is met — only then are reads trustworthy enough to display. */
-    val synced: Boolean = false
+    val synced: Boolean = false,
+    /** True when the PeerGroup was built to route every peer connection through the embedded Arti SOCKS proxy
+     *  (i.e. Tor was ON at [start] time). Reflects the ACTUAL transport, so the UI/console can show it. */
+    val overTor: Boolean = false
 ) {
     val blocksBehind: Int get() = (bestPeerHeight - chainHeight).coerceAtLeast(0L).toInt()
 }
@@ -60,8 +72,31 @@ class DogecoinSpvService private constructor(
     private var peerGroup: PeerGroup? = null
     private var activeNetwork: DogecoinNetwork? = null
 
+    /** The Arti SOCKS endpoint the live PeerGroup was built against (null ⇒ clearnet). The transport is fixed
+     *  at [start] time; the observer below rebuilds when this no longer matches the user's current endpoint. */
+    @Volatile private var builtSocksAddress: InetSocketAddress? = null
+    /** True only between a [broadcast]'s under-lock prepare and its off-lock propagation await, so the Tor
+     *  observer never tears the PeerGroup down mid-broadcast (the tx is already reserved + handed to peers). */
+    @Volatile private var broadcasting = false
+    private val torScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private val _status = MutableStateFlow(DogecoinSpvStatus(network = DogecoinNetwork.TESTNET))
     val status: StateFlow<DogecoinSpvStatus> = _status.asStateFlow()
+
+    init {
+        // Rebuild the SPV transport whenever the user's Tor SOCKS endpoint changes: OFF⇄ON (route over Tor vs
+        // clearnet) or an Arti bind-retry port bump (9060→9061…). The connection manager is fixed at start()
+        // time, so without this the long-lived singleton would either ride clearnet after Tor is enabled or
+        // strand itself on a now-dead proxy port. distinctUntilChanged collapses the hundreds of Arti log-line
+        // emissions to just real endpoint flips; the decision re-reads live state under the lock so a toggle
+        // deferred during a broadcast is re-applied afterwards (see broadcast()'s finally), never lost.
+        torScope.launch {
+            com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow
+                .map { com.bitchat.android.net.ArtiTorManager.getInstance().currentSocksAddress() }
+                .distinctUntilChanged()
+                .collect { synchronized(lock) { maybeRebuildTransportLocked() } }
+        }
+    }
 
     /** Whether SPV is even possible for [network] (REGTEST has no public peers / params). */
     fun isSupported(network: DogecoinNetwork): Boolean = paramsFor(network) != null
@@ -101,13 +136,32 @@ class DogecoinSpvService private constructor(
             maybeLoadCheckpoints(network, params, store, birthdateSecs)
 
             val chain = BlockChain(params, w, store)
-            val pg = HighestHeightDownloadPeerGroup(params, chain)
+
+            // Transport decision (mirrors OkHttpProvider's intent-not-readiness policy): if the user has Tor ON,
+            // currentSocksAddress() is non-null the instant the mode flips — BEFORE bootstrap completes — so we
+            // build a PeerGroup whose every peer socket is a SOCKS5 CONNECT through Arti and a direct clearnet
+            // socket is NEVER opened. While Tor is still bootstrapping those connects just retry/back off against
+            // the not-yet-ready SOCKS port (fail-closed, no leak); once circuits are up they start succeeding.
+            // Tor OFF keeps the default NioClientManager clearnet path byte-for-byte. DnsDiscovery is used in BOTH
+            // modes: it resolves seed hostnames to NUMERIC PeerAddresses (a hostname-only PeerAddress would crash
+            // PeerAddress.equals, which dereferences the argument's null addr), and under Tor only the resulting
+            // peer CONNECTION rides the proxy — the one-time seed DNS lookup stays on the local resolver (disclosed
+            // in the UI). bitcoinj still never signs; this changes nothing but the transport.
+            val socks = com.bitchat.android.net.ArtiTorManager.getInstance().currentSocksAddress()
+            val connMgr = torConnectionManager(socks) // non-null ⇒ Tor; null ⇒ clearnet (the no-silent-fallback decision)
+            val pg = if (connMgr != null) {
+                HighestHeightDownloadPeerGroup(params, chain, connMgr).also {
+                    it.setConnectTimeoutMillis(TOR_CONNECT_TIMEOUT_MILLIS)  // relax the version-handshake deadline too
+                }
+            } else {
+                HighestHeightDownloadPeerGroup(params, chain)
+            }
             pg.setUserAgent(USER_AGENT, USER_AGENT_VERSION)
             pg.maxConnections = MAX_PEERS
             pg.addWallet(w)
             pg.setBloomFilteringEnabled(true) // serve our address to peers so they return our merkleblocks
             pg.addPeerDiscovery(DnsDiscovery(params))
-            // TODO Phase 2.x: route over the embedded Arti SOCKS once verified; clearnet for now (disclosed in UI).
+            this.builtSocksAddress = socks    // remember the endpoint so the Tor observer rebuilds only on a real change
 
             pg.addConnectedEventListener { _, _ -> publishStatus(network, chain, pg) }
             pg.addDisconnectedEventListener { _, _ -> publishStatus(network, chain, pg) }
@@ -151,7 +205,33 @@ class DogecoinSpvService private constructor(
         wallet = null
         bitcoinjContext = null
         activeNetwork = null
+        builtSocksAddress = null
         if (net != null) _status.value = DogecoinSpvStatus(network = net, running = false)
+    }
+
+    /**
+     * Rebuild the SPV transport if the user's CURRENT Tor SOCKS endpoint no longer matches the one the live
+     * PeerGroup was built against (OFF⇄ON or an Arti port bump). MUST be called under [lock]. No-op while SPV
+     * is idle (the next [start] picks up the endpoint) or while a broadcast is in flight — [broadcast]'s
+     * finally calls this again once the in-flight tx is done, so a toggle that arrived mid-broadcast is applied
+     * rather than silently lost (which would strand SPV on clearnet after the user enabled Tor).
+     */
+    private fun maybeRebuildTransportLocked() {
+        val net = activeNetwork ?: return
+        if (broadcasting) return
+        val socksNow = com.bitchat.android.net.ArtiTorManager.getInstance().currentSocksAddress()
+        if (socksNow != builtSocksAddress) {
+            Log.i(TAG, "Tor SOCKS endpoint changed ($builtSocksAddress → $socksNow); rebuilding SPV transport for $net")
+            // Non-throwing: a transient rebuild failure must NOT (a) unwind out of broadcast()'s finally — that
+            // would mask an already-CLAIMED txid and invite a double-spend retry — nor (b) kill the status-flow
+            // observer coroutine, which would freeze every future rebuild (clearnet-after-enable hole). On
+            // failure SPV is left stopped (fail-closed, never a clearnet leak); the sheet lifecycle or the next
+            // endpoint change re-starts it.
+            runCatching {
+                stopLocked()
+                start(net)
+            }.onFailure { Log.w(TAG, "SPV transport rebuild failed; left stopped (fail-closed)", it) }
+        }
     }
 
     /**
@@ -231,12 +311,25 @@ class DogecoinSpvService private constructor(
             // receivePending does not alter the verified serialization, so the wire bytes stay canonical.
             w.receivePending(tx, null)
             pg.minBroadcastConnections = MIN_PEERS                        // avoid single-peer broadcast deadlock
-            pg.broadcastTransaction(tx) to tx                             // sends immediately; returns now
+            broadcasting = true                                          // freeze the Tor observer until the await ends
+            try {
+                pg.broadcastTransaction(tx) to tx                         // sends immediately; returns now
+            } catch (t: Throwable) {
+                broadcasting = false                                     // never leave the observer frozen if the send itself throws
+                throw t
+            }
         }
         val (broadcast, tx) = prepared
         // Completion = MIN_PEERS re-announced; timeout = still in flight. Either way the tx is CLAIMED.
-        runCatching {
-            broadcast.future().get(BROADCAST_TIMEOUT_SECS, java.util.concurrent.TimeUnit.SECONDS)
+        try {
+            runCatching {
+                broadcast.future().get(BROADCAST_TIMEOUT_SECS, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        } finally {
+            synchronized(lock) {
+                broadcasting = false
+                maybeRebuildTransportLocked() // apply a Tor toggle that arrived (and was deferred) mid-broadcast
+            }
         }
         return tx.hashAsString
     }
@@ -272,7 +365,8 @@ class DogecoinSpvService private constructor(
             chainHeight = height,
             bestPeerHeight = bestPeerHeight,
             syncedToDateMillis = headTimeSecs * 1000L,
-            synced = caughtUp && peerCount >= MIN_PEERS
+            synced = caughtUp && peerCount >= MIN_PEERS,
+            overTor = builtSocksAddress != null
         )
     }
 
@@ -368,8 +462,13 @@ class DogecoinSpvService private constructor(
      * bitcoinj's default download-peer selection prefers a witness-capable peer; Dogecoin has no SegWit, so
      * we pick the highest-height peer that has a chain (mirrors the spike + the langerhans NonWitnessPeerGroup).
      */
-    private class HighestHeightDownloadPeerGroup(params: NetworkParameters, chain: BlockChain) :
-        PeerGroup(params, chain) {
+    private class HighestHeightDownloadPeerGroup : PeerGroup {
+        /** Clearnet path: default NioClientManager. */
+        constructor(params: NetworkParameters, chain: BlockChain) : super(params, chain)
+        /** Tor path: a caller-supplied SOCKS-routing connection manager owns every peer socket. */
+        constructor(params: NetworkParameters, chain: BlockChain, connMgr: ClientConnectionManager) :
+            super(params, chain, connMgr)
+
         override fun selectDownloadPeer(peers: MutableList<Peer>): Peer? {
             var best: Peer? = null
             var bestHeight = -1L
@@ -381,6 +480,28 @@ class DogecoinSpvService private constructor(
             }
             return best
         }
+    }
+
+    /**
+     * A [javax.net.SocketFactory] that hands bitcoinj UNCONNECTED sockets bound to a SOCKS5 proxy (the embedded
+     * Arti Tor at 127.0.0.1:<port>), so every peer socket [org.bitcoinj.net.BlockingClient] opens is a SOCKS5
+     * CONNECT through Tor rather than a direct clearnet socket. BlockingClient calls ONLY the no-arg
+     * [createSocket] (it connects the returned socket itself with the already-resolved peer address), so that
+     * override is load-bearing — the javax base implementation throws. The four address-taking overloads are
+     * abstract on the base and must exist; bitcoinj never invokes them here, but they too route via the proxy
+     * (and keep any hostname target UNRESOLVED so the proxy, never the local resolver, would resolve it).
+     */
+    internal class SocksProxySocketFactory(private val host: String, private val port: Int) : javax.net.SocketFactory() {
+        private fun proxy() = java.net.Proxy(java.net.Proxy.Type.SOCKS, InetSocketAddress(host, port))
+        override fun createSocket(): java.net.Socket = java.net.Socket(proxy())
+        override fun createSocket(h: String, p: Int): java.net.Socket =
+            java.net.Socket(proxy()).apply { connect(InetSocketAddress.createUnresolved(h, p)) }
+        override fun createSocket(h: String, p: Int, lh: java.net.InetAddress, lp: Int): java.net.Socket =
+            createSocket(h, p)
+        override fun createSocket(h: java.net.InetAddress, p: Int): java.net.Socket =
+            java.net.Socket(proxy()).apply { connect(InetSocketAddress(h, p)) }
+        override fun createSocket(h: java.net.InetAddress, p: Int, lh: java.net.InetAddress, lp: Int): java.net.Socket =
+            createSocket(h, p)
     }
 
     companion object {
@@ -400,5 +521,20 @@ class DogecoinSpvService private constructor(
         const val MIN_PEERS = 4 // eclipse-resistance floor for "synced"; broadcast needs >=this too
         const val SYNCED_WITHIN_BLOCKS = 2L
         const val BROADCAST_TIMEOUT_SECS = 25L // best-effort re-announce wait; timeout != failure (Claimed)
+        const val TOR_CONNECT_TIMEOUT_MILLIS = 60_000 // Tor circuit + peer handshake is slow; BlockingClientManager defaults to 1s
+
+        /**
+         * The single no-silent-fallback transport decision, isolated so a unit test can pin it: a non-null Arti
+         * SOCKS endpoint ⇒ a SOCKS-routing [BlockingClientManager] (every peer socket rides Tor, a clearnet
+         * socket is NEVER opened); null ⇒ null ⇒ the caller falls back to the default clearnet NioClientManager.
+         * Keyed on the endpoint being PRESENT (set the instant Tor mode flips ON, before bootstrap), mirroring
+         * OkHttpProvider — not on Tor being fully ready — so nothing leaks clearnet during bootstrap.
+         */
+        internal fun torConnectionManager(socks: InetSocketAddress?): BlockingClientManager? =
+            socks?.let {
+                BlockingClientManager(SocksProxySocketFactory(it.hostString, it.port)).apply {
+                    setConnectTimeoutMillis(TOR_CONNECT_TIMEOUT_MILLIS) // default 1s never finishes a Tor circuit
+                }
+            }
     }
 }
