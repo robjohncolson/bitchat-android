@@ -213,9 +213,12 @@ class DogecoinSpvService private constructor(
      * unreachable behind the synced + peer-floor guards), the inputs stay locally reserved with nothing on
      * the wire; a [stop]/[start] cycle rebuilds the wallet from the chain and clears the stale reservation.
      */
-    fun broadcast(network: DogecoinNetwork, normalizedHex: String, expectedTxid: String): String? {
+    fun broadcast(network: DogecoinNetwork, normalizedHex: String, expectedTxid: String, mainnetAuthorized: Boolean = false): String? {
         val prepared = synchronized(lock) {
-            if (network == DogecoinNetwork.MAINNET) return null          // Phase-3 hard block (Phase 4 lifts)
+            // Phase 4: MAINNET is refused UNLESS the caller passes explicit per-spend authorization, set true
+            // ONLY by the confirmation-gated console mainnet-send path. The DataSource/UI broadcast path never
+            // sets it, so the 4-layer app block stays intact; this is the single deliberate, per-call channel.
+            if (network == DogecoinNetwork.MAINNET && !mainnetAuthorized) return null
             val params = paramsFor(network) ?: return null               // REGTEST has no SPV
             val pg = peerGroup?.takeIf { activeNetwork == network } ?: return null
             val w = wallet ?: return null

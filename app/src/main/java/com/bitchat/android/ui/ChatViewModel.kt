@@ -168,7 +168,7 @@ class ChatViewModel(
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
-                "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
+                "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
                 "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
@@ -448,6 +448,47 @@ class ChatViewModel(
                             }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast ERR ${it.message}") }
                         }
                         "spv-broadcast launched net=${net.id} (on-device SPV peers; Claimed only) -> DbgConsole"
+                    }
+                }
+            }
+            "doge-spv-mainnet-send" -> {
+                // Phase 4: the ONE deliberate, confirmation-gated MAINNET SPV broadcast channel (irreversible
+                // real money). Build+sign stays on-device (DogecoinTransactionBuilder); this calls the service
+                // broadcast DIRECTLY with mainnetAuthorized=true (the DataSource/UI path stays mainnet-blocked).
+                // DRYRUN builds + shows the tx (txid/fee/change) WITHOUT broadcasting; CONFIRM broadcasts.
+                val to = args.getOrNull(0)
+                val amt = args.getOrNull(1)
+                val mode = args.getOrNull(2)?.uppercase()
+                val feeKb = args.getOrNull(3)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+                val net = currentDogecoinNetwork()
+                val tag = com.bitchat.android.debug.DebugConsole.TAG
+                when {
+                    net != DogecoinNetwork.MAINNET -> "refused: doge-spv-mainnet-send is mainnet-only (use doge-spv-broadcast on ${net.id})"
+                    to == null || amt == null || (mode != "DRYRUN" && mode != "CONFIRM") ->
+                        "usage: doge-spv-mainnet-send <addr> <amountDoge> <DRYRUN|CONFIRM> [feeKb] — DRYRUN shows the built tx, CONFIRM broadcasts (IRREVERSIBLE real money)"
+                    else -> {
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
+                                val utxos = dogecoinSpv().snapshotUnspents(net) ?: error("spv not active (run doge-spv-start)")
+                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
+                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
+                                    network = net, feePerKbKoinu = feeKb,
+                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+                                )
+                                android.util.Log.d(tag, "doge-spv-mainnet-send[$mode] BUILT txid=${signed.txid} send=${amt} to=${to} fee=${signed.feeKoinu}k change=${signed.changeKoinu}k")
+                                if (mode == "CONFIRM") {
+                                    val normalized = com.bitchat.android.features.dogecoin.DogecoinRawTxValidator.normalize(signed.rawTransactionHex)
+                                    val expectedTxid = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.transactionId(normalized)
+                                    val txid = dogecoinSpv().broadcast(net, normalized, expectedTxid, mainnetAuthorized = true)
+                                        ?: error("broadcast returned null (not synced / below peer floor)")
+                                    android.util.Log.d(tag, "doge-spv-mainnet-send BROADCAST CLAIMED txid=$txid (poll doge-spv-status for depth)")
+                                } else {
+                                    android.util.Log.d(tag, "doge-spv-mainnet-send DRYRUN only — NOT broadcast. Re-run with CONFIRM to send.")
+                                }
+                            }.getOrElse { android.util.Log.d(tag, "doge-spv-mainnet-send ERR ${it.message}") }
+                        }
+                        "MAINNET spv-send[$mode] ${amt} -> ${to} launched -> DbgConsole${if (mode == "CONFIRM") " (IRREVERSIBLE)" else " (dry-run)"}"
                     }
                 }
             }
