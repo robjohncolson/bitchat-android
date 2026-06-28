@@ -72,13 +72,44 @@ valid + ~44× relay fee, awaiting a pool — mainnet block production was slow);
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `933d26b`** (Tor-for-SPV routing + WIF-backup UX polish —
+`dogecoin-m2-pay-nickname`. **Last green commit: `d81c5d5`** (wallet UI "Coin" redesign — see the dated UI
+note below; on top of `933d26b` Tor-for-SPV routing + WIF-backup UX polish —
 see the dated note below; on top of `b5730c1` Phase 4 FULL UI mainnet enablement, gated +
 adversarially reviewed; on top of `f622330` gated `doge-spv-mainnet-send` console send PROVEN on mainnet, the
 SPV checkpoint-network fixes `ec73ea9`/`c5526b2`, `doge-reset-mainnet`,
 `9229dc7` mainnet checkpoint validated, `6a9f7df` mainnet checkpoint asset, `2348972` doge-spv-crosscheck,
 `487ee90`/`38735de`/`f5780e3` offline Bluetooth send; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
 SUCCESSFUL; `git diff --check` clean). Working tree clean.
+
+**✅ WALLET UI "COIN" REDESIGN — LAYOUT COMPLETE (2026-06-28, commits `034ca7c`→`d81c5d5`).** A Dieter-Rams ×
+Dogecoin redesign of `DogecoinWalletSheet`, picked by the user from a 3-direction design workflow ("Coin"
+direction). Verified on-device via adb-driven screenshots on the Pixel 3 (the funded/syncing S24 was away).
+**New files:** `features/dogecoin/ui/DogecoinWalletTheme.kt` (a wallet-scoped palette: warm ink-on-paper +
+two grays, gold `#C2A633` the SINGLE accent — ring + active state ONLY; light+dark; provided via a
+CompositionLocal AND a nested MaterialTheme so the rest of the app keeps its terminal-green theme; follows the
+app's effective dark/light via ambient background luminance; wraps content in a paper Surface so bare text
+defaults to ink not the app green — both were real bugs the first screenshot caught) and
+`features/dogecoin/ui/ConfirmationRing.kt` (the one ornament: a gold ring, IDLE solid circle / SYNCING
+continuous arc / CONFIRMING N-of-target discrete segments, with a contentDescription a11y fallback).
+**The redesign (all in `DogecoinWalletSheet.kt`):** the whole sheet is wrapped in `DogecoinWalletTheme`; a
+`DogeWalletAction` view-state (NONE/SEND/RECEIVE/SETTINGS) drives a "one thing at a time" focal-swap — DEFAULT
+shows the balance inside the gold ring + a "backend·sync·Tor" status strip + `[Send] [Receive]` + a persistent
+"! Back up your key" mainnet chip; SEND/RECEIVE/SETTINGS each REPLACE the focal area with a "‹ back" row;
+a header GEAR opens SETTINGS (connection/backend, network, node RPC, SPV status, balance+coins+activity, helper,
+corroboration, reset/import-WIF — everything advanced). Selected segmented buttons read GOLD (set
+`secondaryContainer` to a gold tint, was Material purple). Balance font adapts to length so a big balance fits
+the ring. **CRUCIAL: this is a presentation/view-state refactor ONLY — every send/receive money-path handler +
+gate (reviewSend, broadcastSignedTransaction, the WIF/mainnet/high-fee/policy gates, the fail-closed verifier)
+is REUSED UNTOUCHED; only VISIBILITY is gated by view-state.** Commits: `034ca7c` palette+ring, `b3e741a`
+palette adoption (+the 2 theme bugs), `2946eb8` focal ring hero, `4b96906` balance/sync cards behind settings,
+`ec73ad3` focal-swap + gold segments, `d81c5d5` Settings gear view. `:app:assembleDebug` green throughout.
+**REMAINING (data-dependent polish — deferred, needs the FUNDED/SYNCING S24 to verify, not the Pixel):** the
+ring's live balance number, the SYNCING arc with real `blocksBehind`, an estimated-time-to-sync line, and the
+CONFIRMING 0→N fill wired to `confirmationDepth` on a live send. The component + view-state plumbing are ready;
+only the live-data wiring + its on-device check remain. **On-device nav gotcha for screenshotting the wallet:
+app TITLE → App Info → scroll → "Dogecoin wallet" row; the wallet is a bottom sheet so a DOWNWARD swipe
+DISMISSES it (scroll content UP only); Samsung kills the backgrounded app behind the keyguard — PIN-unlock
+(5555) + relaunch to get the console host back.**
 
 **✅ TOR-FOR-SPV + WIF-BACKUP POLISH SHIPPED (`933d26b`, 2026-06-28).** SPV peer connections now route over
 the embedded Arti SOCKS proxy when Tor is ON. `DogecoinSpvService.start()` decides transport on Tor INTENT
