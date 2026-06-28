@@ -15,9 +15,22 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `0383ae5`** (SPV UX: "bitchat dev" label + default-to-Built-in;
-on top of `2d4271b` SPV wallet persistence; Phase 3 testnet broadcast PROVEN on-device; `:app:testDebugUnitTest`
+`dogecoin-m2-pay-nickname`. **Last green commit: `c1354ce`** (`doge-spv-peer-broadcast` console cmd; +docs
+`8bf4d35`; on top of `0383ae5` UX, `2d4271b` persistence; Phase 3 PROVEN on-device; `:app:testDebugUnitTest`
 + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+
+**Offline phone-to-phone send test (2026-06-27) — see `docs/dogecoin-offline-mesh-relay-findings.md`.** PROVEN:
+SPV builds+signs OFFLINE; node-less sender → helper → chain mined twice (txids `7b1be7ae`,`638c253e`) **but over
+NOSTR (sender had internet)**. FAILED: truly air-gapped Bluetooth-only relay. ROOT CAUSE (high-confidence
+workflow): the payment-broadcast relay picks transport purely on Noise-SESSION state (3 gates:
+`listBroadcastHelperCandidates` filter `ChatViewModel:1631`, `resolveConnectedMeshPeerId :1674`,
+`MessageRouter.isReady :231`), and the broadcast send path (`BluetoothMeshService.sendNoisePayloadToPeer`) never
+calls `initiateNoiseHandshake` (unlike `sendPrivateMessage`), so two announce-only peers stay `session=false`
+and the relay diverts to Nostr (needs internet). Recommended fix: warm up Noise sessions in the doge broadcast
+flow (initiate handshake for connected session-less helper candidates, bounded await, concurrent with Nostr) —
+transport-only, no money-safety impact. No-code workaround to demo offline-BLE: bootstrap a session via a DM
+(`sendfav`) first, then airplane-mode+BT send. **S24 quirk: `svc wifi disable` drops its BLE mesh; airplane+BT
+preserves it.**
 
 **Two on-device UX fixes after the soak (`0383ae5`):** (1) the debug build (`com.bitchat.droid.debug`) was
 indistinguishable from a side-by-side Play-store `com.bitchat.droid` on the home screen — easy to open the wrong
