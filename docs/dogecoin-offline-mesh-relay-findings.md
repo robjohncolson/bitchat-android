@@ -181,11 +181,34 @@ exactly like the already-reliable verification flow.
   fragment" assertion (encoded < raw-hex length, < 380 B). `:app:testDebugUnitTest :app:assembleDebug` green;
   signer + SPV key-import canaries unchanged.
 - **Scope limit (honest):** this makes single-input (≤~4-output) sends single-packet — the demo's 5-DOGE
-  1-in/2-out qualifies. A **multi-input** tx (raw >~284 B) still fragments; the underlying fire-and-forget
-  fragment transport remains the real limiter for those. **Follow-up (Option B, deferred):** harden
-  `FragmentingPacketSender` — await `onCharacteristicWrite`/`onNotificationSent` before the next fragment,
-  retry a fragment on `false` instead of aborting the set, add fragment-level ACK/retransmit, and key
-  `MAX_FRAGMENT_SIZE` to the negotiated MTU. That is a larger shared-transport change; do it second.
+  1-in/2-out qualifies. A **multi-input** tx (raw >~284 B) still fragments; for those, Option B (below) is
+  the safety net.
+
+## Fix shipped (Option B — make fragmented directed sends reliable, transport-only)
+
+Even with Option A, multi-input txs (and any large PM) still fragment, so the fragment transport itself was
+hardened. The real drop mechanism (refined from the diagnosis): payment-broadcast takes the **broadcast**
+path (`broadcastPacket`), whose `FragmentingPacketSender` lambda always returns `true` — so the abort-at-1/2
+never fires there; instead, inside `broadcastSinglePacketInternal`, fragment 2's
+`notifyCharacteristicChanged`/`writeCharacteristic` returns `false` ("busy", because a GATT connection allows
+ONE outstanding op and fragment 1 is still draining) and was **silently dropped with no retry**.
+
+- **Broadcast/directed arm** (`BluetoothPacketBroadcaster`): new `notifyDeviceWithRetry` /
+  `writeToDeviceConnWithRetry` suspend wrappers retry a busy write up to 8× with a 50 ms backoff (~350 ms
+  max) before giving up; swapped in at the 4 DIRECTED/source-routed call sites only. The broadcast-to-all
+  loop (single-packet announces) is left untouched so announces are never slowed.
+- **Relay/targeted arm** (`FragmentingPacketSender`): the targeted path (`sendSinglePacketToPeer` via
+  `sendToPeer`/`sendPacketToPeer`, used by `PacketRelayManager` for the next hop) propagates the real write
+  result, so the fragment loop now **retries the same fragment** (8× / 50 ms) instead of aborting the whole
+  set on the first `false`. This covers a 2-hop offline relay (sender→relay→helper), not just the 1-hop repro.
+- Adversarially reviewed (verdict: ship-with-nits): bounded (no deadlock; retries run in the serialized
+  broadcaster actor / the send coroutine), the receiver reassembles duplicate fragments idempotently
+  (`FragmentManager` keys by index), transport-only (no signer/money impact). `:app:testDebugUnitTest
+  :app:assembleDebug` green.
+- **Deeper follow-up (still deferred):** await `onCharacteristicWrite`/`onNotificationSent` for true
+  write-completion flow control (neither callback is wired today — the 50 ms×8 window is a heuristic),
+  fragment-level ACK/retransmit, and key `MAX_FRAGMENT_SIZE` to the negotiated MTU. Do that only if on-device
+  shows residual loss under the retry window.
 
 ### On-device re-test (decisive measurement still pending)
 Flash the **new build to BOTH phones** (they currently run `6c7222d`/`71e19d5`). Bootstrap a Noise session
