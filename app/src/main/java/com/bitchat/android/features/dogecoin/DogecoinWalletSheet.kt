@@ -1,6 +1,9 @@
 package com.bitchat.android.features.dogecoin
 
+import com.bitchat.android.features.dogecoin.ui.ConfirmationRing
 import com.bitchat.android.features.dogecoin.ui.DogecoinWalletTheme
+import com.bitchat.android.features.dogecoin.ui.RingMode
+import com.bitchat.android.features.dogecoin.ui.dogeWalletColors
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
@@ -1486,6 +1489,94 @@ fun DogecoinWalletSheet(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
                         )
+                    }
+                }
+
+                // "Coin" hero: the balance lives inside the one gold ring (idle solid / syncing arc).
+                item(key = "focal") {
+                    val spv = dogecoinBackend == DogecoinBackend.SPV
+                    val s = spvStatus
+                    val syncing = spv && s.running && !s.synced
+                    val colors = dogeWalletColors
+                    val syncProgress = if (syncing) {
+                        val behind = s.blocksBehind.coerceAtLeast(0).toFloat()
+                        (1f - behind / (behind + 1500f)).coerceIn(0.04f, 0.97f)
+                    } else 1f
+                    val bal = walletBalance
+                    val ringDesc = if (syncing) {
+                        "Syncing, ${s.blocksBehind} blocks behind"
+                    } else {
+                        bal?.let { "Balance ${DogecoinAmount.formatKoinu(it.confirmedKoinu)} DOGE" }
+                            ?: "Balance not loaded"
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        ConfirmationRing(
+                            mode = if (syncing) RingMode.SYNCING else RingMode.IDLE,
+                            progress = syncProgress,
+                            diameter = 210.dp,
+                            contentDescription = ringDesc
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (syncing) {
+                                    Text("Syncing", style = MaterialTheme.typography.titleMedium, color = colors.ink)
+                                    Text(
+                                        "${s.blocksBehind} behind",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.muted
+                                    )
+                                } else if (bal != null) {
+                                    val balText = DogecoinAmount.formatKoinu(bal.confirmedKoinu)
+                                    Text(
+                                        text = balText,
+                                        // Adapt to length so a large balance still fits inside the ring.
+                                        fontSize = when {
+                                            balText.length <= 8 -> 30.sp
+                                            balText.length <= 12 -> 24.sp
+                                            balText.length <= 16 -> 19.sp
+                                            else -> 15.sp
+                                        },
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.ink,
+                                        maxLines = 1
+                                    )
+                                    Text("DOGE", style = MaterialTheme.typography.labelMedium, color = colors.muted)
+                                    if (bal.unconfirmedKoinu > 0L) {
+                                        Text(
+                                            "+${DogecoinAmount.formatKoinu(bal.unconfirmedKoinu)} pending",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.muted
+                                        )
+                                    }
+                                } else {
+                                    Text("—", style = MaterialTheme.typography.headlineMedium, color = colors.muted)
+                                }
+                            }
+                        }
+                        val strip = buildList {
+                            add(if (spv) "Built-in" else "My node")
+                            if (spv) add(if (s.synced) "synced" else if (s.running) "syncing" else "starting")
+                            if (s.overTor && torReady) add("Tor on") else if (torIntentOn) add("Tor starting")
+                        }.joinToString("   ·   ")
+                        Text(strip, style = MaterialTheme.typography.labelMedium, color = colors.muted)
+                        if (selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
+                            Surface(
+                                color = colors.danger.copy(alpha = 0.14f),
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.clickable { advancedExpanded = true }
+                            ) {
+                                Text(
+                                    text = "!  Back up your key",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = colors.danger,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
                     }
                 }
 
