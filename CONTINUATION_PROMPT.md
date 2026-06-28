@@ -15,9 +15,10 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `6c7222d`** (mesh Noise-session warm-up; +docs; on top of
-`c1354ce` console cmd, `0383ae5` UX, `2d4271b` persistence; Phase 3 PROVEN on-device; `:app:testDebugUnitTest`
-+ `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `71e19d5`** (proactive Noise-session warm-up on wallet open;
+on top of `6c7222d` send-time warm-up, `c1354ce` console cmd, `0383ae5` UX, `2d4271b` persistence; Phase 3
+PROVEN on-device; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean).
+Working tree clean.
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
@@ -25,9 +26,10 @@ on-device: warm-up establishes the BLE session (`session=true`) and the relay ro
 (`MessageRouter: Routing payment-broadcast REQUEST via mesh`). BUT end-to-end BLE delivery did NOT complete in
 this env — the Pixel never received the payload; the BLE link here is very slow (handshake alone ~30s, payload
 not delivered within the coordinator's ~30s window). **Remaining limiter is BLE payload delivery between these
-phones (env: airplane mode, S24↔Pixel-3, a 3rd "doge-bobby" device), NOT a logic bug.** Follow-ups: warm up
-PROACTIVELY (wallet/CTA open, not at send) so the ~30s handshake finishes first; lengthen the coordinator mesh
-attempt window; re-test on a clean BLE link (phones close, no 3rd device, not airplane-throttled).
+phones (env: airplane mode, S24↔Pixel-3, a 3rd "doge-bobby" device), NOT a logic bug.** Follow-ups: PROACTIVE
+warm-up DONE (`71e19d5`, fired from `ChatScreen.onShowDogecoinWallet` so the ~30s handshake finishes before
+send); still optional: lengthen the coordinator mesh attempt window (`ATTEMPT_TIMEOUT_MS=30s`); re-test on a
+clean BLE link (phones close, no 3rd device, not airplane-throttled).
 
 **Offline phone-to-phone send test (2026-06-27) — see `docs/dogecoin-offline-mesh-relay-findings.md`.** PROVEN:
 SPV builds+signs OFFLINE; node-less sender → helper → chain mined twice (txids `7b1be7ae`,`638c253e`) **but over

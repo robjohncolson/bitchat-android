@@ -125,9 +125,11 @@ calls `mesh.initiateNoiseHandshake` and awaits `hasEstablishedSession` up to `PE
   (airplane mode, Samsung S24 ↔ Pixel 3, a third "doge-bobby" device sharing airtime), not a logic bug.
 
 **Implications / follow-ups (separate from this fix):**
-- The 3.5s warm-up window is fine for a healthy link (handshake <1s) but useless against a ~30s handshake. For
-  slow links, warm up **proactively** (when the wallet/CTA opens, not at send time) so the session is ready
-  before the user sends — and/or lengthen the coordinator's mesh attempt window.
+- The 3.5s warm-up window is fine for a healthy link (handshake <1s) but useless against a ~30s handshake.
+  **DONE (`71e19d5`):** warm up **proactively** — `ChatViewModel.prewarmBroadcastHelperSessions()` is now
+  called from `ChatScreen.onShowDogecoinWallet` (wallet open), so the handshake starts well before the user
+  sends and a session is ready by send time. Still optional: lengthen the coordinator's mesh attempt window
+  (`PaymentBroadcastCoordinator.ATTEMPT_TIMEOUT_MS = 30_000L`) for very slow links.
 - The deeper limiter is BLE **payload** delivery between these specific phones; a cleaner test (phones close,
   no third device, not airplane-throttled) is needed to confirm the warmed-session mesh path end-to-end. The
   code change is correct and proven at the routing layer.
