@@ -23,9 +23,12 @@ private const val PB_PROTOCOL_VERSION = 1
 
 /** Hard cap on the raw-tx hex string (~100 KB transaction). Abuse/DoS bound, enforced in decode(). */
 const val PAYMENT_BROADCAST_MAX_RAW_TX_HEX = 200_000
+/** Same cap in raw bytes — the raw tx now travels as bytes on the wire (half the hex char count). */
+private const val PAYMENT_BROADCAST_MAX_RAW_TX_BYTES = PAYMENT_BROADCAST_MAX_RAW_TX_HEX / 2
 private const val MAX_PACKET_BYTES = PAYMENT_BROADCAST_MAX_RAW_TX_HEX + 1024
 private const val UUID_SIZE = 16
 private const val TXID_HEX_LEN = 64
+private const val TXID_BYTES = 32
 private const val MAX_NETWORK_ID_BYTES = 32
 private const val MAX_REJECT_DETAIL_BYTES = 255
 
@@ -120,6 +123,16 @@ private fun parseTlvs(data: ByteArray): Map<Int, ByteArray>? {
 }
 
 /**
+ * Decode an EVEN-length, ALREADY-VALIDATED lowercase hex string to its raw bytes. Callers gate the
+ * input through [hexRegex]/[txidHexRegex] (even length, [0-9a-f]) before calling, so this never throws.
+ */
+private fun String.hexToBytesUnchecked(): ByteArray =
+    ByteArray(length / 2) { ((Character.digit(this[it * 2], 16) shl 4) + Character.digit(this[it * 2 + 1], 16)).toByte() }
+
+/** Lowercase hex of raw bytes — the canonical form the public hex String fields are rebuilt from. */
+private fun ByteArray.toLowerHex(): String = joinToString("") { "%02x".format(it) }
+
+/**
  * `PAYMENT_BROADCAST_REQUEST` (0x30): sender -> helper. A signed raw tx to broadcast.
  */
 data class PaymentBroadcastRequest(
@@ -129,7 +142,12 @@ data class PaymentBroadcastRequest(
     val expectedTxid: String,         // sender's locally-computed 64-hex txid (anti-substitution cross-check)
     val protocolVersion: Int = PB_PROTOCOL_VERSION
 ) {
-    private enum class T(val v: Int) { UUID(0x00), NETWORK_ID(0x01), RAW_TX_HEX(0x02), EXPECTED_TXID(0x03), VERSION(0x04) }
+    // RAW_TX (0x02) and EXPECTED_TXID (0x03) carry RAW BYTES on the wire, NOT ASCII hex. This halves the
+    // two largest fields so a typical single-input send stays a single sub-512-byte NOISE_ENCRYPTED packet
+    // and never triggers BLE fragmentation — keeping the offline mesh-relay path as reliable as the
+    // (always single-packet) verification flow. The public [rawTransactionHex]/[expectedTxid] fields stay
+    // hex Strings; only this TLV codec is binary.
+    private enum class T(val v: Int) { UUID(0x00), NETWORK_ID(0x01), RAW_TX(0x02), EXPECTED_TXID(0x03), VERSION(0x04) }
 
     fun encode(): ByteArray? {
         if (requestUuid.size != UUID_SIZE) return null
@@ -145,8 +163,9 @@ data class PaymentBroadcastRequest(
         val out = ByteArrayOutputStream()
         out.writeTlv(T.UUID.v, requestUuid)
         out.writeTlv(T.NETWORK_ID.v, networkBytes)
-        out.writeTlv(T.RAW_TX_HEX.v, rawHex.toByteArray(Charsets.UTF_8))
-        out.writeTlv(T.EXPECTED_TXID.v, txid.toByteArray(Charsets.UTF_8))
+        // Carry the raw tx and txid as bytes (the gates above already proved they are even-length lowercase hex).
+        out.writeTlv(T.RAW_TX.v, rawHex.hexToBytesUnchecked())
+        out.writeTlv(T.EXPECTED_TXID.v, txid.hexToBytesUnchecked())
         out.writeTlv(T.VERSION.v, byteArrayOf((protocolVersion and 0xff).toByte()))
         return out.toByteArray()
     }
@@ -179,12 +198,13 @@ data class PaymentBroadcastRequest(
             if (uuid.size != UUID_SIZE) return null
             val network = (tlvs[T.NETWORK_ID.v] ?: return null).toString(Charsets.UTF_8).trim().lowercase()
             if (network.isEmpty() || network.length > MAX_NETWORK_ID_BYTES) return null
-            val rawHexBytes = tlvs[T.RAW_TX_HEX.v] ?: return null
-            if (rawHexBytes.size > PAYMENT_BROADCAST_MAX_RAW_TX_HEX) return null
-            val rawHex = rawHexBytes.toString(Charsets.UTF_8).trim().lowercase()
-            if (rawHex.isEmpty() || rawHex.length % 2 != 0 || !hexRegex.matches(rawHex)) return null
-            val txid = (tlvs[T.EXPECTED_TXID.v] ?: return null).toString(Charsets.UTF_8).trim().lowercase()
-            if (!txidHexRegex.matches(txid)) return null
+            // Raw tx + txid arrive as bytes; re-hex to canonical lowercase for the public String fields.
+            val rawTxBytes = tlvs[T.RAW_TX.v] ?: return null
+            if (rawTxBytes.isEmpty() || rawTxBytes.size > PAYMENT_BROADCAST_MAX_RAW_TX_BYTES) return null
+            val rawHex = rawTxBytes.toLowerHex()
+            val txidBytes = tlvs[T.EXPECTED_TXID.v] ?: return null
+            if (txidBytes.size != TXID_BYTES) return null
+            val txid = txidBytes.toLowerHex()
             val version = tlvs[T.VERSION.v]?.takeIf { it.size == 1 }?.let { it[0].toInt() and 0xff } ?: PB_PROTOCOL_VERSION
 
             return PaymentBroadcastRequest(uuid, network, rawHex, txid, version)

@@ -22,6 +22,21 @@ class PaymentBroadcastPacketTest {
     }
 
     @Test
+    fun `raw tx and txid are carried as binary so a typical send does not fragment`() {
+        // ~226-byte signed tx (1-in/2-out shape) -> 452 hex chars. With ASCII-hex framing the encoded
+        // packet would EXCEED the raw hex length; with binary framing it is ~half, keeping the whole
+        // NOISE_ENCRYPTED packet under the 512-byte BLE fragmentation threshold (single packet).
+        val rawTx = "01000000" + "ab".repeat(222) // 460 hex chars = 230 raw bytes
+        val req = PaymentBroadcastRequest(uuid(9), "testnet", rawTx, "b".repeat(64))
+        val encoded = req.encode()!!
+        assertTrue("raw tx must be stored as bytes, not ASCII hex", encoded.size < rawTx.length)
+        // Headroom: the request payload alone must sit well under 512 so the encrypted+framed packet does too.
+        assertTrue("request must fit a single sub-512 mesh fragment (was $encoded.size)", encoded.size < 380)
+        // And it must still round-trip back to the exact hex Strings.
+        assertEquals(req, PaymentBroadcastRequest.decode(encoded))
+    }
+
+    @Test
     fun `request rejects wrong uuid length`() {
         assertNull(PaymentBroadcastRequest(ByteArray(15), "testnet", rawHex, txid).encode())
     }

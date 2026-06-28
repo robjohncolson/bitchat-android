@@ -133,3 +133,65 @@ calls `mesh.initiateNoiseHandshake` and awaits `hasEstablishedSession` up to `PE
 - The deeper limiter is BLE **payload** delivery between these specific phones; a cleaner test (phones close,
   no third device, not airplane-throttled) is needed to confirm the warmed-session mesh path end-to-end. The
   code change is correct and proven at the routing layer.
+
+## TRUE root cause of the "payload never arrives" — FRAGMENTATION (supersedes the "link-reliability" guess)
+
+The warm-up fixes got routing onto the mesh (`session=true`, "Routing payment-broadcast REQUEST via mesh"), but
+the helper's `didReceivePaymentBroadcastRequest` still never fired. A 4-investigator adversarial code audit
+found the real reason — and it is **our payload size**, not the link per se:
+
+- The mesh send primitive is **identical** for QR-verification and payment-broadcast
+  (`BluetoothMeshService.sendNoisePayloadToPeer`, `:1128`). Verification, announce (type 1), keepalive
+  (type 33), the Noise handshake, and the favorite-DM all deliver — and all are **single sub-512-byte packets**.
+- `PaymentBroadcastRequest.encode` carried the raw tx as a **hex string (2× bytes)**. A 1-in/2-out ~226-byte
+  signed tx → NoisePayload.data ≈ 565 B → encrypted+framed ≈ **680 B**, which **exceeds the 512-byte
+  fragmentation threshold** (`FragmentManager`, `MAX_FRAGMENT_SIZE=469`) → **2 fragments**. Payment-broadcast
+  is the **only** thing in the whole working set that fragments, and the **first time fragmentation was ever
+  exercised on this link**.
+- The mesh fragment-send path (`FragmentingPacketSender.send`, `:54-92`) is **fire-and-forget**: no GATT
+  write-completion await (the client GATT callback has no `onCharacteristicWrite`, the server no
+  `onNotificationSent`), just a blind 20 ms gap between fragments, and it **aborts the whole set on the first
+  `sendSingle`→false** (`:68-71`, log `"Stopping fragmented send … after 1/2 fragments"`). Android allows only
+  one outstanding GATT op per connection, so on a slow airplane-mode link the 2nd fragment's write is rejected
+  and the set is abandoned at 1/2; the helper stores fragment 0, never reaches `expectedTotal`, and silently
+  GCs the set after ~30 s. There is **no fragment-level ACK/retransmission anywhere**. (Confidence ~75% on the
+  exact abort mechanism vs. plain air-loss of one fragment; the fix below resolves the failure either way.)
+- Receive/dispatch and all helper gates were **cleared**: dispatch is fully wired
+  (`MessageHandler.kt:173-176` → `MeshCore.kt:344` → `ChatViewModel.kt:1529`), reassembly re-dispatches a
+  `ttl=0` packet correctly, `SecurityManager` does not drop FRAGMENT/NOISE_ENCRYPTED, the two fragments get
+  distinct dedup ids, and every helper gate sits **downstream** of the unconditional `💸 Payment broadcast
+  request received` log (`MessageHandler.kt:174`) and returns a result on decline. So "helper totally silent"
+  can only mean the payload never reassembled — i.e. transport, not app-layer.
+
+## Fix shipped (Option A — shrink below the fragmentation threshold)
+
+`PaymentBroadcastRequest` now carries the **raw tx and the expected txid as raw BYTES** in the TLV codec
+instead of ASCII hex (`PaymentBroadcastPacket.kt`: enum `RAW_TX(0x02)`, `encode` uses `hexToBytesUnchecked`,
+`decode` re-hexes via `toLowerHex`). The public `rawTransactionHex`/`expectedTxid` **String** fields are
+unchanged, so every consumer is byte-identical (sender coordinator, `BroadcastHelperService` decode +
+`sendrawtransaction` + txid cross-check, and the Nostr path which forwards the same opaque encoded bytes). For
+a 1-in/2-out tx the frame drops **680 → ~420 B ≤ 512 → SINGLE PACKET**, so payment-broadcast now behaves
+exactly like the already-reliable verification flow.
+
+- **Money-safe:** the tx is already signed before `encode()`; bitcoinj never signs. Pure framing change; the
+  hex handed to the node and the anti-substitution txid cross-check are byte-identical to before.
+- **Cross-version:** both phones must run the **same** new build — a stale build decodes the new binary TLV as
+  non-hex and `decode()` returns null (fail-closed, no malformed tx broadcast). Fine for a synchronized flash.
+- **Tests:** `PaymentBroadcastPacketTest` round-trips + a new "carried as binary so a typical send does not
+  fragment" assertion (encoded < raw-hex length, < 380 B). `:app:testDebugUnitTest :app:assembleDebug` green;
+  signer + SPV key-import canaries unchanged.
+- **Scope limit (honest):** this makes single-input (≤~4-output) sends single-packet — the demo's 5-DOGE
+  1-in/2-out qualifies. A **multi-input** tx (raw >~284 B) still fragments; the underlying fire-and-forget
+  fragment transport remains the real limiter for those. **Follow-up (Option B, deferred):** harden
+  `FragmentingPacketSender` — await `onCharacteristicWrite`/`onNotificationSent` before the next fragment,
+  retry a fragment on `false` instead of aborting the set, add fragment-level ACK/retransmit, and key
+  `MAX_FRAGMENT_SIZE` to the negotiated MTU. That is a larger shared-transport change; do it second.
+
+### On-device re-test (decisive measurement still pending)
+Flash the **new build to BOTH phones** (they currently run `6c7222d`/`71e19d5`). Bootstrap a Noise session
+(favorite-DM), S24 → Airplane ON + Bluetooth ON (NOT `svc wifi disable`), helper opted-in for testnet + mutual
+favorite, sender Connection = "Built-in" (SPV). Console: `doge-spv-peer-broadcast <addr> <amt>`.
+- **SUCCESS:** sender logs "Routing payment-broadcast REQUEST via mesh" and **NO** "Fragmenting packet type …";
+  helper logs `💸 Payment broadcast request received from … (N bytes)` → broadcasts → `ACCEPTED` txid returns.
+- If it still fragments (e.g. a multi-input tx) you'll see "Fragmenting … into 2 fragments" then "Stopping
+  fragmented send … after 1/2" on the sender + a lone "Received fragment 0/2" on the helper = the Option-B defect.
