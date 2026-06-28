@@ -168,7 +168,7 @@ class ChatViewModel(
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
-                "doge-reset | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
+                "doge-reset | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
                 "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
@@ -364,6 +364,39 @@ class ChatViewModel(
                     }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents ERR ${it.message}") }
                 }
                 "spv unspents net=${net.id} -> DbgConsole"
+            }
+            "doge-spv-crosscheck" -> {
+                // Phase 4 soak surface: validate every SPV-spendable UTXO against the node's UTXO set
+                // (gettxout) — the safety-critical direction (no phantom/spent UTXO is treated as spendable).
+                // Read-only; touches no money path.
+                val net = currentDogecoinNetwork()
+                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val tag = com.bitchat.android.debug.DebugConsole.TAG
+                    runCatching {
+                        val spvUtxos = dogecoinSpv().snapshotUnspents(net)
+                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
+                        if (spvUtxos.isEmpty()) {
+                            android.util.Log.d(tag, "doge-spv-crosscheck net=${net.id}: SPV has 0 UTXOs (nothing to check)")
+                        } else {
+                            val rpcConfig = dogecoinWalletRepository.loadRpcConfig(net)
+                            val rpc = com.bitchat.android.features.dogecoin.DogecoinRpcClient()
+                            val oracle = HashMap<String, com.bitchat.android.features.dogecoin.DogecoinTxOut?>()
+                            spvUtxos.forEach { u ->
+                                oracle[com.bitchat.android.features.dogecoin.DogecoinSpvCrossCheck.outpoint(u.txid, u.vout)] =
+                                    runCatching { rpc.getTxOut(rpcConfig, u.txid, u.vout, net) }
+                                        .getOrElse { android.util.Log.d(tag, "  gettxout ERR ${u.txid.take(12)}:${u.vout} ${it.message}"); null }
+                            }
+                            val report = com.bitchat.android.features.dogecoin.DogecoinSpvCrossCheck.compare(spvUtxos, oracle)
+                            android.util.Log.d(tag, "doge-spv-crosscheck net=${net.id} addr=${addr.take(12)} spvUtxos=${spvUtxos.size} " +
+                                "spvTotal=${report.spvTotalKoinu}k nodeConfirmed=${report.nodeConfirmedKoinu}k result=${if (report.allMatch) "PASS" else "FAIL"}")
+                            report.mismatches.take(10).forEach { e ->
+                                android.util.Log.d(tag, "  MISMATCH ${e.txid.take(16)}:${e.vout} ${e.status} spv=${e.spvKoinu}k node=${e.oracleKoinu}k conf=${e.oracleConfirmations}")
+                            }
+                        }
+                    }.getOrElse { android.util.Log.d(tag, "doge-spv-crosscheck ERR ${it.message}") }
+                }
+                "spv-vs-node cross-check net=${net.id} -> DbgConsole (read-only)"
             }
             "doge-spv-broadcast" -> {
                 val to = args.getOrNull(0); val amt = args.getOrNull(1)

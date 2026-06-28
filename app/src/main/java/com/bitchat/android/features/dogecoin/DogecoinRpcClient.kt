@@ -259,6 +259,49 @@ class DogecoinRpcClient(
             listUnspentInternal(rpcConfig, address, network)
         }
 
+    /**
+     * READ-ONLY UTXO-set oracle: query a single outpoint via `gettxout`, returning its amount/script/
+     * confirmations, or null when the node reports it spent or absent. `include_mempool=true` so a
+     * mempool-spend is reflected (returns null) and a just-broadcast UTXO is still found. Unlike
+     * `listunspent` this needs no wallet import — it hits the chainstate directly and works per-outpoint
+     * on Dogecoin Core 1.14.x (which has no `scantxoutset`). Used only by the SPV cross-check; signs/
+     * broadcasts nothing.
+     */
+    suspend fun getTxOut(
+        config: DogecoinRpcConfig,
+        txid: String,
+        vout: Int,
+        network: DogecoinNetwork = DogecoinNetwork.DEFAULT
+    ): DogecoinTxOut? = withContext(Dispatchers.IO) {
+        require(txidRegex.matches(txid.lowercase())) { "gettxout requires a 64-hex txid." }
+        require(vout >= 0) { "gettxout requires a non-negative vout." }
+        val rpcConfig = normalizedRpcConfig(config, network)
+        val params = JsonArray().apply {
+            add(txid.lowercase())
+            add(vout)
+            add(true) // include_mempool
+        }
+        val result = callElement(rpcConfig, "gettxout", params)
+        if (result.isJsonNull) return@withContext null // spent or never existed
+        require(result.isJsonObject) { "RPC gettxout response was not an object." }
+        val obj = result.asJsonObject
+        val amountKoinu = obj.get("value")
+            ?.takeUnless { it.isJsonNull }
+            ?.let { runCatching { dogeJsonToKoinu(it) }.getOrNull() }
+            ?: throw IllegalArgumentException("RPC gettxout returned an output without a valid value.")
+        require(amountKoinu > 0L) { "RPC gettxout returned a non-positive value." }
+        val scriptObj = obj.get("scriptPubKey")?.takeIf { it.isJsonObject }?.asJsonObject
+            ?: throw IllegalArgumentException("RPC gettxout returned no scriptPubKey object.")
+        val scriptHex = parseOptionalString(scriptObj, "hex", "gettxout")?.lowercase()
+            ?: throw IllegalArgumentException("RPC gettxout returned no scriptPubKey hex.")
+        val confirmations = parseRequiredInt(
+            obj,
+            fieldName = "confirmations",
+            invalidMessage = "RPC gettxout returned no valid confirmations."
+        )
+        DogecoinTxOut(amountKoinu = amountKoinu, scriptPubKeyHex = scriptHex, confirmations = confirmations)
+    }
+
     suspend fun getAddressWatchStatus(
         config: DogecoinRpcConfig,
         address: String,
