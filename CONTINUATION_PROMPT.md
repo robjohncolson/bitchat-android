@@ -47,18 +47,30 @@ bitcoinj never signs):
   normal use:** re-enable S24 Wi-Fi; Pixel `doge-rpc-set http://10.0.0.24:44555 apstats <pw>` if you drop the
   USB tunnel; `doge-helper-enable 0` to stop helping.
 
-**⏩ IMMEDIATE NEXT = Phase 4 (mainnet broadcast, user-gated per-spend) — see "NEXT STEP: PHASE 4" below.**
+**✅ PHASE 4 COMPLETE (2026-06-28) — REAL MAINNET SPV SEND PROVEN.** Steps 1-3 all done on real mainnet:
+(1) mainnet checkpoint asset + feasibility (chainwork fits 12 bytes), (2) read-only soak PASSED (3 clean
+`doge-spv-crosscheck` agreements vs the mainnet node across mempool→confirmed for a 48.82-DOGE funding), (3) a
+real user-authorized mainnet send — `doge-spv-mainnet-send D7Svjsok… 10 CONFIRM` → built+signed on-device,
+BROADCAST CLAIMED, the mainnet node received 10 DOGE (tx `829d219b…`), SPV tracked the 38.81254 change and the
+change cross-check PASSED. The node-less on-device SPV money path works end-to-end on MAINNET. Along the way
+fixed TWO real SPV bugs (checkpoint asset loaded the wrong chain — see below) + added `doge-reset-mainnet`
+(acknowledgment-gated fresh mainnet key) and `doge-spv-mainnet-send` (the ONE confirmation-gated mainnet
+broadcast channel; `mainnetAuthorized` flag, default false; DataSource/UI 4-layer block UNTOUCHED). See the
+"NEXT STEP: PHASE 4" section below + memory for the full trail.
+**⏩ REMAINING (optional): full UI mainnet enablement** — lift the DataSource/sheet 4-layer block behind a
+WIF-backup gate + the policy-ack/high-fee UI gates (only the deliberate console channel is open today); confirm
+the live mainnet send mined (was in-mempool at handoff, valid + good fee, awaiting a pool).
 
 ## CURRENT FOCUS: self-contained SPV wallet (no node, no paid key)
 
 The active work is making the Dogecoin wallet self-contained via an **SPV light client** (bitcoinj +
 libdohj), added ALONGSIDE the existing RPC + explorer backends, sharing the same on-device key. The
 agreed end state: free, no user-run node, no paid explorer key, keys on-device. Branch
-`dogecoin-m2-pay-nickname`. **Last green commit: `9229dc7`** (Phase 4 step 2: mainnet checkpoint validated in
-libdohj 0.14.7; on top of `6a9f7df` mainnet checkpoint asset + AuxPoW generator fix, `2348972` doge-spv-crosscheck
-soak surface, `487ee90` UnifiedMeshService payment-broadcast forward, `38735de` Option B GATT retry, `f5780e3`
-Option A binary TLV — offline Bluetooth send PROVEN end-to-end on-device; `:app:testDebugUnitTest` +
-`:app:assembleDebug` BUILD SUCCESSFUL; `git diff --check` clean). Working tree clean.
+`dogecoin-m2-pay-nickname`. **Last green commit: `f622330`** (Phase 4 step 3: gated `doge-spv-mainnet-send`,
+real mainnet send PROVEN; on top of the SPV checkpoint-network fixes `ec73ea9`/`c5526b2`, `doge-reset-mainnet`,
+`9229dc7` mainnet checkpoint validated, `6a9f7df` mainnet checkpoint asset, `2348972` doge-spv-crosscheck,
+`487ee90`/`38735de`/`f5780e3` offline Bluetooth send; `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD
+SUCCESSFUL; `git diff --check` clean). Working tree clean.
 
 **WARM-UP FIX SHIPPED (`6c7222d`):** `requestPeerBroadcast` now `warmUpMeshHelperSessions` (initiate
 `initiateNoiseHandshake` for connected session-less helpers + bounded await 3.5s) before dispatch. VERIFIED
