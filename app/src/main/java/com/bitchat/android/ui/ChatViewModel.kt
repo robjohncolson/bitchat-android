@@ -362,7 +362,7 @@ class ChatViewModel(
             }
             "doge-spv-status" -> {
                 val s = dogecoinSpv().status.value
-                "spv net=${s.network.id} running=${s.running} synced=${s.synced} height=${s.chainHeight} " +
+                "spv net=${s.network.id} running=${s.running} synced=${s.synced} overTor=${s.overTor} height=${s.chainHeight} " +
                     "peers=${s.peerCount} bestPeer=${s.bestPeerHeight} behind=${s.blocksBehind}"
             }
             "doge-spv-balance" -> {
