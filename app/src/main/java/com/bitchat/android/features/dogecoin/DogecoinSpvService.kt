@@ -202,7 +202,10 @@ class DogecoinSpvService private constructor(
                     synchronized(lock) {
                         val livePg = peerGroup ?: return@launch          // stopped → end the coroutine
                         if (activeNetwork != network) return@launch       // switched network → end
-                        if (_status.value.synced) return@synchronized     // caught up → skip this tick
+                        // Idle only when genuinely AT the tip; with the sticky `synced` (hysteresis) the flag can
+                        // be true while a few blocks behind, so keep poking the highest peer until truly caught up.
+                        val st = _status.value
+                        if (st.synced && st.blocksBehind <= SYNCED_WITHIN_BLOCKS) return@synchronized
                         org.bitcoinj.core.Context.propagate(bitcoinjContext)
                         runCatching {
                             livePg.connectedPeers.maxByOrNull { it.bestHeight }?.startBlockChainDownload()
@@ -331,14 +334,14 @@ class DogecoinSpvService private constructor(
             val pg = peerGroup?.takeIf { activeNetwork == network } ?: return null
             val w = wallet ?: return null
             val st = _status.value
-            if (!st.synced || st.peerCount < MIN_PEERS) return null       // not caught up / eclipse floor
+            if (!st.synced || st.peerCount < minPeersFor(network)) return null  // not caught up / eclipse floor (strict on mainnet)
             org.bitcoinj.core.Context.propagate(bitcoinjContext)
             // Fail closed: bitcoinj must round-trip the signed bytes byte-for-byte AND agree on the txid.
             val tx = DogecoinSpvBroadcastVerifier.verifiedTransaction(params, normalizedHex, expectedTxid)
             // Reserve the spent inputs NOW so reads stop showing them as spendable (anti double-spend).
             // receivePending does not alter the verified serialization, so the wire bytes stay canonical.
             w.receivePending(tx, null)
-            pg.minBroadcastConnections = MIN_PEERS                        // avoid single-peer broadcast deadlock
+            pg.minBroadcastConnections = minPeersFor(network)            // avoid single-peer broadcast deadlock (strict on mainnet)
             broadcasting = true                                          // freeze the Tor observer until the await ends
             try {
                 pg.broadcastTransaction(tx) to tx                         // sends immediately; returns now
@@ -385,7 +388,20 @@ class DogecoinSpvService private constructor(
         val peerCount = peers.size
         val bestPeerHeight = peers.maxOfOrNull { it.bestHeight } ?: 0L
         val headTimeSecs = runCatching { chain.chainHead.header.timeSeconds }.getOrDefault(0L)
-        val caughtUp = bestPeerHeight > 0L && (bestPeerHeight - height) <= SYNCED_WITHIN_BLOCKS
+        // Schmitt trigger on tip-freshness: reach within SYNCED_WITHIN_BLOCKS of the tip to FIRST go synced, then
+        // HOLD synced until we fall more than STALE_BEHIND_BLOCKS behind — a fresh block (a block or two of
+        // download lag) can no longer flap the flag. The peer floor stays STRICT per network (mainnet eclipse
+        // floor unchanged; testnet relaxed). `prevSynced` is scoped to THIS live network so a switch can't carry
+        // sticky state. Read/written lock-free like the rest of publishStatus; a stale `prev` only ever makes the
+        // next tick re-require the strict rising edge (never enables an unsafe state).
+        val behind = if (bestPeerHeight > 0L) bestPeerHeight - height else Long.MAX_VALUE
+        val prevSynced = _status.value.running && _status.value.synced && _status.value.network == network
+        // Falling-edge hysteresis is NON-MAINNET only: mainnet stays strict on BOTH axes (freshness AND the peer
+        // floor), so mainnet "synced"/broadcast-readiness is byte-for-byte unchanged. Testnet holds synced up to
+        // STALE_BEHIND_BLOCKS behind to stop the flag flapping as its tip advances ~1 block/30-40s.
+        val staleThreshold = if (network == DogecoinNetwork.MAINNET) SYNCED_WITHIN_BLOCKS else STALE_BEHIND_BLOCKS
+        val freshEnough = behind <= if (prevSynced) staleThreshold else SYNCED_WITHIN_BLOCKS
+        val synced = bestPeerHeight > 0L && peerCount >= minPeersFor(network) && freshEnough
         _status.value = DogecoinSpvStatus(
             network = network,
             running = true,
@@ -393,7 +409,7 @@ class DogecoinSpvService private constructor(
             chainHeight = height,
             bestPeerHeight = bestPeerHeight,
             syncedToDateMillis = headTimeSecs * 1000L,
-            synced = caughtUp && peerCount >= MIN_PEERS,
+            synced = synced,
             overTor = builtSocksAddress != null
         )
     }
@@ -546,8 +562,21 @@ class DogecoinSpvService private constructor(
         const val USER_AGENT = "bitchat-dogecoin-spv"
         const val USER_AGENT_VERSION = "0.1"
         const val MAX_PEERS = 6
-        const val MIN_PEERS = 4 // eclipse-resistance floor for "synced"; broadcast needs >=this too
+        const val MIN_PEERS = 4 // MAINNET eclipse-resistance floor for "synced"; broadcast needs >=this too
+        // Test networks carry no value (no eclipse/double-spend incentive) and a thin testnet rarely sustains 4
+        // peers, so requiring MIN_PEERS there needlessly blocks "synced"/sends. Relax the floor for non-mainnet
+        // ONLY — mainnet's eclipse floor is untouched. Used identically by the "synced" calc AND the broadcast gate.
+        const val MIN_PEERS_TESTNET = 1
         const val SYNCED_WITHIN_BLOCKS = 2L
+        // Falling-edge hysteresis (NON-MAINNET only; mainnet stays strict at SYNCED_WITHIN_BLOCKS): once synced,
+        // HOLD synced until we fall MORE than this many blocks behind the best peer. Stops the flag flapping as a
+        // thin testnet's tip advances ~1 block/30-40s (a block or two of header-download lag on the SAME chain).
+        const val STALE_BEHIND_BLOCKS = 6L
+
+        /** Eclipse-resistance peer floor for "synced" and for broadcasting. STRICT on mainnet (real money);
+         *  relaxed on testnet/regtest, which carry no value and rarely sustain [MIN_PEERS] peers. */
+        fun minPeersFor(network: DogecoinNetwork): Int =
+            if (network == DogecoinNetwork.MAINNET) MIN_PEERS else MIN_PEERS_TESTNET
         const val BROADCAST_TIMEOUT_SECS = 25L // best-effort re-announce wait; timeout != failure (Claimed)
         const val SYNC_CATCHUP_INTERVAL_MS = 10_000L // re-poke the highest peer for headers while not synced
         const val TOR_CONNECT_TIMEOUT_MILLIS = 60_000 // Tor circuit + peer handshake is slow; BlockingClientManager defaults to 1s

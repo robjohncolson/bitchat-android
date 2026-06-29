@@ -62,6 +62,8 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -1041,6 +1043,10 @@ fun DogecoinWalletSheet(
                         }
                     }
                     sendAmount = ""
+                    // Land back on the focal/balance view so the confirmation ring (keyed on sentReceipt.txid)
+                    // is immediately visible; the receipt + txid-copy are surfaced there too. Presentation-only,
+                    // reached only after a successful broadcast inside the active-key/network relevance guard.
+                    walletAction = DogeWalletAction.NONE
                     Toast.makeText(
                         context,
                         context.getString(R.string.dogecoin_transaction_broadcast),
@@ -1519,6 +1525,17 @@ fun DogecoinWalletSheet(
         confirmingDepth = null
     }
 
+    // Auto-save every recipient on a successful send (per-network) so it appears in the recipient picker without
+    // a manual "Save recipient" tap. Runs only AFTER sentReceipt is set (post-broadcast), isolated in runCatching
+    // so it can never throw into the send flow, and writes ONLY the suggestion store — it never feeds back into
+    // signing/broadcast. Keyed on the recipient so it fires once per distinct send (covers local + peer paths).
+    LaunchedEffect(sentReceipt?.recipientAddress, sentReceipt?.network) {
+        val receipt = sentReceipt ?: return@LaunchedEffect
+        runCatching {
+            repository.upsertSavedAddress(receipt.network, receipt.recipientAddress, receipt.requestLabel.orEmpty())
+        }.onSuccess { updated -> if (receipt.network == selectedNetwork) savedAddresses = updated }
+    }
+
     BitchatBottomSheet(
         modifier = modifier,
         onDismissRequest = onDismiss
@@ -1600,20 +1617,26 @@ fun DogecoinWalletSheet(
                 item(key = "focal") {
                     val spv = dogecoinBackend == DogecoinBackend.SPV
                     val s = spvStatus
-                    val syncing = spv && s.running && !s.synced
                     val colors = dogeWalletColors
-                    // A pending SPV send fills the ring 0..target as confirmations land — only while synced
-                    // (depths aren't trustworthy mid-sync). Once it reaches the target the ring returns to idle.
+                    // A pending SPV send fills the ring 0..target as confirmations land. The depth comes from our
+                    // OWN chain head (confirmationDepth()), accurate regardless of peer count — so show CONFIRMING
+                    // even when the strict `synced` flag momentarily flaps (a peer dip below the floor, or a fresh
+                    // block a block or two ahead), as long as we're effectively at the tip. A genuine backlog
+                    // (> DOGECOIN_SPV_NEARTIP_BLOCKS) keeps it in SYNCING.
                     val confDepth = confirmingDepth
-                    val confirming = spv && !syncing && confDepth != null && confDepth < DOGECOIN_SPV_CONFIRM_TARGET
+                    val hasPending = spv && confDepth != null && confDepth < DOGECOIN_SPV_CONFIRM_TARGET
+                    val nearTip = s.bestPeerHeight > 0L && s.blocksBehind <= DOGECOIN_SPV_NEARTIP_BLOCKS
+                    val confirming = hasPending && (s.synced || nearTip)
+                    // Mutually exclusive with confirming: only show Syncing when behind AND not filling the ring.
+                    val syncing = spv && s.running && !s.synced && !confirming
                     val syncProgress = if (syncing) {
                         val behind = s.blocksBehind.coerceAtLeast(0).toFloat()
                         (1f - behind / (behind + 1500f)).coerceIn(0.04f, 0.97f)
                     } else 1f
                     val bal = walletBalance
                     val ringMode = when {
-                        syncing -> RingMode.SYNCING
                         confirming -> RingMode.CONFIRMING
+                        syncing -> RingMode.SYNCING
                         else -> RingMode.IDLE
                     }
                     val ringProgress = when {
@@ -1696,7 +1719,9 @@ fun DogecoinWalletSheet(
                         }
                         val strip = buildList {
                             add(if (spv) "Built-in" else "My node")
-                            if (spv) add(if (s.synced) "synced" else if (s.running) "syncing" else "starting")
+                            // Mirror the ring's own state so the strip can never contradict it (confirming/syncing
+                            // are the same locals that drive ringMode; "synced" == the ring showing the idle balance).
+                            if (spv) add(if (confirming) "confirming" else if (syncing) "syncing" else if (s.running) "synced" else "starting")
                             if (s.overTor && torReady) add("Tor on") else if (torIntentOn) add("Tor starting")
                         }.joinToString("   ·   ")
                         Text(strip, style = MaterialTheme.typography.labelMedium, color = colors.muted)
@@ -1732,6 +1757,58 @@ fun DogecoinWalletSheet(
                             onClick = { walletAction = DogeWalletAction.RECEIVE },
                             modifier = Modifier.weight(1f)
                         ) { Text("Receive") }
+                    }
+                }
+
+                // After a send we land here; surface a compact receipt so the txid-copy isn't buried in the
+                // Send view. The full receipt (share/save) stays reachable via "Details". Presentation-only.
+                if (sentReceipt != null) {
+                    item(key = "receipt") {
+                        sentReceipt?.let { receipt ->
+                            val rc = dogeWalletColors
+                            WalletCard {
+                                Text(
+                                    text = when {
+                                        receipt.viaSpvClaimedOnly ->
+                                            stringResource(R.string.dogecoin_send_receipt_via_spv_claimed)
+                                        receipt.viaPeer -> stringResource(
+                                            if (receipt.peerCorroborated) {
+                                                R.string.dogecoin_send_receipt_via_peer_corroborated
+                                            } else {
+                                                R.string.dogecoin_send_receipt_via_peer
+                                            }
+                                        )
+                                        else -> "Sent"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = rc.ink
+                                )
+                                Text(
+                                    text = "${DogecoinAmount.formatKoinu(receipt.sendAmountKoinu)} DOGE",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = rc.muted
+                                )
+                                SelectionContainer {
+                                    Text(
+                                        text = receipt.txid.take(10) + "…" + receipt.txid.takeLast(8),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = rc.muted
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    TextButton(onClick = {
+                                        copy(receipt.txid, context.getString(R.string.dogecoin_txid_copied))
+                                    }) {
+                                        Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(stringResource(R.string.dogecoin_copy_txid))
+                                    }
+                                    TextButton(onClick = { walletAction = DogeWalletAction.SEND }) { Text("Details") }
+                                    TextButton(onClick = { sentReceipt = null }) { Text("Done") }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2562,48 +2639,59 @@ fun DogecoinWalletSheet(
                             )
                         }
                         if (savedAddresses.isNotEmpty()) {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    text = stringResource(R.string.dogecoin_saved_recipients_title),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                                savedAddresses.forEach { savedAddress ->
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = { updateSendAddressInput(savedAddress.address) },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Column(
-                                                horizontalAlignment = Alignment.Start,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Text(
-                                                    text = savedAddress.label.takeIf { it.isNotBlank() }
-                                                        ?: shortDogecoinAddress(savedAddress.address),
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    maxLines = 1
-                                                )
-                                                Text(
-                                                    text = savedAddress.address,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    maxLines = 1
-                                                )
+                            // Dropdown of previously-used recipients (auto-saved on each successful send). Pick one
+                            // to fill the field; the trailing trash removes it. A selection flows through the same
+                            // updateSendAddressInput() path as typing/paste, so it is re-validated downstream.
+                            var recipientsExpanded by remember { mutableStateOf(false) }
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                OutlinedButton(
+                                    onClick = { recipientsExpanded = true },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_saved_recipients_title) +
+                                            "  (${savedAddresses.size})",
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text("▾")
+                                }
+                                DropdownMenu(
+                                    expanded = recipientsExpanded,
+                                    onDismissRequest = { recipientsExpanded = false }
+                                ) {
+                                    savedAddresses.forEach { savedAddress ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(
+                                                        text = savedAddress.label.takeIf { it.isNotBlank() }
+                                                            ?: shortDogecoinAddress(savedAddress.address),
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        maxLines = 1
+                                                    )
+                                                    Text(
+                                                        text = savedAddress.address,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            },
+                                            onClick = {
+                                                updateSendAddressInput(savedAddress.address)
+                                                recipientsExpanded = false
+                                            },
+                                            trailingIcon = {
+                                                IconButton(onClick = { removeRecipientAddress(savedAddress.address) }) {
+                                                    Icon(
+                                                        Icons.Filled.Delete,
+                                                        contentDescription = stringResource(
+                                                            R.string.dogecoin_saved_recipient_remove
+                                                        )
+                                                    )
+                                                }
                                             }
-                                        }
-                                        IconButton(onClick = { removeRecipientAddress(savedAddress.address) }) {
-                                            Icon(
-                                                Icons.Filled.Delete,
-                                                contentDescription = stringResource(
-                                                    R.string.dogecoin_saved_recipient_remove
-                                                )
-                                            )
-                                        }
+                                        )
                                     }
                                 }
                             }
@@ -3266,6 +3354,9 @@ fun DogecoinWalletSheet(
                 peerCorroborated = corroborated
             )
             sendAmount = ""
+            // Return to the focal/balance view (where the receipt + txid-copy now live) after a successful
+            // peer broadcast — same as the local path. Guarded by resultTxid == transaction.txid above.
+            walletAction = DogeWalletAction.NONE
             pendingTransaction = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
@@ -4697,6 +4788,10 @@ private const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
 // gold ring), and the poll budget before a never-confirming tx reverts the ring to the idle balance.
 private const val DOGECOIN_SPV_CONFIRM_TARGET = 6
 private const val DOGECOIN_SPV_CONFIRM_POLLS = 80
+// Presentation-only: show the confirmation fill (not "Syncing") for a pending tx while within this many blocks
+// of the tip, so a momentary `synced` flap (peer dip / a fresh block) can't mask it. confirmationDepth is read
+// from our own chain head, so it stays accurate this close to the tip.
+private const val DOGECOIN_SPV_NEARTIP_BLOCKS = 6
 private const val DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS = 650L
 
 private class DogecoinQrCodeAnalyzer(
