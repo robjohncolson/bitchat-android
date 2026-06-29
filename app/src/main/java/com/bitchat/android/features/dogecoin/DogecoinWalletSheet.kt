@@ -92,6 +92,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -135,7 +137,16 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /** Which focal flow the wallet is showing — the "Coin" one-thing-at-a-time view-state. */
-private enum class DogeWalletAction { NONE, SEND, RECEIVE, SETTINGS }
+private enum class DogeWalletAction { NONE, SEND, RECEIVE, SETTINGS, ACTIVITY }
+
+/** Backend-agnostic transaction row for the pending cards + full activity list (presentation-only). */
+private data class WalletTxRow(
+    val txid: String,
+    val incoming: Boolean,
+    val amountKoinu: Long,
+    val confirmations: Int,
+    val timeSeconds: Long?
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1525,6 +1536,42 @@ fun DogecoinWalletSheet(
         confirmingDepth = null
     }
 
+    // Activity / pending list (SPV): poll the READ-ONLY wallet-tx snapshot so the pending cards + full activity
+    // list reflect confirmations climbing 0->target. Incoming txs appear here automatically (bloom-matched), so
+    // the RECEIVING phone sees an inbound payment confirm without any extra plumbing. Never feeds signing.
+    var spvTxs by remember { mutableStateOf<List<DogecoinSpvTx>>(emptyList()) }
+    LaunchedEffect(dogecoinBackend, selectedNetwork) {
+        if (dogecoinBackend != DogecoinBackend.SPV) {
+            spvTxs = emptyList()
+            return@LaunchedEffect
+        }
+        while (true) {
+            spvTxs = withContext(Dispatchers.IO) {
+                spvService.snapshotTransactions(selectedNetwork) ?: emptyList()
+            }
+            delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+        }
+    }
+    // Backend-agnostic rows: SPV from the wallet snapshot, RPC from getWalletActivity (already polled below).
+    val txRows: List<WalletTxRow> = remember(spvTxs, walletActivity, dogecoinBackend) {
+        if (dogecoinBackend == DogecoinBackend.SPV) {
+            spvTxs.map { WalletTxRow(it.txid, it.incoming, it.amountKoinu, it.confirmations, it.timeSeconds) }
+        } else {
+            walletActivity.map {
+                WalletTxRow(
+                    txid = it.txid,
+                    incoming = !it.category.equals("send", ignoreCase = true),
+                    amountKoinu = kotlin.math.abs(it.amountKoinu),
+                    confirmations = it.confirmations.coerceAtLeast(0),
+                    timeSeconds = it.timeSeconds
+                )
+            }
+        }
+    }
+    // "Pending" = not yet at the confirmation target (in-flight, still filling the ring). Shown as cards on the
+    // main screen; the rest of the history lives behind "View all".
+    val pendingTxRows = txRows.filter { it.confirmations < DOGECOIN_SPV_CONFIRM_TARGET }
+
     // Auto-save every recipient on a successful send (per-network) so it appears in the recipient picker without
     // a manual "Save recipient" tap. Runs only AFTER sentReceipt is set (post-broadcast), isolated in runCatching
     // so it can never throw into the send flow, and writes ONLY the suggestion store — it never feeds back into
@@ -1550,6 +1597,13 @@ fun DogecoinWalletSheet(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 item(key = "header") {
+                    // Per-network accent: mainnet = red (real money, attention); testnet = green; regtest = blue.
+                    // Used to tint the Doge mark and the network label so the active network is unmistakable.
+                    val netColor = when (selectedNetwork) {
+                        DogecoinNetwork.MAINNET -> dogeWalletColors.danger
+                        DogecoinNetwork.TESTNET -> Color(0xFF2E7D32)
+                        DogecoinNetwork.REGTEST -> Color(0xFF1565C0)
+                    }
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1560,12 +1614,27 @@ fun DogecoinWalletSheet(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.AccountBalanceWallet,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                                Box(modifier = Modifier.size(30.dp)) {
+                                    val dogePainter = painterResource(R.drawable.doge_coin)
+                                    // Mainnet (real money) shows the full-colour Shiba untouched.
+                                    Image(
+                                        painter = dogePainter,
+                                        contentDescription = "${selectedNetwork.displayName} Dogecoin network",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    // Test/regtest: a translucent green/blue WASH laid over the original art
+                                    // (keeps the Doge's detail, unlike a flat silhouette) so you can never
+                                    // confuse play money for real.
+                                    if (selectedNetwork != DogecoinNetwork.MAINNET) {
+                                        Image(
+                                            painter = dogePainter,
+                                            contentDescription = null,
+                                            colorFilter = ColorFilter.tint(netColor),
+                                            alpha = 0.5f,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = stringResource(R.string.dogecoin_wallet_title),
                                     style = MaterialTheme.typography.headlineSmall,
@@ -1583,12 +1652,10 @@ fun DogecoinWalletSheet(
                             }
                         }
                         Text(
-                            text = stringResource(
-                                R.string.dogecoin_wallet_network_summary,
-                                selectedNetwork.displayName
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            text = selectedNetwork.displayName.uppercase(),
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = netColor
                         )
                     }
                 }
@@ -1600,6 +1667,7 @@ fun DogecoinWalletSheet(
                             text = "‹  " + when (walletAction) {
                                 DogeWalletAction.SEND -> "Send"
                                 DogeWalletAction.RECEIVE -> "Receive"
+                                DogeWalletAction.ACTIVITY -> "Activity"
                                 else -> "Settings"
                             },
                             style = MaterialTheme.typography.titleMedium,
@@ -1744,6 +1812,31 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                // In-flight payments (sent or received) each with their own 0->target fill, right under the
+                // balance so confirmation progress is visible without opening anything.
+                if (pendingTxRows.isNotEmpty()) {
+                    item(key = "pending") {
+                        WalletCard {
+                            Text(
+                                text = "Pending",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = dogeWalletColors.muted
+                            )
+                            pendingTxRows.take(DOGECOIN_PENDING_CARDS_LIMIT).forEach { row ->
+                                WalletTxRowView(row)
+                            }
+                            val morePending = pendingTxRows.size - DOGECOIN_PENDING_CARDS_LIMIT
+                            if (morePending > 0) {
+                                Text(
+                                    text = "+$morePending more pending",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = dogeWalletColors.muted
+                                )
+                            }
+                        }
+                    }
+                }
+
                 item(key = "actions") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1757,6 +1850,16 @@ fun DogecoinWalletSheet(
                             onClick = { walletAction = DogeWalletAction.RECEIVE },
                             modifier = Modifier.weight(1f)
                         ) { Text("Receive") }
+                    }
+                }
+
+                // Full history (sent + received, pending + confirmed) lives one tap away to keep the default clean.
+                if (txRows.isNotEmpty()) {
+                    item(key = "viewall") {
+                        TextButton(
+                            onClick = { walletAction = DogeWalletAction.ACTIVITY },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("View all activity  ›") }
                     }
                 }
 
@@ -1812,6 +1915,48 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                }
+                if (walletAction == DogeWalletAction.ACTIVITY) {
+                    item(key = "activity_list") {
+                        if (txRows.isEmpty()) {
+                            Text(
+                                text = "No transactions yet.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = dogeWalletColors.muted
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                txRows.take(DOGECOIN_ACTIVITY_FULL_LIMIT).forEach { row ->
+                                    WalletCard {
+                                        WalletTxRowView(row)
+                                        SelectionContainer {
+                                            Text(
+                                                text = row.txid.take(10) + "…" + row.txid.takeLast(8),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = dogeWalletColors.muted
+                                            )
+                                        }
+                                        TextButton(onClick = {
+                                            copy(row.txid, context.getString(R.string.dogecoin_txid_copied))
+                                        }) {
+                                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(stringResource(R.string.dogecoin_copy_txid))
+                                        }
+                                    }
+                                }
+                                val hidden = txRows.size - DOGECOIN_ACTIVITY_FULL_LIMIT
+                                if (hidden > 0) {
+                                    Text(
+                                        text = "+$hidden older",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = dogeWalletColors.muted
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 if (walletAction == DogeWalletAction.SETTINGS) {
                 item(key = "backend") {
@@ -4219,6 +4364,54 @@ private fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
     }
 }
 
+/**
+ * One transaction row: direction arrow + signed amount + confirmation status. Pending txs show the small
+ * 0->target ConfirmationRing (the same ornament as the focal hero) so progress reads at a glance; once at
+ * the target it collapses to a gold check. Presentation-only.
+ */
+@Composable
+private fun WalletTxRowView(row: WalletTxRow) {
+    val colors = dogeWalletColors
+    val incomingGreen = Color(0xFF2E7D32)
+    val confirmed = row.confirmations >= DOGECOIN_SPV_CONFIRM_TARGET
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = if (row.incoming) "↓" else "↑",
+            style = MaterialTheme.typography.titleMedium,
+            color = if (row.incoming) incomingGreen else colors.ink
+        )
+        Text(
+            text = (if (row.incoming) "+" else "−") + DogecoinAmount.formatKoinu(row.amountKoinu) + " DOGE",
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            color = colors.ink,
+            maxLines = 1,
+            modifier = Modifier.weight(1f)
+        )
+        if (confirmed) {
+            Text("✓", style = MaterialTheme.typography.titleMedium, color = colors.gold)
+        } else {
+            ConfirmationRing(
+                mode = RingMode.CONFIRMING,
+                progress = row.confirmations.toFloat() / DOGECOIN_SPV_CONFIRM_TARGET,
+                diameter = 24.dp,
+                strokeWidth = 3.dp,
+                segments = DOGECOIN_SPV_CONFIRM_TARGET,
+                contentDescription = "${row.confirmations} of $DOGECOIN_SPV_CONFIRM_TARGET confirmations"
+            )
+            Text(
+                text = "${row.confirmations}/$DOGECOIN_SPV_CONFIRM_TARGET",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.muted
+            )
+        }
+    }
+}
+
 @Composable
 private fun SecureWindowFlagEffect(enabled: Boolean) {
     val view = LocalView.current
@@ -4780,6 +4973,10 @@ private fun dogecoinConfValue(value: String, fallback: String): String {
 private const val DOGECOIN_UTXO_PREVIEW_LIMIT = 5
 private const val DOGECOIN_CONFIRM_UTXO_PREVIEW_LIMIT = 3
 private const val DOGECOIN_ACTIVITY_PREVIEW_LIMIT = 5
+// Pending cards shown on the main screen; the rest fold into "View all activity". Full list is capped so a
+// long history can't balloon a single LazyColumn item.
+private const val DOGECOIN_PENDING_CARDS_LIMIT = 4
+private const val DOGECOIN_ACTIVITY_FULL_LIMIT = 50
 private const val DOGECOIN_SEND_ITEM_INDEX = 6
 private const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
 private const val DOGECOIN_SPV_CORROBORATION_POLLS = 40

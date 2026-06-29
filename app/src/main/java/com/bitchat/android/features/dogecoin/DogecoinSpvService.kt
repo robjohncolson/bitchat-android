@@ -50,6 +50,19 @@ data class DogecoinSpvStatus(
 }
 
 /**
+ * A single wallet transaction for the activity / pending-confirmation UI. READ-ONLY presentation data —
+ * it never feeds signing or broadcast. [amountKoinu] is the net value RECEIVED (incoming) or the net value
+ * that LEFT the wallet excluding change (outgoing), always non-negative; [confirmations] is 0 while pending.
+ */
+data class DogecoinSpvTx(
+    val txid: String,
+    val incoming: Boolean,
+    val amountKoinu: Long,
+    val confirmations: Int,
+    val timeSeconds: Long?
+)
+
+/**
  * On-device SPV light client (bitcoinj 0.14.7 + libdohj) for ONE Dogecoin network at a time.
  *
  * READ-ONLY: it imports the wallet's EXISTING key (watch + spend the same address), syncs headers + a
@@ -377,6 +390,35 @@ class DogecoinSpvService private constructor(
         val hash = runCatching { org.bitcoinj.core.Sha256Hash.wrap(txid.trim()) }.getOrNull() ?: return null
         val tx = w.getTransaction(hash) ?: return null
         runCatching { tx.confidence?.depthInBlocks }.getOrNull()
+    }
+
+    /**
+     * READ-ONLY snapshot of every wallet transaction (sent AND received) for the activity / pending UI,
+     * newest first. Direction comes from the net value to/from the wallet; INCOMING txs are tracked here
+     * automatically because the bloom filter matches our address, so the receiving phone sees an incoming
+     * tx's confirmations climb without any extra plumbing. Never touches the money path. Null if SPV isn't
+     * the active backend for [network]. A confirmation depth of 0 means pending (in mempool, unmined).
+     */
+    fun snapshotTransactions(network: DogecoinNetwork): List<DogecoinSpvTx>? = synchronized(lock) {
+        val w = wallet?.takeIf { activeNetwork == network } ?: return null
+        org.bitcoinj.core.Context.propagate(bitcoinjContext)
+        w.getTransactions(false).mapNotNull { tx ->
+            val sentToMe = runCatching { tx.getValueSentToMe(w).value }.getOrDefault(0L)
+            val sentFromMe = runCatching { tx.getValueSentFromMe(w).value }.getOrDefault(0L)
+            val net = sentToMe - sentFromMe                 // >0 received, <0 spent (net of change returning to us)
+            val incoming = net >= 0L
+            val amount = (if (incoming) net else -net).coerceAtLeast(0L)
+            if (amount == 0L) return@mapNotNull null        // self-transfer noise / fee-only artifacts
+            val depth = runCatching { tx.confidence?.depthInBlocks ?: 0 }.getOrDefault(0)
+            val time = runCatching { tx.updateTime?.time?.div(1000L) }.getOrNull()
+            DogecoinSpvTx(
+                txid = tx.hashAsString,
+                incoming = incoming,
+                amountKoinu = amount,
+                confirmations = depth.coerceAtLeast(0),
+                timeSeconds = time
+            )
+        }.sortedByDescending { it.timeSeconds ?: Long.MAX_VALUE }   // newest first; just-created (no time) on top
     }
 
     private fun walletAddress(network: DogecoinNetwork): String =
