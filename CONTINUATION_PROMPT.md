@@ -10,7 +10,20 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `3216c3c`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (HEAD `1f5e301`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+
+**Both phones (Pixel 3 `89VX0HPX1` + S24 `RFCX81GNBRE`) are on the latest build (`1f5e301`), testnet/SPV/Tor.**
+
+**✅ "USE MAX" REMOVED + OFFLINE-BLE WARM-UP HARDENED (`7502996`, `1f5e301`, pushed).** Two polish-pass items:
+- **Removed the "Use max" send action** (`7502996`) — button + `useMaxSendAmount()` + `calculatingMaxSend` state/guards
+  + the `USE_MAX_SEND` watch-import dialog branch/enum. UX-only; signer/fee presets/manual fee/send gates untouched.
+  Verified on Pixel 3: the Send screen no longer shows it. (Unused strings left; `maxSpendable` kept for tests.)
+- **Hardened the offline-BLE Noise warm-up** (`1f5e301`, `ChatViewModel.warmUpMeshHelperSessions`) — it fell back to
+  Nostr because the send-time warm-up waited only 3.5s (BLE handshake ~30s) and initiated the handshake ONCE (a
+  dropped packet never retried). Now: RE-INITIATES every 4s within the window for still-session-less peers; the
+  background prewarm (on wallet open) gets a 30s window so the handshake completes before the user sends; send-time
+  window bumped 3.5s→8s. Transport-only (no money path). Build + canary tests green. **A full air-gapped two-phone
+  relay re-test is env-dependent (see `docs/dogecoin-offline-mesh-relay-findings.md`) and still UNVERIFIED on hardware.**
 
 **✅ TAP-A-TX → LIVE CONFIRMATION-DETAIL DIALOG — SHIPPED + ON-DEVICE VERIFIED (`3216c3c`, pushed).** Completes
 the user's original "click a transaction to check its confirmation status" intent (the prior commit only showed
