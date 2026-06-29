@@ -1571,6 +1571,9 @@ fun DogecoinWalletSheet(
     // "Pending" = not yet at the confirmation target (in-flight, still filling the ring). Shown as cards on the
     // main screen; the rest of the history lives behind "View all".
     val pendingTxRows = txRows.filter { it.confirmations < DOGECOIN_SPV_CONFIRM_TARGET }
+    // Tap-to-inspect: which tx's confirmation-detail dialog is open. Keyed by txid (not the row) so the dialog's
+    // ring keeps climbing as the 15s poll refreshes the underlying row.
+    var walletTxDetailId by remember { mutableStateOf<String?>(null) }
 
     // Auto-save every recipient on a successful send (per-network) so it appears in the recipient picker without
     // a manual "Save recipient" tap. Runs only AFTER sentReceipt is set (post-broadcast), isolated in runCatching
@@ -1823,7 +1826,7 @@ fun DogecoinWalletSheet(
                                 color = dogeWalletColors.muted
                             )
                             pendingTxRows.take(DOGECOIN_PENDING_CARDS_LIMIT).forEach { row ->
-                                WalletTxRowView(row)
+                                WalletTxRowView(row) { walletTxDetailId = row.txid }
                             }
                             val morePending = pendingTxRows.size - DOGECOIN_PENDING_CARDS_LIMIT
                             if (morePending > 0) {
@@ -1928,7 +1931,7 @@ fun DogecoinWalletSheet(
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 txRows.take(DOGECOIN_ACTIVITY_FULL_LIMIT).forEach { row ->
                                     WalletCard {
-                                        WalletTxRowView(row)
+                                        WalletTxRowView(row) { walletTxDetailId = row.txid }
                                         SelectionContainer {
                                             Text(
                                                 text = row.txid.take(10) + "…" + row.txid.takeLast(8),
@@ -3930,6 +3933,76 @@ fun DogecoinWalletSheet(
         )
     }
 
+    // Tap-a-tx detail: the live confirmation ring for one transaction (the user's "click a tx to check its
+    // status"). The row is looked up by id each recomposition so the ring climbs as the poll refreshes; if the
+    // tx vanishes (e.g. a backend/network switch) the dialog closes itself. Presentation-only.
+    val txDetailRow = walletTxDetailId?.let { id -> txRows.firstOrNull { it.txid == id } }
+    if (walletTxDetailId != null && txDetailRow == null) {
+        walletTxDetailId = null
+    }
+    if (txDetailRow != null) {
+        DogecoinWalletTheme {
+            val target = DOGECOIN_SPV_CONFIRM_TARGET
+            val confirmed = txDetailRow.confirmations >= target
+            AlertDialog(
+                onDismissRequest = { walletTxDetailId = null },
+                title = { Text(if (txDetailRow.incoming) "Incoming payment" else "Outgoing payment") },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        ConfirmationRing(
+                            mode = if (confirmed) RingMode.IDLE else RingMode.CONFIRMING,
+                            progress = if (confirmed) 1f else txDetailRow.confirmations.toFloat() / target,
+                            diameter = 150.dp,
+                            segments = target,
+                            contentDescription = if (confirmed) "Confirmed"
+                                else "${txDetailRow.confirmations} of $target confirmations"
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (confirmed) {
+                                    Text("Confirmed", style = MaterialTheme.typography.titleMedium, color = dogeWalletColors.ink)
+                                } else {
+                                    Text("Confirming", style = MaterialTheme.typography.titleMedium, color = dogeWalletColors.ink)
+                                    Text(
+                                        "${txDetailRow.confirmations} of $target",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = dogeWalletColors.muted
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = (if (txDetailRow.incoming) "+" else "−") +
+                                DogecoinAmount.formatKoinu(txDetailRow.amountKoinu) + " DOGE",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontFamily = FontFamily.Monospace,
+                            color = dogeWalletColors.ink
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = txDetailRow.txid,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = dogeWalletColors.muted
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        copy(txDetailRow.txid, context.getString(R.string.dogecoin_txid_copied))
+                    }) { Text(stringResource(R.string.dogecoin_copy_txid)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { walletTxDetailId = null }) { Text("Close") }
+                }
+            )
+        }
+    }
+
     pendingWifCopy?.let { key ->
         var wifQrRevealed by remember(key.address, key.network) { mutableStateOf(false) }
         val needsBackupAcknowledgement = key.network == DogecoinNetwork.MAINNET
@@ -4370,12 +4443,14 @@ private fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
  * the target it collapses to a gold check. Presentation-only.
  */
 @Composable
-private fun WalletTxRowView(row: WalletTxRow) {
+private fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
     val colors = dogeWalletColors
     val incomingGreen = Color(0xFF2E7D32)
     val confirmed = row.confirmations >= DOGECOIN_SPV_CONFIRM_TARGET
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
