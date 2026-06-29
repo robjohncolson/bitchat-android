@@ -10,12 +10,39 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `7c9dca3`, branch `dogecoin-m2-pay-nickname`, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (HEAD `045bcd0`, branch `dogecoin-m2-pay-nickname`, tree clean, build green)
 
 The Dogecoin wallet is feature-complete AND has a finished "Coin" UI redesign (Dieter-Rams × Dogecoin),
 all verified on-device with real money (see the **WALLET UI "COIN" REDESIGN** note + the mainnet
-**catch-up fix `09ba226`** lower down). Three small UI items shipped this session; the ONLY thing left is
-one live-send verification (below).
+**catch-up fix `09ba226`** lower down). Several small UI items shipped this session; the ONLY thing left is
+one live-send verification (the ring fill 0→6 on a real send — below).
+
+**✅ FOUR WALLET-UX FIXES — SHIPPED + ON-DEVICE VERIFIED (`045bcd0`), from on-device testnet feedback.**
+Built via two workflows (investigate→merged plan; 3-lens adversarial diff review → SHIP-WITH-NITS, **mainnet
+money-path safety PRESERVED**; 3 LOW findings folded in). All four (money path untouched — a real send moved
+coins correctly):
+1. **Confirmation ring fills 0→6 even when `synced` flaps** (was: showed "Syncing / 0 behind" instead). Focal
+   `confirming` shows when there's a pending tx AND near tip (`blocksBehind <= DOGECOIN_SPV_NEARTIP_BLOCKS=6` OR
+   synced); depth is read from our own chain head (peer-count-independent). `confirming`/`syncing` mutually
+   exclusive; status strip mirrors the ring.
+2. **Send button no longer flaps on testnet.** ROOT CAUSE (proven on-device): testnet peers hover at **2–3 < the
+   old `MIN_PEERS=4` floor** even at `behind=0`, so `synced` was stuck false → button disabled + ring masked.
+   FIX in `DogecoinSpvService`: **network-aware peer floor** `minPeersFor(net) = mainnet?4:1` (test coins carry
+   no eclipse value; thin testnet can't hold 4), used identically by the synced calc, the `broadcast()` gate, and
+   `minBroadcastConnections`; PLUS tip-freshness hysteresis (`STALE_BEHIND_BLOCKS=6`) that is **NON-MAINNET ONLY**
+   — **mainnet stays strict on BOTH axes (peers≥4, behind≤2), byte-for-byte unchanged.** PROVEN on-device: testnet
+   `synced=true` now HOLDS at peers=3 (old floor would flap it false).
+3. **Recipient history**: every successful send auto-saves the recipient (per-network, existing `upsertSavedAddress`,
+   `runCatching`-isolated, post-broadcast, never feeds signing); Send screen's saved-recipients UI is now a
+   `DropdownMenu` (pick to fill, trailing delete).
+4. **Post-send auto-return**: after a send `walletAction = NONE` (lands on the focal/balance view, inside the
+   existing relevance guards) + a new compact receipt card there (txid copy / Details / Done, with the peer-relay
+   "verify" caveat).
+**On-device state:** Pixel 3 is on **testnet, Built-in (SPV), synced, key `nnimSK…` funded ~90 TESTDOGE** (was 100,
+sent 10 to S24). S24 on mainnet. **Remaining = the live ring-fill check:** on the Pixel do a small testnet send
+(self-send to `nnimSKuWnp5Y6ZowogZtmfm1x91b8k3FQz` works), it now auto-returns to the focal view → watch the gold
+ring fill 0→6 over ~3–4 min. (Console `doge-spv-broadcast` does NOT drive the ring — it doesn't set `sentReceipt`;
+must be a UI send.)
 
 **✅ KEY-BACKUP FLOW REDESIGN — SHIPPED + ON-DEVICE VERIFIED (`7c9dca3`).** The "! Back up your key" chip
 used to dump you into the FULL Settings menu (hunt among many options), and the only way to RECORD a backup
