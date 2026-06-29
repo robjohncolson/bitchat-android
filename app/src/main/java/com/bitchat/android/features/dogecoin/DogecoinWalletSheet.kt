@@ -267,7 +267,6 @@ fun DogecoinWalletSheet(
     var paymentRequestLabel by remember { mutableStateOf<String?>(null) }
     var paymentRequestMessage by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
-    var calculatingMaxSend by remember { mutableStateOf(false) }
     var exportingRawTransaction by remember { mutableStateOf(false) }
     var scanningPaymentQr by remember { mutableStateOf(false) }
     var scanningWifQr by remember { mutableStateOf(false) }
@@ -359,7 +358,6 @@ fun DogecoinWalletSheet(
         mainnetBroadcastAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
-        calculatingMaxSend = false
         exportingRawTransaction = false
         pendingWatchImportAction = null
     }
@@ -452,7 +450,6 @@ fun DogecoinWalletSheet(
         paymentRequestLabel = null
         paymentRequestMessage = null
         sending = false
-        calculatingMaxSend = false
         exportingRawTransaction = false
         scanningPaymentQr = false
         scanningWifQr = false
@@ -490,7 +487,6 @@ fun DogecoinWalletSheet(
         paymentRequestLabel = null
         paymentRequestMessage = null
         sending = false
-        calculatingMaxSend = false
         exportingRawTransaction = false
         scanningPaymentQr = false
         scanningWifQr = false
@@ -847,87 +843,6 @@ fun DogecoinWalletSheet(
                 rpcConfigRevision == configRevision
             ) {
                 sending = false
-            }
-        }
-    }
-
-    fun useMaxSendAmount(allowWatchImport: Boolean = false) {
-        val feeRate = sendFeeRate.trim()
-        sendError = null
-        sentReceipt = null
-
-        if (!isValidSelectedFeeRate(feeRate)) {
-            sendError = context.getString(
-                R.string.dogecoin_send_invalid_fee_rate,
-                DogecoinAmount.formatKoinu(minimumSendFeePerKbKoinu)
-            )
-            return
-        }
-        if (shouldConfirmImportingRefresh && !allowWatchImport) {
-            pendingWatchImportAction = DogecoinWatchImportAction.USE_MAX_SEND
-            return
-        }
-
-        calculatingMaxSend = true
-        val network = selectedNetwork
-        val wallet = snapshot.key
-        val config = currentRpcConfig()
-        val configRevision = rpcConfigRevision
-        val feePerKbKoinu = DogecoinAmount.toKoinu(feeRate)
-        val minimumOutputKoinu = minimumSendOutputKoinu
-        repository.saveRpcConfig(network, config)
-        coroutineScope.launch {
-            runCatching {
-                val utxos = walletReadSource(config).listUnspent(wallet.address, network)
-                refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
-                DogecoinTransactionBuilder.maxSpendable(
-                    wallet = wallet,
-                    utxos = utxos,
-                    network = network,
-                    feePerKbKoinu = feePerKbKoinu,
-                    minimumOutputKoinu = minimumOutputKoinu
-                )
-            }.onSuccess { maxSpend ->
-                if (
-                    selectedNetwork == network &&
-                    snapshot.key.address == wallet.address &&
-                    rpcConfigRevision == configRevision
-                ) {
-                    if (maxSpend.amountKoinu < minimumOutputKoinu) {
-                        sendError = context.getString(
-                            R.string.dogecoin_send_amount_too_small,
-                            DogecoinAmount.formatKoinu(minimumOutputKoinu)
-                        )
-                    } else {
-                        sendAmount = DogecoinAmount.formatKoinu(maxSpend.amountKoinu)
-                        paymentRequestLabel = null
-                        paymentRequestMessage = null
-                        pendingTransaction = null
-                        mainnetBroadcastAcknowledged = false
-                        highFeeAcknowledged = false
-                        policyUnavailableAcknowledged = false
-                        Toast.makeText(
-                            context,
-                            context.getString(R.string.dogecoin_send_max_loaded),
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            }.onFailure {
-                if (
-                    selectedNetwork == network &&
-                    snapshot.key.address == wallet.address &&
-                    rpcConfigRevision == configRevision
-                ) {
-                    sendError = it.message ?: context.getString(R.string.dogecoin_send_max_failed)
-                }
-            }
-            if (
-                selectedNetwork == network &&
-                snapshot.key.address == wallet.address &&
-                rpcConfigRevision == configRevision
-            ) {
-                calculatingMaxSend = false
             }
         }
     }
@@ -2942,21 +2857,6 @@ fun DogecoinWalletSheet(
                                 lineHeight = 18.sp
                             )
                         }
-                        OutlinedButton(
-                            onClick = { useMaxSendAmount() },
-                            enabled = !calculatingMaxSend && !sending && !rescanning && nodeReady,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                if (calculatingMaxSend) {
-                                    stringResource(R.string.dogecoin_send_max_working)
-                                } else {
-                                    stringResource(R.string.dogecoin_send_use_max)
-                                }
-                            )
-                        }
                         Text(
                             text = stringResource(R.string.dogecoin_send_hint),
                             style = MaterialTheme.typography.bodySmall,
@@ -4197,7 +4097,7 @@ fun DogecoinWalletSheet(
     pendingWatchImportAction?.let { action ->
         AlertDialog(
             onDismissRequest = {
-                if (!refreshingBalance && !sending && !calculatingMaxSend) {
+                if (!refreshingBalance && !sending) {
                     pendingWatchImportAction = null
                 }
             },
@@ -4221,10 +4121,9 @@ fun DogecoinWalletSheet(
                         when (action) {
                             DogecoinWatchImportAction.REFRESH_BALANCE -> refreshWalletBalance()
                             DogecoinWatchImportAction.REVIEW_SEND -> reviewSend(allowWatchImport = true)
-                            DogecoinWatchImportAction.USE_MAX_SEND -> useMaxSendAmount(allowWatchImport = true)
                         }
                     },
-                    enabled = !refreshingBalance && !sending && !calculatingMaxSend
+                    enabled = !refreshingBalance && !sending
                 ) {
                     Text(
                         stringResource(
@@ -4233,8 +4132,6 @@ fun DogecoinWalletSheet(
                                     R.string.dogecoin_confirm_refresh_before_rescan_action
                                 DogecoinWatchImportAction.REVIEW_SEND ->
                                     R.string.dogecoin_confirm_review_before_rescan_action
-                                DogecoinWatchImportAction.USE_MAX_SEND ->
-                                    R.string.dogecoin_confirm_use_max_before_rescan_action
                             }
                         )
                     )
@@ -4243,7 +4140,7 @@ fun DogecoinWalletSheet(
             dismissButton = {
                 TextButton(
                     onClick = { pendingWatchImportAction = null },
-                    enabled = !refreshingBalance && !sending && !calculatingMaxSend
+                    enabled = !refreshingBalance && !sending
                 ) {
                     Text(stringResource(R.string.cancel))
                 }
@@ -4970,8 +4867,7 @@ private data class DogecoinBroadcastReceipt(
 
 private enum class DogecoinWatchImportAction {
     REFRESH_BALANCE,
-    REVIEW_SEND,
-    USE_MAX_SEND
+    REVIEW_SEND
 }
 
 private enum class DogecoinRawTransactionExportAction {
