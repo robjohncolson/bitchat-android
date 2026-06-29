@@ -10,12 +10,40 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `045bcd0`, branch `dogecoin-m2-pay-nickname`, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (HEAD `25120bd`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
 
-The Dogecoin wallet is feature-complete AND has a finished "Coin" UI redesign (Dieter-Rams × Dogecoin),
-all verified on-device with real money (see the **WALLET UI "COIN" REDESIGN** note + the mainnet
-**catch-up fix `09ba226`** lower down). Several small UI items shipped this session; the ONLY thing left is
-one live-send verification (the ring fill 0→6 on a real send — below).
+The Dogecoin wallet is feature-complete with a finished "Coin" UI redesign (Dieter-Rams × Dogecoin), all
+verified on-device with real money. **Both of the previously-open verifications are now DONE on-device:**
+the **0→6 confirmation ring fill on a real send** (user watched it fill) and a **live SPV send OVER TOR**
+(user confirmed sending DOGE with Tor ON; balance reflected). There is no known open verification item.
+
+**✅ NETWORK-COLOURED DOGE MARK + PENDING/INCOMING CONFIRMATION LIST — SHIPPED + ON-DEVICE VERIFIED (`25120bd`,
+pushed).** From on-device feedback (the active network was an easy-to-miss text label — a "mini heart attack"
+risk of confusing testnet for mainnet — and the 0→6 ring existed ONLY for the last thing you sent, with
+nothing for pending or incoming txs). Presentation-only — **no money-path edits** (canary tests + `assembleDebug`
+green; design decisions taken via AskUserQuestion):
+1. **Network Doge mark** in the header, network-coloured: **mainnet = full-colour Shiba** (real money,
+   `colorFilter = null`); **testnet = a 50% green WASH** over the art; **regtest = 50% blue**. The wash is a
+   translucent tint Image stacked OVER the full-colour one (keeps the Doge's facial detail) — NOT a flat
+   `ColorFilter.tint(SrcIn)` silhouette (the first attempt; user asked for a wash). Network label now bold +
+   colour-matched (`netColor`). Tune via `alpha = 0.5f` if it reads too strong/weak.
+2. **`DogecoinSpvService.snapshotTransactions(network)`** — READ-ONLY enumeration of ALL wallet txs (sent AND
+   received) via `getTransactions(false)` + `getValueSentToMe/FromMe` + `confidence.depthInBlocks`. Incoming txs
+   are bloom-matched automatically, so the **RECEIVING phone sees an inbound payment confirm with zero extra
+   plumbing**. Never feeds signing/broadcast (new `DogecoinSpvTx` data class).
+3. **Pending cards** under the balance (focal NONE view, `item(key="pending")`): each in-flight tx (sent or
+   received, conf < target) shows the SAME `ConfirmationRing` as a small 0→6 indicator. **Verified live: mini-ring
+   filled 2/6 → 4/6 on-device.**
+4. **"View all activity"** → new `DogeWalletAction.ACTIVITY` view-state listing full history (sent + received,
+   pending + confirmed, copy-txid). RPC backend reuses `getWalletActivity`; SPV uses the snapshot. Backend-agnostic
+   `WalletTxRow` + `WalletTxRowView` helper. New asset `app/src/main/res/drawable-nodpi/doge_coin.png` (downscaled
+   from the user's DOGE6.png, committed WITH the code).
+**Verified on Pixel 3 + S24 (testnet/SPV/Tor on):** green-washed Doge + bold green TESTNET render; pending card
+mini-ring filled live; activity list shows incoming (+10/+100) and outgoing (−10.01) with confirmation status.
+Constants: `DOGECOIN_PENDING_CARDS_LIMIT=4`, `DOGECOIN_ACTIVITY_FULL_LIMIT=50`. **No open follow-ups; optional
+polish only (alpha tuning, tap-a-history-row-to-focal-ring if ever wanted).**
+
+### Historical (pre-`25120bd`) — the four UX fixes + the now-CLOSED ring-fill item
 
 **✅ FOUR WALLET-UX FIXES — SHIPPED + ON-DEVICE VERIFIED (`045bcd0`), from on-device testnet feedback.**
 Built via two workflows (investigate→merged plan; 3-lens adversarial diff review → SHIP-WITH-NITS, **mainnet
