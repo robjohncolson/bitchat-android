@@ -65,10 +65,17 @@ class ChatViewModel(
         private const val EXPLORER_POLL_INTERVAL_MS = 4_000L
         private const val EXPLORER_POLL_TOTAL_BUDGET_MS = 14_000L
 
-        // Bound for warming up a Noise session with a connected, session-less helper before a peer broadcast,
+        // Bounds for warming up a Noise session with a connected, session-less helper before a peer broadcast,
         // so the relay can ride BLE instead of falling back to Nostr. Returns early once sessions establish;
-        // only incurred when such a helper is connected. See docs/dogecoin-offline-mesh-relay-findings.md.
-        private const val PEER_BROADCAST_SESSION_WARMUP_MS = 3_500L
+        // only incurred when such a helper is connected. The BLE handshake can take ~30s on a flaky link, so the
+        // send-time window is a compromise (long enough for a near-ready session, short enough not to strand an
+        // ONLINE sender from the fast Nostr path), while the PREWARM window (fired in the background when the
+        // wallet opens) is long enough to fully complete the handshake before the user sends. A single handshake
+        // packet can be dropped, so we RE-INITIATE periodically within the window rather than trying once.
+        // See docs/dogecoin-offline-mesh-relay-findings.md.
+        private const val PEER_BROADCAST_SESSION_WARMUP_MS = 8_000L
+        private const val PEER_BROADCAST_SESSION_PREWARM_MS = 30_000L
+        private const val PEER_BROADCAST_SESSION_REINITIATE_MS = 4_000L
     }
 
     fun sendVoiceNote(toPeerIDOrNull: String?, channelOrNull: String?, filePath: String) {
@@ -1793,7 +1800,9 @@ class ChatViewModel(
      * connected. See docs/dogecoin-offline-mesh-relay-findings.md.
      */
     fun prewarmBroadcastHelperSessions() {
-        viewModelScope.launch { runCatching { warmUpMeshHelperSessions(currentDogecoinNetwork()) } }
+        viewModelScope.launch {
+            runCatching { warmUpMeshHelperSessions(currentDogecoinNetwork(), PEER_BROADCAST_SESSION_PREWARM_MS) }
+        }
     }
 
     /**
@@ -1805,16 +1814,28 @@ class ChatViewModel(
      * early once they establish; only incurred when such a peer is connected. Transport-only — no effect on tx
      * build/sign or corroboration-by-Noise-key. See docs/dogecoin-offline-mesh-relay-findings.md.
      */
-    private suspend fun warmUpMeshHelperSessions(network: DogecoinNetwork) {
-        val sessionLess = state.getConnectedPeersValue().filter { peerID ->
+    private suspend fun warmUpMeshHelperSessions(
+        network: DogecoinNetwork,
+        timeoutMs: Long = PEER_BROADCAST_SESSION_WARMUP_MS
+    ) {
+        val candidates = state.getConnectedPeersValue().filter { peerID ->
             peerID != mesh.myPeerID &&
                 !mesh.hasEstablishedSession(peerID) &&
                 isPotentialMeshHelper(peerID, network)
         }
-        if (sessionLess.isEmpty()) return
-        sessionLess.forEach { peerID -> runCatching { mesh.initiateNoiseHandshake(peerID) } }
-        val deadline = System.currentTimeMillis() + PEER_BROADCAST_SESSION_WARMUP_MS
-        while (System.currentTimeMillis() < deadline && sessionLess.any { !mesh.hasEstablishedSession(it) }) {
+        if (candidates.isEmpty()) return
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var lastInitiate = 0L
+        while (System.currentTimeMillis() < deadline && candidates.any { !mesh.hasEstablishedSession(it) }) {
+            val now = System.currentTimeMillis()
+            // (Re)initiate for every peer still without a session. The first handshake packet can be dropped on a
+            // flaky BLE link, so retry periodically within the window instead of relying on a single attempt;
+            // initiating again on an in-progress/established session is a harmless no-op.
+            if (now - lastInitiate >= PEER_BROADCAST_SESSION_REINITIATE_MS) {
+                candidates.filter { !mesh.hasEstablishedSession(it) }
+                    .forEach { peerID -> runCatching { mesh.initiateNoiseHandshake(peerID) } }
+                lastInitiate = now
+            }
             kotlinx.coroutines.delay(150)
         }
     }
