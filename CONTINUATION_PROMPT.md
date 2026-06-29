@@ -10,7 +10,18 @@ Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomo
 relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
 focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `25120bd`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (HEAD `3216c3c`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+
+**✅ TAP-A-TX → LIVE CONFIRMATION-DETAIL DIALOG — SHIPPED + ON-DEVICE VERIFIED (`3216c3c`, pushed).** Completes
+the user's original "click a transaction to check its confirmation status" intent (the prior commit only showed
+status inline). Pending cards AND activity rows are now tappable → an AlertDialog (wrapped in `DogecoinWalletTheme`)
+with the BIG `ConfirmationRing` for that one tx: CONFIRMING "N of 6" while pending, full gold ring + "Confirmed"
+at the target; plus full amount, full selectable txid, Copy. State `walletTxDetailId` (by txid, so the ring climbs
+as the 15s poll refreshes; auto-closes if the tx vanishes on a backend/network switch). `WalletTxRowView` gained
+an optional `onClick`. Presentation-only — no money-path edits; canary tests + assemble green. **Verified on Pixel 3
+(testnet): tapped a confirmed −10.01 send → "Outgoing payment / Confirmed" dialog with the gold ring + full txid.**
+
+
 
 The Dogecoin wallet is feature-complete with a finished "Coin" UI redesign (Dieter-Rams × Dogecoin), all
 verified on-device with real money. **Both of the previously-open verifications are now DONE on-device:**
