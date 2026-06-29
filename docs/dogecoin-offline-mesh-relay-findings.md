@@ -304,3 +304,25 @@ has the tx (`dogecoin-cli -testnet getrawtransaction <txid>`). **FALL-BACK seen 
 (step 3 lied or regressed) — that path still relays the tx but over the internet, so it does NOT prove air-gapped BLE.
 
 **Restore after:** `"$ADB" -s $S24 shell cmd connectivity airplane-mode disable`; `sj $PIX "doge-helper-enable 0"`.
+
+---
+
+## ✅ PROVEN ON HARDWARE (2026-06-28, build `1f5e301`)
+
+Air-gapped Bluetooth-only relay finally completed end-to-end after the warm-up hardening (`1f5e301`):
+re-initiate the Noise handshake every 4s within the window + a 30s background prewarm on wallet-open.
+
+- **Roles:** S24 = sender (airplane mode, BT on); Pixel = online helper, local testnet node via
+  `adb reverse tcp:44555` (`doge-rpc-show ready=true canBroadcast=true`), `doge-helper-enable 1`. Mutual favorites.
+- **Session bootstrap that worked:** restart BOTH apps → BLE mesh (`peers=1`, `session=false`) → **open the Dogecoin
+  wallet on the sender** → the prewarm establishes the Noise session in **<5s** (`session=true`). NOTE: `sendfav`
+  while both were online went over **Nostr** and did NOT trigger a BLE handshake — the wallet-open prewarm explicitly
+  calls `initiateNoiseHandshake` over mesh, so prefer it to bootstrap the session for this test.
+- **Going offline:** `cmd connectivity airplane-mode enable` then `svc bluetooth enable` → mesh + session SURVIVE
+  (`peers=1, session=true`, `airplane_mode_on=1`). (`svc wifi disable` would kill BLE — use airplane+BT.)
+- **Send (sender, offline):** `doge-spv-peer-broadcast nUEBj7WiYKU1HV1Edn6JC9WLBSUnMttB67 5` →
+  `txid=3dd4107c2e77f7492e220ff3c64c8ffee1204922fd0bb7e5e2242e7f095f3c45`, `Routing payment-broadcast REQUEST via
+  mesh`, `📤 Sent … (306 bytes)` (single packet), Pixel `💸 request received (306 bytes)` → node broadcast →
+  `Routing RESULT via mesh` → S24 `TERMINAL=Claimed`. Node `getmempoolentry` accepted it (size 225, fee 0.01),
+  spending UTXO `42aebf11…`. No internet on the sender at any point.
+- **Restore:** S24 airplane OFF, Pixel `doge-helper-enable 0`, `adb reverse --remove tcp:44555`.

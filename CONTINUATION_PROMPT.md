@@ -22,8 +22,22 @@ focused Gradle + on-device checks. **Money path + signed mesh protocol — revie
   Nostr because the send-time warm-up waited only 3.5s (BLE handshake ~30s) and initiated the handshake ONCE (a
   dropped packet never retried). Now: RE-INITIATES every 4s within the window for still-session-less peers; the
   background prewarm (on wallet open) gets a 30s window so the handshake completes before the user sends; send-time
-  window bumped 3.5s→8s. Transport-only (no money path). Build + canary tests green. **A full air-gapped two-phone
-  relay re-test is env-dependent (see `docs/dogecoin-offline-mesh-relay-findings.md`) and still UNVERIFIED on hardware.**
+  window bumped 3.5s→8s. Transport-only (no money path). Build + canary tests green.
+
+**✅✅ AIR-GAPPED OFFLINE BLUETOOTH-ONLY RELAY — NOW PROVEN ON HARDWARE (2026-06-28, the long-standing open item).**
+Two phones, debug build `1f5e301`. S24 = sender in **airplane mode (BT on)**; Pixel = online helper with the local
+testnet node (RPC over `adb reverse tcp:44555`, `doge-rpc-show ready=true canBroadcast=true`), `doge-helper-enable 1`;
+mutual favorites both ways. Sequence: restart BOTH apps → they BLE-mesh (`peers=1`, `session=false`) → **opening the
+Dogecoin wallet on the S24 fired the new prewarm and established the Noise session in <5s** (`session=true`; the
+earlier `sendfav` had gone over Nostr — the wallet-open prewarm explicitly initiates over mesh, which is exactly the
+hardened path) → S24 → **airplane ON + BT on**, mesh + session SURVIVED (`peers=1, session=true`, `airplane_mode_on=1`)
+→ `doge-spv-peer-broadcast nUEBj7WiYKU1HV1Edn6JC9WLBSUnMttB67 5`. Result: S24 built+signed OFFLINE
+(`txid=3dd4107c2e77f7492e220ff3c64c8ffee1204922fd0bb7e5e2242e7f095f3c45`), `MessageRouter: Routing payment-broadcast
+REQUEST via mesh` + `📤 Sent … (306 bytes)` (single packet, no fragmentation), Pixel `💸 request received (306 bytes)`
+→ broadcast to node → `Routing RESULT via mesh` + `📤 Sent result (102 bytes)`, S24 `TERMINAL=Claimed`. **Node confirms:
+`getmempoolentry` accepted the tx (size 225, fee 0.01), spending the S24's UTXO `42aebf11…`.** No internet on the
+sender at any point. (Restored after: S24 airplane OFF, Pixel `doge-helper-enable 0`, tunnel removed.) Recipe + earlier
+failure analysis in `docs/dogecoin-offline-mesh-relay-findings.md`.
 
 **✅ TAP-A-TX → LIVE CONFIRMATION-DETAIL DIALOG — SHIPPED + ON-DEVICE VERIFIED (`3216c3c`, pushed).** Completes
 the user's original "click a transaction to check its confirmation status" intent (the prior commit only showed
