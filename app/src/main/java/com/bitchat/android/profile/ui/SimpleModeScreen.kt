@@ -363,9 +363,18 @@ private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: 
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
                 )
             }
+            Text(
+                text = remember(message.timestamp) { formatBubbleTime(message.timestamp) },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+            )
         }
     }
 }
+
+private fun formatBubbleTime(date: java.util.Date): String =
+    java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(date)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
