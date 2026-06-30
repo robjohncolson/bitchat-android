@@ -195,7 +195,7 @@ class ChatViewModel(
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | profile [show|power|simple [geohash]|pick]"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple [geohash]|pick]"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -714,6 +714,41 @@ class ChatViewModel(
             }
             "nostr-connect" -> { viewModelScope.launch { com.bitchat.android.nostr.NostrRelayManager.shared.connect() }; "nostr connect requested" }
             "nostr-disconnect" -> { com.bitchat.android.nostr.NostrRelayManager.shared.disconnect(); "nostr disconnected" }
+            "myqr" -> {
+                val url = buildMyQRString(state.nickname.value, getCurrentNpub())
+                // Also emit a base64 form so it can be copied between phones over adb without escaping the
+                // '&' in the query string (and as a paste-friendly fallback before the QR-scan UI exists).
+                val b64 = android.util.Base64.encodeToString(
+                    url.toByteArray(Charsets.UTF_8),
+                    android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING
+                )
+                "$url\nqrb64=$b64"
+            }
+            "provision" -> {
+                // Family provisioning: the OTHER phone's `myqr`, as either the raw bitchat:// URL or its
+                // base64 (qrb64=) form. Adds them as a mutual favorite so a private Nostr DM works at once.
+                // (args is already the tokens AFTER the command, so the value is args[0].)
+                val arg = args.firstOrNull()
+                val url = when {
+                    arg == null -> null
+                    arg.startsWith("bitchat://") -> arg
+                    else -> runCatching {
+                        String(android.util.Base64.decode(arg, android.util.Base64.URL_SAFE), Charsets.UTF_8)
+                    }.getOrNull()
+                }
+                if (url == null) "usage: provision <bitchat://verify?...|base64>  (the other phone's `myqr`)"
+                else {
+                    // Skip the freshness window — a stable identity QR is fine to provision from later; the
+                    // Ed25519 signature still authenticates it.
+                    val qr = com.bitchat.android.services.VerificationService.verifyScannedQR(url, maxAgeSeconds = Long.MAX_VALUE)
+                    when {
+                        qr == null -> "provision: invalid or unsigned QR"
+                        com.bitchat.android.profile.FamilyProvisioning.provisionFamilyContact(qr) ->
+                            "provision: added '${qr.nickname}' as MUTUAL favorite (noise=${qr.noiseKeyHex.take(16)}… npub=${qr.npub?.take(14) ?: "none"})"
+                        else -> "provision: failed to decode noise key"
+                    }
+                }
+            }
             "profile" -> {
                 when (args.firstOrNull()?.lowercase()) {
                     null, "show" -> "profile=${com.bitchat.android.profile.ProfilePreferenceManager.get(getApplication())} " +
