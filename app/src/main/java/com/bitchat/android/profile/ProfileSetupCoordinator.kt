@@ -47,13 +47,18 @@ object ProfileSetupCoordinator {
     ) {
         ProfilePreferenceManager.set(application, profile)
         if (profile == AppProfile.SIMPLE) {
-            // Reliability over anonymity: clearnet Nostr by default.
+            // Apply the instant, load-bearing settings FIRST so they take effect immediately and are
+            // never delayed — or stranded — by the slow live Tor teardown below (which can suspend for
+            // tens of seconds while the network resets).
+            // Reliability over anonymity: clearnet Nostr by default (pref takes effect on next connect).
             TorPreferenceManager.set(application, TorMode.OFF)
-            runCatching { ArtiTorManager.getInstance().applyMode(application, TorMode.OFF) }
             // Never silently drop a peer's geohash messages on a PoW mismatch.
             PoWPreferenceManager.setPowEnabled(false)
             // Pin the shared family room, if one was provided.
             roomGeohash?.let { pinRoom(application, it, roomLevel) }
+            // Tear down live Tor connections LAST — slow / may suspend a while; doing it after the prefs
+            // above guarantees a sluggish or stuck teardown can't block them from applying.
+            runCatching { ArtiTorManager.getInstance().applyMode(application, TorMode.OFF) }
         }
     }
 
