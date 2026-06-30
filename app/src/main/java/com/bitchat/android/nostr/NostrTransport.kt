@@ -474,7 +474,54 @@ class NostrTransport(
             }
         }
     }
-    
+
+    /**
+     * Send an E2E "family group" message: N NIP-17 1:1 gift wraps (one per member INCLUDING a self-copy)
+     * that all carry the same [groupId] + member set sealed inside the rumor (never in the public wrap), so
+     * every member's existing account-DM subscription threads them under `nostr_grp_<groupId>`. No new
+     * crypto, no new relay subscription, forward secrecy preserved (each wrap mints its own ephemeral key).
+     * The embedded `bitchat1:` PM is built ONCE so [messageID] is identical across all wraps (dedup-stable).
+     * Uses the ACCOUNT identity — the same one the global account-DM subscription listens on.
+     */
+    fun sendGroupMessage(
+        groupId: String,
+        memberPubkeysHex: List<String>,
+        content: String,
+        messageID: String,
+        subject: String? = null
+    ) {
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: run {
+            Log.e(TAG, "sendGroupMessage: no account identity")
+            return
+        }
+        val members = (memberPubkeysHex + identity.publicKeyHex).map { it.lowercase() }.distinct()
+        transportScope.launch {
+            try {
+                val embedded = NostrEmbeddedBitChat.encodePMForNostrNoRecipient(
+                    content = content,
+                    messageID = messageID,
+                    senderPeerID = senderPeerID
+                ) ?: run {
+                    Log.e(TAG, "sendGroupMessage: failed to embed group PM packet")
+                    return@launch
+                }
+                // Sealed-inside-the-rumor group metadata: groupId + (optional) subject + the member set.
+                val groupTags = listOf(listOf("bg", groupId)) +
+                    (subject?.takeIf { it.isNotBlank() }?.let { listOf(listOf("subject", it)) } ?: emptyList()) +
+                    members.map { listOf("p", it) }
+                members.forEach { hex ->
+                    NostrProtocol.createPrivateMessage(embedded, hex, identity, groupTags).forEach { event ->
+                        NostrRelayManager.registerPendingGiftWrap(event.id)
+                        NostrRelayManager.getInstance(context).sendEvent(event)
+                    }
+                }
+                Log.d(TAG, "sendGroupMessage: group=${groupId.take(8)}… members=${members.size} mid=${messageID.take(8)}…")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send group message: ${e.message}")
+            }
+        }
+    }
+
     // MARK: - Broadcast-over-mesh (Milestone 3b.1) Nostr fallback
 
     /**

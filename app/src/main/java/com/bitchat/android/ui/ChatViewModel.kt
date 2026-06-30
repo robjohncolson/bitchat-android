@@ -195,7 +195,7 @@ class ChatViewModel(
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple [geohash]|pick]"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple [geohash]|pick] | nostr-id | group-send <hex1,hex2,...> <msg> | group-show"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -275,6 +275,36 @@ class ChatViewModel(
             "nostr" -> {
                 val relays = com.bitchat.android.nostr.NostrRelayManager.shared.relays.value
                 "nostr " + relays.joinToString(" ") { "${it.url.substringAfter("://")}=${if (it.isConnected) "UP" else "down"}" }
+            }
+            "nostr-id" -> {
+                val id = com.bitchat.android.nostr.NostrIdentityBridge.getCurrentNostrIdentity(getApplication())
+                if (id == null) "no nostr identity" else "nostr-id pubkeyHex=${id.publicKeyHex} npub=${id.npub}"
+            }
+            "group-send" -> {
+                // E2E family-group transport test (Increment 1): group-send <hex1,hex2,...> <message...>
+                val membersArg = args.getOrNull(0)
+                val msg = args.drop(1).joinToString(" ")
+                val members = membersArg?.split(",")
+                    ?.map { it.trim().lowercase() }
+                    ?.filter { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+                    ?: emptyList()
+                if (members.isEmpty() || msg.isBlank()) "usage: group-send <hex1,hex2,...> <message>" else {
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        val convKey = startNostrGroup(members, null)
+                        sendMessage(msg)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "group-send convKey=$convKey members=${members.size + 1}")
+                    }
+                    "group-send launched (watch DbgConsole / group-show)"
+                }
+            }
+            "group-show" -> {
+                val groups = state.getPrivateChatsValue().filterKeys { it.startsWith("nostr_grp_") }
+                if (groups.isEmpty()) "no group conversations" else buildString {
+                    groups.forEach { (k, msgs) ->
+                        appendLine("group $k count=${msgs.size}")
+                        msgs.takeLast(10).forEach { m -> appendLine("  [${m.sender}] ${m.content}") }
+                    }
+                }
             }
             "tor" -> {
                 val s = com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value
@@ -2118,6 +2148,30 @@ class ChatViewModel(
             showPrivateChatSheet(convKey)
         }
     }
+
+    /**
+     * Create (or re-open) an E2E "family group" conversation for [memberPubkeysHex] (account pubkey hexes)
+     * and make it the active private chat so a send fans out to the whole set. The groupId is DETERMINISTIC —
+     * sha256 of the sorted member set (incl. self) — so every member derives the identical thread with no
+     * setup round-trip. Returns the conversation key ("nostr_grp_<id>"). (Increment 1: console-driven only;
+     * the transitive mutual-favorite trust gate + family UI land in Increment 2.)
+     */
+    fun startNostrGroup(memberPubkeysHex: List<String>, subject: String?): String {
+        val myHex = com.bitchat.android.nostr.NostrIdentityBridge
+            .getCurrentNostrIdentity(getApplication())?.publicKeyHex?.lowercase()
+        val members = (memberPubkeysHex.map { it.lowercase() } + listOfNotNull(myHex)).distinct().sorted()
+        val groupId = groupIdFor(members)
+        val convKey = "nostr_grp_$groupId"
+        com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
+        startPrivateChat(convKey)
+        return convKey
+    }
+
+    private fun groupIdFor(sortedMemberHexes: List<String>): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(sortedMemberHexes.joinToString(",").toByteArray())
+            .joinToString("") { "%02x".format(it) }
+            .take(16)
 
     fun startGeohashDMByNickname(nickname: String) {
         geohashViewModel.startGeohashDMByNickname(nickname) { convKey ->

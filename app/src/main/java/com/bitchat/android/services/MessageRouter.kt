@@ -56,6 +56,14 @@ class MessageRouter private constructor(
     }
 
     fun sendPrivate(content: String, toPeerID: String, recipientNickname: String, messageID: String) {
+        // Group conversation (nostr_grp_<id>): fan the reply out to the whole member set over Nostr. Checked
+        // BEFORE the geohash-alias branch because group keys are deliberately NOT in GeohashAliasRegistry
+        // (otherwise a group send would fall through to single-recipient routing and be queued forever).
+        com.bitchat.android.nostr.NostrGroupRegistry.get(toPeerID)?.let { g ->
+            Log.d(TAG, "Routing PM to GROUP ${toPeerID.take(20)}… members=${g.members.size} id=${messageID.take(8)}…")
+            nostr.sendGroupMessage(g.groupId, g.members, content, messageID, g.subject)
+            return
+        }
         // First: if this is a geohash DM alias (nostr_<pub16>), route via Nostr using global registry
         if (com.bitchat.android.nostr.GeohashAliasRegistry.contains(toPeerID)) {
             Log.d(TAG, "Routing PM via Nostr (geohash) to alias ${toPeerID.take(12)}… id=${messageID.take(8)}…")

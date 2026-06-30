@@ -56,13 +56,14 @@ class NostrDirectMessageHandler(
                 val messageAge = System.currentTimeMillis() / 1000 - giftWrap.createdAt
                 if (messageAge > 173700) return@launch // 48 hours + 15 mins
 
-                val decryptResult = NostrProtocol.decryptPrivateMessage(giftWrap, identity)
-                if (decryptResult == null) {
+                val rumor = NostrProtocol.decryptPrivateMessageRumor(giftWrap, identity)
+                if (rumor == null) {
                     Log.w(TAG, "Failed to decrypt Nostr message")
                     return@launch
                 }
 
-                val (content, senderPubkey, rumorTimestamp) = decryptResult
+                val content = rumor.content
+                val senderPubkey = rumor.pubkey
 
                 // If sender is blocked for geohash contexts, drop any events from this pubkey
                 // Applies to both geohash DMs (geohash != "") and account DMs (geohash == "")
@@ -77,9 +78,25 @@ class NostrDirectMessageHandler(
 
                 val noisePayload = NoisePayload.decode(packet.payload) ?: return@launch
                 val messageTimestamp = Date(giftWrap.createdAt * 1000L)
-                val convKey = "nostr_${senderPubkey.take(16)}"
-                repo.putNostrKeyMapping(convKey, senderPubkey)
-                com.bitchat.android.nostr.GeohashAliasRegistry.put(convKey, senderPubkey)
+
+                // E2E "family group": a rumor carrying a sealed `bg` group tag threads under ONE shared group
+                // key for all members, instead of the per-sender 1:1 alias. A rumor with NO `bg` tag is the
+                // exact existing 1:1 path (additive, zero regression).
+                // NOTE (Increment 1): there is NO trust gate yet — group routing is reachable only via the
+                // debug console for the two-phone transport test. Increment 2 adds the mutual-favorite
+                // transitive gate BEFORE any family-facing UI surfaces group conversations.
+                val groupId = rumor.tags.firstOrNull { it.size >= 2 && it[0] == "bg" }?.get(1)
+                val convKey: String
+                if (groupId != null) {
+                    convKey = "nostr_grp_$groupId"
+                    val members = rumor.tags.filter { it.size >= 2 && it[0] == "p" }.map { it[1].lowercase() }.distinct()
+                    val subject = rumor.tags.firstOrNull { it.size >= 2 && it[0] == "subject" }?.get(1)
+                    com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
+                } else {
+                    convKey = "nostr_${senderPubkey.take(16)}"
+                    repo.putNostrKeyMapping(convKey, senderPubkey)
+                    com.bitchat.android.nostr.GeohashAliasRegistry.put(convKey, senderPubkey)
+                }
                 if (geohash.isNotEmpty()) {
                     // Remember which geohash this conversation belongs to so we can subscribe on-demand
                     repo.setConversationGeohash(convKey, geohash)

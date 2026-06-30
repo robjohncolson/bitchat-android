@@ -22,16 +22,19 @@ object NostrProtocol {
     fun createPrivateMessage(
         content: String,
         recipientPubkey: String,
-        senderIdentity: NostrIdentity
+        senderIdentity: NostrIdentity,
+        additionalRumorTags: List<List<String>> = emptyList()
     ): List<NostrEvent> {
         Log.d(TAG, "Creating private message for recipient: ${recipientPubkey.take(16)}...")
-        
-        // 1. Create the rumor (unsigned kind 14) with p-tag
+
+        // 1. Create the rumor (unsigned kind 14) with p-tag. [additionalRumorTags] (default empty -> 1:1 DM
+        //    unchanged) are sealed INSIDE the kind-14 rumor — never in the public kind-1059 gift wrap — so a
+        //    group's id + member set stay private to the recipients (see NostrTransport.sendGroupMessage).
         val rumorBase = NostrEvent(
             pubkey = senderIdentity.publicKeyHex,
             createdAt = (System.currentTimeMillis() / 1000).toInt(),
             kind = NostrKind.DIRECT_MESSAGE,
-            tags = listOf(listOf("p", recipientPubkey)),
+            tags = listOf(listOf("p", recipientPubkey)) + additionalRumorTags,
             content = content
         )
         val rumorId = rumorBase.computeEventIdHex()
@@ -55,15 +58,16 @@ object NostrProtocol {
     }
     
     /**
-     * Decrypt a received NIP-17 message
-     * Returns (content, senderPubkey, timestamp) or null if decryption fails
+     * Decrypt a received NIP-17 message to its full inner rumor (kind 14), TAGS INCLUDED. The seal-signature
+     * and seal-pubkey==rumor-pubkey authentication checks are preserved. Returns null if decryption/auth fails.
+     * (Group routing reads the sealed `bg`/member tags off this rumor; 1:1 callers use the Triple wrapper below.)
      */
-    fun decryptPrivateMessage(
+    fun decryptPrivateMessageRumor(
         giftWrap: NostrEvent,
         recipientIdentity: NostrIdentity
-    ): Triple<String, String, Int>? {
+    ): NostrEvent? {
         Log.v(TAG, "Starting decryption of gift wrap: ${giftWrap.id.take(16)}...")
-        
+
         return try {
             // 1. Unwrap the gift wrap
             val seal = unwrapGiftWrap(giftWrap, recipientIdentity.privateKeyHex)
@@ -92,13 +96,22 @@ object NostrProtocol {
             }
 
             Log.v(TAG, "Successfully opened seal")
-            
-            Triple(rumor.content, rumor.pubkey, rumor.createdAt)
+            rumor
         } catch (e: Exception) {
             Log.w(TAG, "Failed to decrypt private message: ${e.message}")
             null
         }
     }
+
+    /**
+     * Decrypt a received NIP-17 message. Returns (content, senderPubkey, timestamp) or null. Thin back-compat
+     * wrapper over [decryptPrivateMessageRumor] for callers that don't need the rumor's tags.
+     */
+    fun decryptPrivateMessage(
+        giftWrap: NostrEvent,
+        recipientIdentity: NostrIdentity
+    ): Triple<String, String, Int>? =
+        decryptPrivateMessageRumor(giftWrap, recipientIdentity)?.let { Triple(it.content, it.pubkey, it.createdAt) }
     
     /**
      * Create a geohash-scoped text note (kind 1) with optional nickname
