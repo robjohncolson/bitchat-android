@@ -206,6 +206,7 @@ class MainActivity : OrientationAwareActivity() {
         val isLocationLoading by mainViewModel.isLocationLoading.collectAsState()
         val isBatteryOptimizationLoading by mainViewModel.isBatteryOptimizationLoading.collectAsState()
         val profileChosen by com.bitchat.android.profile.ProfilePreferenceManager.profileChosenFlow.collectAsState()
+        val appProfile by com.bitchat.android.profile.ProfilePreferenceManager.profileFlow.collectAsState()
 
         DisposableEffect(context, bluetoothStatusManager) {
 
@@ -349,6 +350,9 @@ class MainActivity : OrientationAwareActivity() {
                             }
                         }
                     )
+                } else if (appProfile == com.bitchat.android.profile.AppProfile.SIMPLE) {
+                    // The friendly LINE-style "Family" surface, over the same ChatViewModel.
+                    com.bitchat.android.profile.ui.SimpleModeScreen(viewModel = chatViewModel)
                 } else {
                     ChatScreen(
                         viewModel = chatViewModel,
