@@ -195,7 +195,7 @@ class ChatViewModel(
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | profile [show|power|simple [geohash]]"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -714,6 +714,32 @@ class ChatViewModel(
             }
             "nostr-connect" -> { viewModelScope.launch { com.bitchat.android.nostr.NostrRelayManager.shared.connect() }; "nostr connect requested" }
             "nostr-disconnect" -> { com.bitchat.android.nostr.NostrRelayManager.shared.disconnect(); "nostr disconnected" }
+            "profile" -> {
+                when (args.firstOrNull()?.lowercase()) {
+                    null, "show" -> "profile=${com.bitchat.android.profile.ProfilePreferenceManager.get(getApplication())} " +
+                        "tor=${com.bitchat.android.net.TorPreferenceManager.get(getApplication())} " +
+                        "pow=${com.bitchat.android.nostr.PoWPreferenceManager.isPowEnabled()} " +
+                        "channel=${com.bitchat.android.geohash.LocationChannelManager.getInstance(getApplication()).selectedChannel.value.displayName}"
+                    "power" -> {
+                        viewModelScope.launch {
+                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                getApplication(), com.bitchat.android.profile.AppProfile.POWER
+                            )
+                        }
+                        "profile -> POWER (flag only; Tor/PoW/channel left as-is)"
+                    }
+                    "simple" -> {
+                        val gh = args.getOrNull(1)
+                        viewModelScope.launch {
+                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                getApplication(), com.bitchat.android.profile.AppProfile.SIMPLE, roomGeohash = gh
+                            )
+                        }
+                        "profile -> SIMPLE (Tor off, PoW off${if (gh != null) ", room=$gh" else ""}); watch 'profile show'"
+                    }
+                    else -> "usage: profile [show|power|simple [geohash]]"
+                }
+            }
             else -> "unknown cmd '$cmd' (try: help)"
         }
     }
