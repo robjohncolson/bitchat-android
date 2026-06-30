@@ -1,4 +1,4 @@
-# Continuation Prompt: Bitchat Android Dogecoin Wallet
+# Continuation Prompt: Bitchat Android (Dogecoin wallet + Simple/Family profile)
 
 Continue work in:
 
@@ -6,11 +6,75 @@ Continue work in:
 C:\Users\rober\Downloads\Projects\bitchat-android
 ```
 
-Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomously, inspect the
-relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
-focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
+Goal: continue work on Bitchat Android — the Dogecoin wallet (now merged to `main`) and the new
+Simple/Family profile (PR open). Work autonomously, inspect the relevant files first, keep changes
+focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
+**Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `1f5e301`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (2026-06-30)
+
+**Two big bodies of work are done — one merged, one in an open PR.**
+
+### 1. Dogecoin wallet — ✅ MERGED to `main` (PR #1, merge commit `b71eef4`)
+The full self-contained Dogecoin SPV wallet (node-less send/receive on testnet + mainnet, offline BLE mesh
+relay, Nostr off-mesh fallback, Tor-for-SPV, the "Coin" UI) is **merged to `main`**. Before merge it got an
+11-dimension adversarial pre-merge review (verdict: safe to merge — no theft / key-leak-to-logs / ungated
+mainnet) plus 3 corroboration/auth hardenings (commit `9fcba2f`): sybil-proof "Confirmed" (only mutual-favorite
+helpers count toward the two-helper upgrade), a Nostr RESULT mutual-favorite gate, and an npub-binding fix. The
+detailed Dogecoin handoff is preserved as HISTORICAL below.
+
+### 2. Simple ("Family") profile — ✅ PR #2 OPEN, awaiting merge
+**Branch `simple-family-profile` — PR #2: https://github.com/robjohncolson/bitchat-android/pull/2 — 13 commits,
+build + tests green, pushed.** A friendly LINE-style messenger mode for non-technical relatives (the user's
+parents + relatives in Kashima/Kanzaki, Saga, Japan; user is in Wakefield, MA), ALONGSIDE the full "Power" UI
+(untouched — presentation + curated config over the same `ChatViewModel`/`ChatState`). **Feature-complete; every
+phase proven on-device** (Pixel 3 `89VX0HPX1` + Galaxy S24 `RFCX81GNBRE`):
+- `AppProfile{POWER,SIMPLE}` + `ProfilePreferenceManager` (default POWER; one-time migration so already-onboarded
+  installs never see the picker). Fresh-install onboarding "Power / Simple" picker. **Settings seeder**: SIMPLE →
+  Tor OFF (clearnet Nostr = reliable) + PoW OFF (no silent message drops) + pin/lock the family-room geohash.
+- **Family room = a pinned high-precision geohash** (`drt3ydn6` = 30 Wakefield Ave @ building precision). The shared
+  constant every family phone pins; private-by-obscurity. **Reach-you privately** = a pre-seeded 1:1 Nostr DM.
+- **Provisioning** reuses the app's existing signed identity QR (`services/VerificationService.VerificationQR` carries
+  noiseKey+npub+nickname, Ed25519-signed) + the camera scanner; `profile/FamilyProvisioning.provisionFamilyContact`
+  injects a MUTUAL favorite (no BLE/Noise handshake — NIP-17 self-contained). In-app **"Add family" QR scan**
+  (`profile/ui/AddFamilyScreen`: My-code / Scan tabs).
+- **LINE UI**: scoped `profile/ui/LineTheme` + `profile/ui/SimpleModeScreen` (chat-list home + a NATIVE bubble
+  conversation, NOT the terminal) routed in `MainActivity` for `appProfile==SIMPLE`. Minimal Settings: edit name,
+  "Stronger connection (Tor)" punch-through toggle, Power⇄Simple switch.
+- **Opt-in LOCKED wallet**: a "Use Dogecoin" toggle → `DogecoinWalletSheet(isSimpleProfile=true)` which HIDES the
+  settings gear, so the network selector + backend/connection/node/helper/corroboration are all unreachable
+  (network effectively locked). **Presentation-only — money-path gates UNTOUCHED.**
+- **⭐ CURATION PRINCIPLE (steers all Simple work):** expose only cosmetic / safe-opt-in settings (name, wallet,
+  Tor punch-through); **lock + hide anything that could stop two people from talking** (proof-of-work, the
+  family-room region, Nostr relays, the network selector, mesh/node internals, debug). A non-tech user can't break
+  their own ability to chat.
+
+**USER-FACING SWITCH:** Power→Simple = tap the app title → App Info → "Simple (Family) mode"; Simple→Power = the
+⚙ gear → "Switch to full bitchat (advanced)". (Simple mode shows only when profile=SIMPLE; a real relative's phone
+is provisioned once and stays there — they never see the terminal UI.)
+
+**REMAINING (user / on-device):** (1) verify the opt-in wallet on the funded S24 — open it + a real receive/send
+(deliberately NOT driven by blind taps on a money path). (2) live Nostr DM round-trip between two online phones.
+Optional polish: P5 Tor "punch-through" smart-surface (only show when relays unreachable); make the Power→Simple
+switch (in AboutSheet) more discoverable; reactive contacts/wallet flows.
+
+**REQUESTED NEXT FEATURE (user idea 2026-06-30, NOT yet built):** an **address search in Simple mode** — type an
+address → geocode to lat/long → encode to a geohash → pin that as the family room (so the power user doesn't
+hand-pick a geohash code). Building blocks already exist: `geohash/Geohash.encode(lat, lon, precision)`,
+`LocationChannelManager.select(ChannelID.Location(GeohashChannel(level, geohash)))`. Needs a geocoder — Android
+`android.location.Geocoder` (offline-ish, on-device) or a web geocoding API.
+
+**Full Simple-profile plan + all file:line anchors live in memory `simple-family-profile-plan.md`. Console cmds added
+this session: `profile [show|power|simple [geohash]|pick]`, `myqr`, `provision <url|base64>`.**
+
+---
+
+## 📦 HISTORICAL — Dogecoin wallet handoff (now MERGED to `main` via PR #1)
+
+> Everything below predates the Dogecoin merge + the Simple-profile work. Kept for context; HEADs/branches
+> referenced below are historical (the `dogecoin-m2-pay-nickname` branch was merged to `main`).
+
+### Pre-Simple Dogecoin handoff (HEAD `1f5e301`, branch `dogecoin-m2-pay-nickname`)
 
 **Both phones (Pixel 3 `89VX0HPX1` + S24 `RFCX81GNBRE`) are on the latest build (`1f5e301`), testnet/SPV/Tor.**
 
