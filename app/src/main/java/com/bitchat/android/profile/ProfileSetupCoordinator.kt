@@ -62,8 +62,11 @@ object ProfileSetupCoordinator {
             TorPreferenceManager.set(application, TorMode.OFF)
             // Never silently drop a peer's geohash messages on a PoW mismatch.
             PoWPreferenceManager.setPowEnabled(false)
-            // Pin the shared family room, if one was provided.
-            roomGeohash?.let { pinRoom(application, it, roomLevel) }
+            // The public geohash "family room" is REMOVED (it leaked stranger messages — geohash chat is
+            // public + was pinned to a real location). Make sure Simple sits on NO public channel — fall back
+            // to mesh; Simple talks over private 1:1 / E2E-group DMs only. (roomGeohash kept for API/console
+            // compatibility but no longer pins a public room.)
+            LocationChannelManager.getInstance(application).select(ChannelID.Mesh)
             // Tear down live Tor connections LAST — slow / may suspend a while; doing it after the prefs
             // above guarantees a sluggish or stuck teardown can't block them from applying.
             runCatching { ArtiTorManager.getInstance().applyMode(application, TorMode.OFF) }

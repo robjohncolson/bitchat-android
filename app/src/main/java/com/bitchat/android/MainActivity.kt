@@ -343,9 +343,7 @@ class MainActivity : OrientationAwareActivity() {
                             lifecycleScope.launch {
                                 com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
                                     application,
-                                    profile,
-                                    roomGeohash = if (profile == com.bitchat.android.profile.AppProfile.SIMPLE)
-                                        com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM else null
+                                    profile
                                 )
                             }
                         }

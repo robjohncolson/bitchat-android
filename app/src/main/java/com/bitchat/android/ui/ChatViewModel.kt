@@ -195,7 +195,7 @@ class ChatViewModel(
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple [geohash]|pick] | nostr-id | group-send <hex1,hex2,...> <msg> | group-show"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple|pick] | nostr-id | group-send <hex1,hex2,...> <msg> | group-show"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -794,19 +794,18 @@ class ChatViewModel(
                         "profile -> POWER (flag only; Tor/PoW/channel left as-is)"
                     }
                     "simple" -> {
-                        val gh = args.getOrNull(1)
                         viewModelScope.launch {
                             com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
-                                getApplication(), com.bitchat.android.profile.AppProfile.SIMPLE, roomGeohash = gh
+                                getApplication(), com.bitchat.android.profile.AppProfile.SIMPLE
                             )
                         }
-                        "profile -> SIMPLE (Tor off, PoW off${if (gh != null) ", room=$gh" else ""}); watch 'profile show'"
+                        "profile -> SIMPLE (Tor off, PoW off, no public room); watch 'profile show'"
                     }
                     "pick" -> {
                         com.bitchat.android.profile.ProfilePreferenceManager.clearChosen(getApplication())
                         "profile-pick: cleared 'chosen' — the one-time picker should reappear (recompose)"
                     }
-                    else -> "usage: profile [show|power|simple [geohash]|pick]"
+                    else -> "usage: profile [show|power|simple|pick]"
                 }
             }
             else -> "unknown cmd '$cmd' (try: help)"

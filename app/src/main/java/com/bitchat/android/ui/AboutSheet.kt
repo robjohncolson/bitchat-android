@@ -347,8 +347,7 @@ fun AboutSheet(
                                         profileSwitchScope.launch {
                                             com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
                                                 context.applicationContext as android.app.Application,
-                                                com.bitchat.android.profile.AppProfile.SIMPLE,
-                                                roomGeohash = com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM
+                                                com.bitchat.android.profile.AppProfile.SIMPLE
                                             )
                                         }
                                     }

@@ -63,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
@@ -92,24 +93,27 @@ import kotlinx.coroutines.launch
  * untouched; this is presentation only.
  */
 private sealed interface SimpleTarget {
-    data object Room : SimpleTarget
     data class Contact(val peerID: String, val name: String, val noiseHex: String?) : SimpleTarget
 }
 
 @Composable
 fun SimpleModeScreen(viewModel: ChatViewModel) {
+    val context = LocalContext.current
+    // The public geohash "family room" is removed (it leaked stranger messages — geohash chat is public).
+    // Ensure Simple never sits on a public geohash channel, INCLUDING existing installs that pinned one:
+    // fall back to mesh (Simple talks over private 1:1 / E2E group DMs, never a public channel).
+    LaunchedEffect(Unit) {
+        val mgr = com.bitchat.android.geohash.LocationChannelManager.getInstance(context)
+        if (mgr.selectedChannel.value is com.bitchat.android.geohash.ChannelID.Location) {
+            mgr.select(com.bitchat.android.geohash.ChannelID.Mesh)
+        }
+    }
     var target by remember { mutableStateOf<SimpleTarget?>(null) }
 
     when (val t = target) {
         null -> LineTheme {
             SimpleHome(
                 viewModel = viewModel,
-                onOpenRoom = {
-                    // The family room is the pinned geohash channel; clear any private-chat context so sends
-                    // route to the room.
-                    viewModel.endPrivateChat()
-                    target = SimpleTarget.Room
-                },
                 onOpenContact = { npub, name, noiseHex ->
                     val hex = nostrPubkeyToHex(npub)
                     if (hex != null) {
@@ -120,19 +124,6 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     }
                 }
             )
-        }
-        SimpleTarget.Room -> {
-            BackHandler { target = null }
-            LineTheme {
-                SimpleConversation(
-                    viewModel = viewModel,
-                    title = "Family Room",
-                    isPrivate = false,
-                    peerID = null,
-                    noiseHex = null,
-                    onBack = { target = null }
-                )
-            }
         }
         is SimpleTarget.Contact -> {
             BackHandler { viewModel.endPrivateChat(); target = null }
@@ -164,7 +155,6 @@ private fun nostrPubkeyToHex(value: String?): String? {
 @Composable
 private fun SimpleHome(
     viewModel: ChatViewModel,
-    onOpenRoom: () -> Unit,
     onOpenContact: (npub: String?, name: String, noiseHex: String) -> Unit
 ) {
     val context = LocalContext.current
@@ -263,15 +253,29 @@ private fun SimpleHome(
         }
 
         LazyColumn(Modifier.fillMaxSize()) {
-            item(key = "family_room") {
-                ChatListRow(
-                    title = "Family Room",
-                    subtitle = "Everyone in one place",
-                    avatarInitial = null,
-                    avatarColor = MaterialTheme.colorScheme.primary,
-                    onClick = onOpenRoom
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            if (contacts.isEmpty()) {
+                item(key = "empty") {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 32.dp, vertical = 56.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "No family added yet",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Tap the add-person button above to add a family member, then chat privately.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
             }
             items(
                 items = contacts,
@@ -340,23 +344,28 @@ private fun SimpleConversation(
     var showRequestDialog by remember { mutableStateOf(false) }
     var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
 
-    val messages: List<BitchatMessage> = if (isPrivate && peerID != null) {
-        // A contact's DM messages can be filed under several keys depending on transport + the app's
-        // opportunistic consolidation: the temporary nostr_<pub16> alias this screen opened with, the
-        // canonical 64-hex Noise key (offline favorite), and — when the contact is connected over BLE mesh
-        // — an ephemeral mesh peerID (the app's current "canonical" peer, exposed as selectedPrivateChatPeer).
-        // Union all of them so messages show regardless of transport, deduped by id and time-sorted.
-        val keys = buildList {
-            add(peerID)
-            noiseHex?.let { add(it) }
-            selectedPrivatePeer?.let { add(it) }
+    // A contact's DM messages can be filed under several keys depending on transport + the app's
+    // opportunistic consolidation: the temporary nostr_<pub16> alias this screen opened with, the canonical
+    // 64-hex Noise key (offline favorite), and — when the contact is connected over BLE mesh — an ephemeral
+    // mesh peerID (the app's current "canonical" peer, exposed as selectedPrivateChatPeer). Union all of
+    // them so messages show regardless of transport, deduped by id and time-sorted. Memoized so it does NOT
+    // recompute on every keystroke / unrelated recomposition.
+    val messages: List<BitchatMessage> = remember(
+        privateChats, channelMessages, selectedLoc, isPrivate, peerID, noiseHex, selectedPrivatePeer
+    ) {
+        if (isPrivate && peerID != null) {
+            val keys = buildList {
+                add(peerID)
+                noiseHex?.let { add(it) }
+                selectedPrivatePeer?.let { add(it) }
+            }
+            keys.flatMap { privateChats[it] ?: emptyList() }
+                .distinctBy { it.id }
+                .sortedBy { it.timestamp }
+        } else {
+            val gh = (selectedLoc as? ChannelID.Location)?.channel?.geohash
+            if (gh != null) channelMessages["geo:$gh"] ?: emptyList() else emptyList()
         }
-        keys.flatMap { privateChats[it] ?: emptyList() }
-            .distinctBy { it.id }
-            .sortedBy { it.timestamp }
-    } else {
-        val gh = (selectedLoc as? ChannelID.Location)?.channel?.geohash
-        if (gh != null) channelMessages["geo:$gh"] ?: emptyList() else emptyList()
     }
 
     var input by remember { mutableStateOf("") }
