@@ -42,6 +42,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
@@ -183,6 +185,34 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit)
     val scope = rememberCoroutineScope()
     val nickname by viewModel.nickname.collectAsState()
     val torMode by TorPreferenceManager.modeFlow.collectAsState()
+    var editingName by remember { mutableStateOf(false) }
+    var nameInput by remember { mutableStateOf("") }
+
+    if (editingName) {
+        AlertDialog(
+            onDismissRequest = { editingName = false },
+            title = { Text("Your name") },
+            text = {
+                OutlinedTextField(
+                    value = nameInput,
+                    onValueChange = { nameInput = it.take(32) },
+                    singleLine = true,
+                    label = { Text("Name") }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val n = nameInput.trim()
+                        if (n.isNotEmpty()) viewModel.setNickname(n)
+                        editingName = false
+                    },
+                    enabled = nameInput.trim().isNotEmpty()
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { editingName = false }) { Text("Cancel") } }
+        )
+    }
 
     BitchatBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -197,11 +227,36 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit)
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
-            Text(
-                text = "Signed in as $nickname",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+
+            // Your name (cosmetic, safe to change — re-announces but can't break connectivity).
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { nameInput = nickname; editingName = true },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "Your name",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = nickname,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "Edit",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
             // Tor "punch-through": default off for reliability; turn on only if the network blocks Nostr.
             Row(verticalAlignment = Alignment.CenterVertically) {
