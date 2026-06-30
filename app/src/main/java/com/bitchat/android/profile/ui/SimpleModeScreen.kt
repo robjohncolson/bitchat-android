@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -36,11 +37,25 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
 import com.bitchat.android.favorites.FavoritesPersistenceService
+import com.bitchat.android.net.ArtiTorManager
+import com.bitchat.android.net.TorMode
+import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
+import com.bitchat.android.profile.AppProfile
+import com.bitchat.android.profile.ProfileSetupCoordinator
 import com.bitchat.android.ui.ChatScreen
 import com.bitchat.android.ui.ChatViewModel
 import com.bitchat.android.ui.PrivateChatSheet
+import kotlinx.coroutines.launch
 
 /**
  * LINE-style surface for the SIMPLE ("Family") profile: a clean chat list (the pinned family room + the
@@ -99,9 +114,9 @@ private fun nostrPubkeyToHex(value: String?): String? {
 
 @Composable
 private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenContact: (String?) -> Unit) {
-    val nickname by viewModel.nickname.collectAsState()
     // Snapshot of mutual-favorite family contacts (recomputed on recomposition; reactive flow comes later).
     val contacts = remember { FavoritesPersistenceService.shared.getMutualFavorites() }
+    var showSettings by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
@@ -109,7 +124,7 @@ private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenC
                 Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                    .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -119,11 +134,13 @@ private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenC
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.weight(1f))
-                Text(
-                    text = nickname,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(
+                        Icons.Filled.Settings,
+                        contentDescription = "Settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
 
@@ -150,6 +167,82 @@ private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenC
                     onClick = { onOpenContact(c.peerNostrPublicKey) }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            }
+        }
+    }
+
+    if (showSettings) {
+        SimpleSettingsSheet(viewModel = viewModel, onDismiss = { showSettings = false })
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val nickname by viewModel.nickname.collectAsState()
+    val torMode by TorPreferenceManager.modeFlow.collectAsState()
+
+    BitchatBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "Signed in as $nickname",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // Tor "punch-through": default off for reliability; turn on only if the network blocks Nostr.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "Stronger connection (Tor)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Turn on only if your messages won't connect",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = torMode == TorMode.ON,
+                    onCheckedChange = { on ->
+                        val m = if (on) TorMode.ON else TorMode.OFF
+                        TorPreferenceManager.set(context, m)
+                        scope.launch {
+                            ArtiTorManager.getInstance()
+                                .applyMode(context.applicationContext as android.app.Application, m)
+                        }
+                    }
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+            TextButton(onClick = {
+                onDismiss()
+                scope.launch {
+                    ProfileSetupCoordinator.applyProfileDefaults(
+                        context.applicationContext as android.app.Application,
+                        AppProfile.POWER
+                    )
+                }
+            }) {
+                Text("Switch to full bitchat (advanced)")
             }
         }
     }

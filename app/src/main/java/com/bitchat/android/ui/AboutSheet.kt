@@ -15,7 +15,9 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -255,7 +257,8 @@ fun AboutSheet(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    
+    val profileSwitchScope = rememberCoroutineScope()
+
     // Get version name from package info
     val versionName = remember {
         try {
@@ -518,6 +521,28 @@ fun AboutSheet(
                                             onClick = onShowDogecoinWallet
                                         )
                                     }
+
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 56.dp),
+                                        color = colorScheme.outline.copy(alpha = 0.12f)
+                                    )
+
+                                    // Switch this device to the friendly LINE-style "Family" experience.
+                                    SettingsActionRow(
+                                        icon = Icons.Filled.Person,
+                                        title = "Simple (Family) mode",
+                                        subtitle = "Switch to the friendly, simplified messenger",
+                                        onClick = {
+                                            onDismiss()
+                                            profileSwitchScope.launch {
+                                                com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                                    context.applicationContext as android.app.Application,
+                                                    com.bitchat.android.profile.AppProfile.SIMPLE,
+                                                    roomGeohash = com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM
+                                                )
+                                            }
+                                        }
+                                    )
                                 }
                             }
                             
