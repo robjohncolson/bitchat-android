@@ -3,102 +3,128 @@ package com.bitchat.android.profile.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Switch
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.platform.LocalContext
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
 import com.bitchat.android.favorites.FavoritesPersistenceService
+import com.bitchat.android.geohash.ChannelID
+import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
 import com.bitchat.android.profile.AppProfile
 import com.bitchat.android.profile.ProfileSetupCoordinator
-import com.bitchat.android.ui.ChatScreen
 import com.bitchat.android.ui.ChatViewModel
-import com.bitchat.android.ui.PrivateChatSheet
 import kotlinx.coroutines.launch
 
 /**
- * LINE-style surface for the SIMPLE ("Family") profile: a clean chat list (the pinned family room + the
- * user's family contacts) over the SAME engine, reusing the existing conversation UI for the actual chat.
- * The full Power UI is untouched — this is presentation only.
- *
- * Phase 3a scope: the home list + the FAMILY ROOM conversation (reuses [ChatScreen], which renders the
- * pinned geohash channel; system Back returns to the list). The 1:1 contact chat, the in-app "add family"
- * QR scan, the minimal settings, and the conversation reskin land in the next sub-steps.
+ * LINE-style surface for the SIMPLE ("Family") profile: a clean chat list AND a clean conversation, both
+ * rendered natively here over the SAME ChatViewModel — no fall-through to the terminal UI. Power UI is
+ * untouched; this is presentation only.
  */
+private sealed interface SimpleTarget {
+    data object Room : SimpleTarget
+    data class Contact(val peerID: String, val name: String) : SimpleTarget
+}
+
 @Composable
 fun SimpleModeScreen(viewModel: ChatViewModel) {
-    var inRoom by remember { mutableStateOf(false) }
-    val chatPeer by viewModel.privateChatSheetPeer.collectAsState()
+    var target by remember { mutableStateOf<SimpleTarget?>(null) }
 
-    if (inRoom) {
-        BackHandler(enabled = true) { inRoom = false }
-        // Reuse the existing conversation surface for the family room (the active geohash channel).
-        // Conversation chrome reskin is a later sub-step; Back returns to the LINE home.
-        ChatScreen(viewModel = viewModel)
-    } else {
-        LineTheme {
+    when (val t = target) {
+        null -> LineTheme {
             SimpleHome(
                 viewModel = viewModel,
-                onOpenRoom = { inRoom = true },
-                onOpenContact = { npub ->
-                    // Open a private 1:1 Nostr DM with the family contact. startGeohashDM registers the
-                    // conversation key mapping (nostr_<pub16> -> full pubkey) and opens the chat sheet.
-                    nostrPubkeyToHex(npub)?.let { viewModel.startGeohashDM(it) }
+                onOpenRoom = {
+                    // The family room is the pinned geohash channel; clear any private-chat context so sends
+                    // route to the room.
+                    viewModel.endPrivateChat()
+                    target = SimpleTarget.Room
+                },
+                onOpenContact = { npub, name ->
+                    val hex = nostrPubkeyToHex(npub)
+                    if (hex != null) {
+                        val convKey = "nostr_${hex.take(16)}"
+                        viewModel.startGeohashDM(hex)        // register the conv-key -> pubkey mapping + subscription
+                        viewModel.startPrivateChat(convKey)  // make it the active private-chat context for sends
+                        target = SimpleTarget.Contact(convKey, name)
+                    }
                 }
             )
         }
-        // The 1:1 family chat reuses the existing private-chat surface. It normally lives inside
-        // ChatScreen; render it here for the LINE home view (opened via showPrivateChatSheet).
-        chatPeer?.let { peer ->
-            PrivateChatSheet(
-                isPresented = true,
-                peerID = peer,
-                viewModel = viewModel,
-                onDismiss = { viewModel.hidePrivateChatSheet() }
-            )
+        SimpleTarget.Room -> {
+            BackHandler { target = null }
+            LineTheme {
+                SimpleConversation(
+                    viewModel = viewModel,
+                    title = "Family Room",
+                    isPrivate = false,
+                    peerID = null,
+                    onBack = { target = null }
+                )
+            }
+        }
+        is SimpleTarget.Contact -> {
+            BackHandler { viewModel.endPrivateChat(); target = null }
+            LineTheme {
+                SimpleConversation(
+                    viewModel = viewModel,
+                    title = t.name,
+                    isPrivate = true,
+                    peerID = t.peerID,
+                    onBack = { viewModel.endPrivateChat(); target = null }
+                )
+            }
         }
     }
 }
@@ -115,8 +141,11 @@ private fun nostrPubkeyToHex(value: String?): String? {
 }
 
 @Composable
-private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenContact: (String?) -> Unit) {
-    // Snapshot of mutual-favorite family contacts (recomputed on recomposition; reactive flow comes later).
+private fun SimpleHome(
+    viewModel: ChatViewModel,
+    onOpenRoom: () -> Unit,
+    onOpenContact: (npub: String?, name: String) -> Unit
+) {
     val contacts = remember { FavoritesPersistenceService.shared.getMutualFavorites() }
     var showSettings by remember { mutableStateOf(false) }
 
@@ -161,12 +190,13 @@ private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenC
                 items = contacts,
                 key = { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
             ) { c ->
+                val name = c.peerNickname.ifBlank { "Family" }
                 ChatListRow(
-                    title = c.peerNickname.ifBlank { "Family" },
+                    title = name,
                     subtitle = if (c.peerNostrPublicKey != null) "Tap to chat" else "No internet contact yet",
                     avatarInitial = c.peerNickname.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFF9AA3AB),
-                    onClick = { onOpenContact(c.peerNostrPublicKey) }
+                    onClick = { if (c.peerNostrPublicKey != null) onOpenContact(c.peerNostrPublicKey, name) }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
@@ -175,6 +205,145 @@ private fun SimpleHome(viewModel: ChatViewModel, onOpenRoom: () -> Unit, onOpenC
 
     if (showSettings) {
         SimpleSettingsSheet(viewModel = viewModel, onDismiss = { showSettings = false })
+    }
+}
+
+@Composable
+private fun SimpleConversation(
+    viewModel: ChatViewModel,
+    title: String,
+    isPrivate: Boolean,
+    peerID: String?,
+    onBack: () -> Unit
+) {
+    val nickname by viewModel.nickname.collectAsState()
+    val privateChats by viewModel.privateChats.collectAsState()
+    val channelMessages by viewModel.channelMessages.collectAsState()
+    val selectedLoc by viewModel.selectedLocationChannel.collectAsState()
+
+    val messages: List<BitchatMessage> = if (isPrivate && peerID != null) {
+        privateChats[peerID] ?: emptyList()
+    } else {
+        val gh = (selectedLoc as? ChannelID.Location)?.channel?.geohash
+        if (gh != null) channelMessages["geo:$gh"] ?: emptyList() else emptyList()
+    }
+
+    var input by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) runCatching { listState.animateScrollToItem(messages.size - 1) }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // Top bar
+        Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 4.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        // Messages
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            items(items = messages, key = { it.id }) { m ->
+                MessageBubble(message = m, isMine = m.sender == nickname, showSender = !isPrivate)
+            }
+        }
+
+        // Input bar
+        Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Message") },
+                    maxLines = 4,
+                    shape = RoundedCornerShape(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                val canSend = input.isNotBlank()
+                Box(
+                    Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable(enabled = canSend) {
+                            viewModel.sendMessage(input.trim())
+                            input = ""
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.White)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: Boolean) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start
+    ) {
+        Column(
+            horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
+            modifier = Modifier.widthIn(max = 290.dp)
+        ) {
+            if (showSender && !isMine) {
+                Text(
+                    text = message.sender,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 12.dp, bottom = 2.dp)
+                )
+            }
+            Surface(
+                color = if (isMine) MaterialTheme.colorScheme.primary else Color.White,
+                shape = RoundedCornerShape(18.dp),
+                shadowElevation = 1.dp
+            ) {
+                Text(
+                    text = message.content,
+                    color = if (isMine) Color.White else MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
+                )
+            }
+        }
     }
 }
 
@@ -323,7 +492,7 @@ private fun ChatListRow(
             contentAlignment = Alignment.Center
         ) {
             if (avatarInitial == null) {
-                Icon(Icons.Default.Group, contentDescription = null, tint = Color.White)
+                Icon(Icons.Filled.Group, contentDescription = null, tint = Color.White)
             } else {
                 Text(avatarInitial, color = Color.White, fontWeight = FontWeight.Bold)
             }
