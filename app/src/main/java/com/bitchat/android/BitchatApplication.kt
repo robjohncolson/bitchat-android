@@ -38,6 +38,10 @@ class BitchatApplication : Application() {
         // Initialize theme preference
         ThemePreferenceManager.init(this)
 
+        // Initialize the app profile (Power vs Simple/Family). Defaults to POWER so existing installs
+        // are unaffected until a profile is explicitly chosen during onboarding.
+        try { com.bitchat.android.profile.ProfilePreferenceManager.init(this) } catch (_: Exception) { }
+
         // Initialize debug preference manager (persists debug toggles)
         try { com.bitchat.android.ui.debug.DebugPreferenceManager.init(this) } catch (_: Exception) { }
 
