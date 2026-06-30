@@ -329,6 +329,34 @@ fun AboutSheet(
                         }
                     }
 
+                    // Prominent entry to the friendly "Family" experience, so switching a phone to the
+                    // simplified messenger doesn't require digging to the bottom of the settings list.
+                    item(key = "simple_mode") {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = colorScheme.surface,
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                SettingsActionRow(
+                                    icon = Icons.Filled.Person,
+                                    title = "Simple (Family) mode",
+                                    subtitle = "Switch to the friendly, simplified messenger — easy for family to use",
+                                    onClick = {
+                                        onDismiss()
+                                        profileSwitchScope.launch {
+                                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                                context.applicationContext as android.app.Application,
+                                                com.bitchat.android.profile.AppProfile.SIMPLE,
+                                                roomGeohash = com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM
+                                            )
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
                     // Features Section - Grouped Card
                     item(key = "features") {
                         Column(modifier = Modifier.padding(horizontal = 20.dp)) {
@@ -522,27 +550,6 @@ fun AboutSheet(
                                         )
                                     }
 
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(start = 56.dp),
-                                        color = colorScheme.outline.copy(alpha = 0.12f)
-                                    )
-
-                                    // Switch this device to the friendly LINE-style "Family" experience.
-                                    SettingsActionRow(
-                                        icon = Icons.Filled.Person,
-                                        title = "Simple (Family) mode",
-                                        subtitle = "Switch to the friendly, simplified messenger",
-                                        onClick = {
-                                            onDismiss()
-                                            profileSwitchScope.launch {
-                                                com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
-                                                    context.applicationContext as android.app.Application,
-                                                    com.bitchat.android.profile.AppProfile.SIMPLE,
-                                                    roomGeohash = com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM
-                                                )
-                                            }
-                                        }
-                                    )
                                 }
                             }
                             

@@ -40,10 +40,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -56,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
+import com.bitchat.android.favorites.FavoritesChangeListener
 import com.bitchat.android.favorites.FavoritesPersistenceService
 import com.bitchat.android.geohash.ChannelID
 import com.bitchat.android.model.BitchatMessage
@@ -63,9 +67,12 @@ import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
+import com.bitchat.android.nostr.NostrRelayManager
 import com.bitchat.android.profile.AppProfile
 import com.bitchat.android.profile.ProfileSetupCoordinator
 import com.bitchat.android.ui.ChatViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -147,11 +154,45 @@ private fun SimpleHome(
     onOpenRoom: () -> Unit,
     onOpenContact: (npub: String?, name: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
+
+    // Keep the family list in sync with the favorites store. A relative favoriting us BACK (e.g. over
+    // Nostr) flips a relationship to mutual asynchronously, so observe the change listener and recompute
+    // instead of only refreshing right after an in-app "Add family". The callback can fire on any thread,
+    // so hop to the composition (main) scope before touching Compose state.
+    DisposableEffect(Unit) {
+        val listener = object : FavoritesChangeListener {
+            override fun onFavoriteChanged(noiseKeyHex: String) { scope.launch { refreshKey++ } }
+            override fun onAllCleared() { scope.launch { refreshKey++ } }
+        }
+        FavoritesPersistenceService.shared.addListener(listener)
+        onDispose { FavoritesPersistenceService.shared.removeListener(listener) }
+    }
+
     val contacts = remember(refreshKey) { FavoritesPersistenceService.shared.getMutualFavorites() }
     var showSettings by remember { mutableStateOf(false) }
     var showAddFamily by remember { mutableStateOf(false) }
     var showWallet by remember { mutableStateOf(false) }
+
+    // Smart Tor "punch-through". The banner appears only after Nostr relays have actually been unreachable
+    // for a sustained window — keyed on REAL relay connectivity, so turning Tor on can't make it vanish
+    // before messages truly connect — and its message adapts to WHY: offline (Tor can't help) vs. relays
+    // blocked (offer Tor) vs. already on Tor and still failing (offer to turn it back off).
+    val relayConnected by NostrRelayManager.shared.isConnected.collectAsState()
+    val torMode by TorPreferenceManager.modeFlow.collectAsState()
+    val hasInternet by rememberHasInternet()
+    var connectionTrouble by remember { mutableStateOf(false) }
+    LaunchedEffect(relayConnected) {
+        if (relayConnected) {
+            connectionTrouble = false
+        } else {
+            // Debounce so a normal few-second cold-start connect doesn't flash the banner.
+            delay(CONNECTION_TROUBLE_DELAY_MS)
+            connectionTrouble = true
+        }
+    }
 
     if (showAddFamily) {
         BackHandler { showAddFamily = false }
@@ -194,6 +235,18 @@ private fun SimpleHome(
                     )
                 }
             }
+        }
+
+        if (connectionTrouble) {
+            ConnectionTroubleBanner(
+                mode = when {
+                    !hasInternet -> TroubleMode.OFFLINE
+                    torMode == TorMode.ON -> TroubleMode.TOR_ON
+                    else -> TroubleMode.SUGGEST_TOR
+                },
+                onTurnOnTor = { applyTorMode(context, scope, on = true) },
+                onTurnOffTor = { applyTorMode(context, scope, on = false) }
+            )
         }
 
         LazyColumn(Modifier.fillMaxSize()) {
@@ -391,6 +444,111 @@ private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: 
 private fun formatBubbleTime(date: java.util.Date): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(date)
 
+/** How long Nostr relays must stay unreachable before the punch-through banner appears. */
+private const val CONNECTION_TROUBLE_DELAY_MS = 8_000L
+
+/** Why the chat list is showing a connection-trouble banner — drives the banner's copy + action. */
+private enum class TroubleMode { OFFLINE, SUGGEST_TOR, TOR_ON }
+
+/**
+ * A soft, friendly attention strip shown on the chat list when Nostr relays can't be reached. It is honest
+ * about the cause: when the device is offline it only points at Wi-Fi (Tor can't help with no internet);
+ * when relays look blocked it offers Tor; when Tor is already on but still failing it offers to turn it back
+ * off (so the reverse path isn't buried in Settings). It stays visible until the connection actually
+ * recovers, so it never falsely reassures.
+ */
+@Composable
+private fun ConnectionTroubleBanner(
+    mode: TroubleMode,
+    onTurnOnTor: () -> Unit,
+    onTurnOffTor: () -> Unit
+) {
+    val ink = Color(0xFF8A5A00)
+    val title: String
+    val subtitle: String
+    when (mode) {
+        TroubleMode.OFFLINE -> {
+            title = "You appear to be offline"
+            subtitle = "Check your Wi-Fi or mobile data"
+        }
+        TroubleMode.SUGGEST_TOR -> {
+            title = "Messages aren't connecting"
+            subtitle = "Try turning on a stronger connection"
+        }
+        TroubleMode.TOR_ON -> {
+            title = "Connecting over a stronger connection…"
+            subtitle = "This can take a moment — you can turn it off if it doesn't help"
+        }
+    }
+    Surface(color = Color(0xFFFFF4E5)) {   // soft amber: attention without alarm
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ink
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ink.copy(alpha = 0.85f)
+                )
+            }
+            when (mode) {
+                TroubleMode.SUGGEST_TOR -> TextButton(onClick = onTurnOnTor) { Text("Turn on") }
+                TroubleMode.TOR_ON -> TextButton(onClick = onTurnOffTor) { Text("Turn off") }
+                TroubleMode.OFFLINE -> {}
+            }
+        }
+    }
+}
+
+/**
+ * Reactive "does the device have a network that claims internet" signal, used to keep the trouble banner
+ * honest: with genuinely no network, suggesting a "stronger connection" (Tor) would mislead — Tor needs
+ * internet too. Registers a default-network callback for the lifetime of the composition.
+ */
+@Composable
+private fun rememberHasInternet(): State<Boolean> {
+    val context = LocalContext.current
+    return produceState(initialValue = true) {
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as android.net.ConnectivityManager
+        fun online(): Boolean {
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+        value = online()
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) { value = online() }
+            override fun onLost(network: android.net.Network) { value = online() }
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                caps: android.net.NetworkCapabilities
+            ) { value = online() }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+        awaitDispose { runCatching { cm.unregisterNetworkCallback(callback) } }
+    }
+}
+
+/** Flip the app-wide Tor mode (pref applies immediately; the slow live network reset runs in [scope]). */
+private fun applyTorMode(context: android.content.Context, scope: CoroutineScope, on: Boolean) {
+    val m = if (on) TorMode.ON else TorMode.OFF
+    TorPreferenceManager.set(context, m)
+    scope.launch {
+        ArtiTorManager.getInstance()
+            .applyMode(context.applicationContext as android.app.Application, m)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit, onOpenWallet: () -> Unit) {
@@ -488,14 +646,7 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
                 }
                 Switch(
                     checked = torMode == TorMode.ON,
-                    onCheckedChange = { on ->
-                        val m = if (on) TorMode.ON else TorMode.OFF
-                        TorPreferenceManager.set(context, m)
-                        scope.launch {
-                            ArtiTorManager.getInstance()
-                                .applyMode(context.applicationContext as android.app.Application, m)
-                        }
-                    }
+                    onCheckedChange = { on -> applyTorMode(context, scope, on) }
                 )
             }
 
