@@ -36,12 +36,24 @@ enum class AppProfile {
 object ProfilePreferenceManager {
     private const val PREFS_NAME = "bitchat_settings"
     private const val KEY_PROFILE = "app_profile"
+    private const val KEY_PROFILE_CHOSEN = "profile_chosen"
+
+    // The onboarding-complete flag lives in PermissionManager's own prefs; we read it directly (no
+    // dependency) to migrate already-onboarded installs at startup.
+    private const val ONBOARDING_PREFS = "bitchat_permissions"
+    private const val KEY_ONBOARDING_COMPLETE = "first_time_onboarding_complete"
 
     private val _profileFlow = MutableStateFlow(AppProfile.POWER)
     val profileFlow: StateFlow<AppProfile> = _profileFlow
 
+    private val _profileChosenFlow = MutableStateFlow(false)
+    /** Whether a profile has been explicitly chosen; drives the one-time onboarding picker. */
+    val profileChosenFlow: StateFlow<Boolean> = _profileChosenFlow
+
     fun init(context: Context) {
         _profileFlow.value = read(context)
+        migrateExistingInstall(context)
+        _profileChosenFlow.value = isProfileChosen(context)
     }
 
     fun set(context: Context, profile: AppProfile) {
@@ -52,10 +64,43 @@ object ProfilePreferenceManager {
 
     fun get(context: Context): AppProfile = read(context)
 
+    fun isProfileChosen(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_PROFILE_CHOSEN, false)
+
+    /** Record that a profile was explicitly picked, so the one-time picker never shows again. */
+    fun markProfileChosen(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_PROFILE_CHOSEN, true).apply()
+        _profileChosenFlow.value = true
+    }
+
+    /** DEBUG/testing only: clear the 'chosen' flag so the picker re-appears (a real pick restores it). */
+    fun clearChosen(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_PROFILE_CHOSEN, false).apply()
+        _profileChosenFlow.value = false
+    }
+
     private fun read(context: Context): AppProfile {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val saved = prefs.getString(KEY_PROFILE, AppProfile.POWER.name)
         return runCatching { AppProfile.valueOf(saved ?: AppProfile.POWER.name) }
             .getOrDefault(AppProfile.POWER)
+    }
+
+    /**
+     * One-time migration: an install that ALREADY finished onboarding before this profile feature existed
+     * keeps POWER and is marked chosen, so it never sees the picker. A fresh install (onboarding not yet
+     * complete at startup) is left UNCHOSEN, so the picker shows once onboarding finishes. Idempotent: once
+     * the key exists (migrated, or explicitly picked/cleared), this no-ops.
+     */
+    private fun migrateExistingInstall(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.contains(KEY_PROFILE_CHOSEN)) return
+        val onboarded = context.getSharedPreferences(ONBOARDING_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ONBOARDING_COMPLETE, false)
+        if (onboarded) {
+            prefs.edit().putBoolean(KEY_PROFILE_CHOSEN, true).apply() // keep POWER (default); skip the picker
+        }
     }
 }

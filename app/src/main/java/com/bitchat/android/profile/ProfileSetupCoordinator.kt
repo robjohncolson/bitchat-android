@@ -27,6 +27,14 @@ import com.bitchat.android.nostr.PoWPreferenceManager
  */
 object ProfileSetupCoordinator {
 
+    /**
+     * The shared family-room geohash (30 Wakefield Ave, Wakefield MA — building precision, ~38x19 m cell).
+     * Every family phone pins this SAME fixed string, so they share ONE room regardless of where they
+     * physically are; the tight precision keeps strangers from stumbling in. A later provisioning phase
+     * makes this configurable per family — for now it's the agreed default room key.
+     */
+    const val WAKEFIELD_FAMILY_ROOM = "drt3ydn6"
+
     // Geohash base32 alphabet (excludes a, i, l, o). A room key must be a valid geohash.
     private const val GEOHASH_ALPHABET = "0123456789bcdefghjkmnpqrstuvwxyz"
 

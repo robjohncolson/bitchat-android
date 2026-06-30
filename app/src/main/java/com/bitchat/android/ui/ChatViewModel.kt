@@ -195,7 +195,7 @@ class ChatViewModel(
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | profile [show|power|simple [geohash]]"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | profile [show|power|simple [geohash]|pick]"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -737,7 +737,11 @@ class ChatViewModel(
                         }
                         "profile -> SIMPLE (Tor off, PoW off${if (gh != null) ", room=$gh" else ""}); watch 'profile show'"
                     }
-                    else -> "usage: profile [show|power|simple [geohash]]"
+                    "pick" -> {
+                        com.bitchat.android.profile.ProfilePreferenceManager.clearChosen(getApplication())
+                        "profile-pick: cleared 'chosen' — the one-time picker should reappear (recompose)"
+                    }
+                    else -> "usage: profile [show|power|simple [geohash]|pick]"
                 }
             }
             else -> "unknown cmd '$cmd' (try: help)"

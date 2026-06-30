@@ -205,6 +205,7 @@ class MainActivity : OrientationAwareActivity() {
         val isBluetoothLoading by mainViewModel.isBluetoothLoading.collectAsState()
         val isLocationLoading by mainViewModel.isLocationLoading.collectAsState()
         val isBatteryOptimizationLoading by mainViewModel.isBatteryOptimizationLoading.collectAsState()
+        val profileChosen by com.bitchat.android.profile.ProfilePreferenceManager.profileChosenFlow.collectAsState()
 
         DisposableEffect(context, bluetoothStatusManager) {
 
@@ -330,11 +331,31 @@ class MainActivity : OrientationAwareActivity() {
 
                 // Add the callback - this will be automatically removed when the activity is destroyed
                 onBackPressedDispatcher.addCallback(this, backCallback)
-                ChatScreen(
-                    viewModel = chatViewModel,
-                    externalDogecoinPaymentRequest = pendingDogecoinPaymentRequest,
-                    onDogecoinPaymentRequestConsumed = ::clearPendingDogecoinPaymentRequest
-                )
+                if (onboardingState == OnboardingState.COMPLETE && !profileChosen) {
+                    // One-time profile pick on a fresh install (existing installs are migrated to chosen).
+                    com.bitchat.android.profile.ui.ProfilePickScreen(
+                        modifier = modifier,
+                        onPicked = { profile ->
+                            // Advance to the app immediately; seed the chosen profile's defaults in the
+                            // background (the SIMPLE Tor teardown can take a while).
+                            com.bitchat.android.profile.ProfilePreferenceManager.markProfileChosen(applicationContext)
+                            lifecycleScope.launch {
+                                com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                    application,
+                                    profile,
+                                    roomGeohash = if (profile == com.bitchat.android.profile.AppProfile.SIMPLE)
+                                        com.bitchat.android.profile.ProfileSetupCoordinator.WAKEFIELD_FAMILY_ROOM else null
+                                )
+                            }
+                        }
+                    )
+                } else {
+                    ChatScreen(
+                        viewModel = chatViewModel,
+                        externalDogecoinPaymentRequest = pendingDogecoinPaymentRequest,
+                        onDogecoinPaymentRequestConsumed = ::clearPendingDogecoinPaymentRequest
+                    )
+                }
             }
             
             OnboardingState.ERROR -> {
