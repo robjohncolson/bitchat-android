@@ -41,7 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -150,6 +152,23 @@ fun AddFamilyScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
+                    // Camera-free path: copy the same code as text so a family member whose camera doesn't
+                    // work can receive it (text/email) and add you by pasting it under "Scan".
+                    Spacer(Modifier.height(28.dp))
+                    Text(
+                        text = "No camera? Copy your code and send it to them (text, email…). They add you by pasting it under “Scan”.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    val clipboard = LocalClipboardManager.current
+                    Button(onClick = {
+                        clipboard.setText(AnnotatedString(qrString))
+                        Toast.makeText(context, "Code copied", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("Copy my code")
+                    }
                 } else {
                     Text(
                         text = "Your code isn't ready yet — try again in a moment.",

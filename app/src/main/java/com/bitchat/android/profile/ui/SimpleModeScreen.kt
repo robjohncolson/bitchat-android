@@ -11,7 +11,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -25,10 +30,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -61,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
 import com.bitchat.android.favorites.FavoritesChangeListener
 import com.bitchat.android.favorites.FavoritesPersistenceService
+import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
 import com.bitchat.android.geohash.ChannelID
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.net.ArtiTorManager
@@ -69,8 +77,11 @@ import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
 import com.bitchat.android.nostr.NostrRelayManager
 import com.bitchat.android.profile.AppProfile
+import com.bitchat.android.profile.ProfilePreferenceManager
 import com.bitchat.android.profile.ProfileSetupCoordinator
 import com.bitchat.android.ui.ChatViewModel
+import com.bitchat.android.ui.DogecoinUri
+import com.bitchat.android.ui.RequestDogeDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -308,6 +319,17 @@ private fun SimpleConversation(
     val privateChats by viewModel.privateChats.collectAsState()
     val channelMessages by viewModel.channelMessages.collectAsState()
     val selectedLoc by viewModel.selectedLocationChannel.collectAsState()
+    val walletEnabled by ProfilePreferenceManager.walletEnabledFlow.collectAsState()
+    val context = LocalContext.current
+    // The Simple wallet is locked to ONE network. A payment request for a DIFFERENT network must not be
+    // payable here: tapping Pay opens the sheet with paymentRequest, whose prefill calls switchNetwork() —
+    // so an untrusted cross-network `dogecoin:` chat message could otherwise silently move a locked
+    // (e.g. testnet play-money) wallet to mainnet. Gate the Pay button on a network match below.
+    val walletNetwork = remember(context) {
+        com.bitchat.android.features.dogecoin.DogecoinWalletRepository(context).loadSelectedNetwork()
+    }
+    var showRequestDialog by remember { mutableStateOf(false) }
+    var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
 
     val messages: List<BitchatMessage> = if (isPrivate && peerID != null) {
         privateChats[peerID] ?: emptyList()
@@ -360,19 +382,49 @@ private fun SimpleConversation(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             items(items = messages, key = { it.id }) { m ->
-                MessageBubble(message = m, isMine = m.sender == nickname, showSender = !isPrivate)
+                val isMine = m.sender == nickname
+                // A message that is wholly a `dogecoin:` URI is a payment request — render it as a tappable
+                // card (Pay → opens the locked wallet prefilled) instead of a raw link. Parsing only; the
+                // money path stays entirely inside the wallet sheet's existing gates.
+                val payReq = remember(m.content) {
+                    DogecoinUri.wholeMessagePaymentUri(m.content)?.let { DogecoinPaymentRequest.parse(it) }
+                }
+                if (payReq != null) {
+                    PaymentRequestBubble(
+                        request = payReq,
+                        isMine = isMine,
+                        senderName = m.sender,
+                        showSender = !isPrivate,
+                        canPay = walletEnabled && !isMine && payReq.network == walletNetwork,
+                        timestamp = m.timestamp,
+                        onPay = { payRequest = payReq }
+                    )
+                } else {
+                    MessageBubble(message = m, isMine = isMine, showSender = !isPrivate)
+                }
             }
         }
 
-        // Input bar
+        // Input bar — pad for the keyboard (IME) so it floats above it, falling back to the nav bar when
+        // the keyboard is hidden. Without this the soft keyboard covers the send button (edge-to-edge app).
         Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (walletEnabled) {
+                    // Ask a family member for DOGE: posts a payment-request message they can tap to pay.
+                    IconButton(onClick = { showRequestDialog = true }) {
+                        Icon(
+                            Icons.Filled.AccountBalanceWallet,
+                            contentDescription = "Request Dogecoin",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
@@ -398,6 +450,26 @@ private fun SimpleConversation(
                 }
             }
         }
+    }
+
+    if (showRequestDialog) {
+        // Reuse the app's request-DOGE dialog (self-contained: builds the URI from this device's locked
+        // wallet). Public confirmation only for the Family Room (a public geohash); 1:1 DMs are private.
+        RequestDogeDialog(
+            requiresPublicConfirmation = !isPrivate,
+            onDismiss = { showRequestDialog = false },
+            onPostRequest = { uri -> viewModel.sendMessage(uri) }
+        )
+    }
+    payRequest?.let { req ->
+        // The locked family wallet, opened prefilled with the tapped request (money-path gates intact).
+        com.bitchat.android.features.dogecoin.DogecoinWalletSheet(
+            isPresented = true,
+            onDismiss = { payRequest = null },
+            onShareToChat = { viewModel.sendMessage(it) },
+            paymentRequest = req,
+            isSimpleProfile = true
+        )
     }
 }
 
@@ -443,6 +515,108 @@ private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: 
 
 private fun formatBubbleTime(date: java.util.Date): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(date)
+
+private val DogeGold = Color(0xFFC2A633)
+
+/**
+ * A chat bubble for a Dogecoin payment request (a message that is wholly a `dogecoin:` URI). Shows the
+ * amount + note and, for an INCOMING request when the wallet is on, a "Pay" button that opens the locked
+ * wallet prefilled. Parsing/presentation only — the actual send stays behind the wallet sheet's gates.
+ */
+@Composable
+private fun PaymentRequestBubble(
+    request: DogecoinPaymentRequest,
+    isMine: Boolean,
+    senderName: String,
+    showSender: Boolean,
+    canPay: Boolean,
+    timestamp: java.util.Date,
+    onPay: () -> Unit
+) {
+    val shortAddress = remember(request.address) {
+        if (request.address.length > 16) "${request.address.take(8)}…${request.address.takeLast(6)}"
+        else request.address
+    }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start
+    ) {
+        Column(
+            horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
+            modifier = Modifier.widthIn(max = 290.dp)
+        ) {
+            if (showSender && !isMine) {
+                Text(
+                    text = senderName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 12.dp, bottom = 2.dp)
+                )
+            }
+            Surface(
+                color = Color.White,
+                shape = RoundedCornerShape(18.dp),
+                shadowElevation = 1.dp
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.AccountBalanceWallet,
+                            contentDescription = null,
+                            tint = DogeGold,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (isMine) "You requested" else "Dogecoin request",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = request.amount?.let { "$it DOGE" } ?: "Any amount",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    request.label?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    request.message?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "to $shortAddress",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (canPay) {
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = onPay, modifier = Modifier.fillMaxWidth()) {
+                            Text(request.amount?.let { "Pay $it DOGE" } ?: "Pay")
+                        }
+                    }
+                }
+            }
+            Text(
+                text = remember(timestamp) { formatBubbleTime(timestamp) },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
 
 /** How long Nostr relays must stay unreachable before the punch-through banner appears. */
 private const val CONNECTION_TROUBLE_DELAY_MS = 8_000L
