@@ -1,0 +1,59 @@
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+java {
+    // bitcoinj predates modern JDKs; compile + run on JDK 17 regardless of the dev's JAVA_HOME.
+    toolchain { languageVersion = JavaLanguageVersion.of(17) }
+}
+
+dependencies {
+    // libdohj 0.14.7 (Dogecoin params for bitcoinj) from JitPack. This line pulls
+    // org.bitcoinj:bitcoinj-core:0.14.7, which uses com.madgag.spongycastle (org.spongycastle.*) — a
+    // SEPARATE namespace from the app's org.bouncycastle:1.70, so there is no bcprov version conflict.
+    // (bitcoinj 0.15+ switched to org.bouncycastle and needs ECPoint.isCompressed(), removed in bcprov
+    // 1.70 — hence 0.14.7. See docs/dogecoin-spv-integration-plan.md.)
+    implementation 'com.github.dogecoin:libdohj:0.14.7'
+    // bitcoinj exposes Guava types (ListenableFuture via waitForPeers) in its public API but declares
+    // Guava `implementation`; pin the version bitcoinj 0.14.7 itself resolves so we compile + run on it.
+    implementation 'com.google.guava:guava:18.0'
+    // So we actually SEE bitcoinj/libdohj log lines (VerificationException, retarget, peer handshake).
+    implementation 'org.slf4j:slf4j-simple:1.7.36'
+}
+
+application {
+    mainClass = 'SpvSpike'
+    applicationDefaultJvmArgs = [
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+        '--add-opens=java.base/java.nio=ALL-UNNAMED',
+        // bitcoinj 0.14.7 SPVBlockStore.close() uses WindowsMMapHack (reflects into sun.nio.ch.DirectBuffer)
+        // to unmap the file on Windows; JDK 17 blocks that without this open. Windows-desktop-spike ONLY —
+        // WindowsMMapHack never runs on Android (Linux), so the app is unaffected.
+        '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+        '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn',
+        '-Dorg.slf4j.simpleLogger.logFile=System.out',
+        '-Dorg.slf4j.simpleLogger.showThreadName=false',
+        '-Dorg.slf4j.simpleLogger.showDateTime=true',
+        '-Dorg.slf4j.simpleLogger.dateTimeFormat=HH:mm:ss'
+    ]
+}
+
+run {
+    // Timebox via a Gradle project property: -PrunMinutes=15 (default 8). Avoids -D arg-parsing pitfalls.
+    systemProperty 'spike.minutes', (project.findProperty('runMinutes') ?: '8').toString()
+    // Optional peer override: -PpeerHost=127.0.0.1 (e.g. point at the local node for the balance spike).
+    if (project.hasProperty('peerHost')) systemProperty 'spike.peerHost', project.property('peerHost').toString()
+    // -PnoLocalhost forces the public DNS path (don't auto-prefer a detected 127.0.0.1 node).
+    if (project.hasProperty('noLocalhost')) systemProperty 'spike.noLocalhost', '1'
+    // -PverifyCheckpoint=<path> loads a generated checkpoint file + prints the seeded store head, then exits.
+    if (project.hasProperty('verifyCheckpoint')) systemProperty 'spike.verifyCheckpoint', project.property('verifyCheckpoint').toString()
+    // -PwatchKeyHex=<hex> [-Pcheckpoint=<path>] runs the full SPV balance read for that key (import + seed + bloom-sync).
+    if (project.hasProperty('watchKeyHex')) systemProperty 'spike.watchKeyHex', project.property('watchKeyHex').toString()
+    if (project.hasProperty('checkpoint')) systemProperty 'spike.checkpoint', project.property('checkpoint').toString()
+}

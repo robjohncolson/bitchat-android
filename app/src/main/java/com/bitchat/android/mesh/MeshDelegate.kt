@@ -13,6 +13,8 @@ interface MeshDelegate {
     fun didReceiveReadReceipt(messageID: String, recipientPeerID: String)
     fun didReceiveVerifyChallenge(peerID: String, payload: ByteArray, timestampMs: Long) {}
     fun didReceiveVerifyResponse(peerID: String, payload: ByteArray, timestampMs: Long) {}
+    fun didReceivePaymentBroadcastRequest(peerID: String, payload: ByteArray, timestampMs: Long) {}
+    fun didReceivePaymentBroadcastResult(peerID: String, payload: ByteArray, timestampMs: Long) {}
     fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String?
     fun getNickname(): String?
     fun isFavorite(peerID: String): Boolean

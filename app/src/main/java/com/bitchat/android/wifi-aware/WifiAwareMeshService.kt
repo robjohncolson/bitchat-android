@@ -1346,6 +1346,10 @@ class WifiAwareMeshService(private val context: Context) : MeshService, Transpor
         meshCore.sendMessage(content, mentions, channel)
     }
 
+    override fun sendChannelMessage(message: BitchatMessage) {
+        meshCore.sendChannelMessage(message)
+    }
+
     /**
      * Sends a private encrypted message to a specific peer.
      *
@@ -1376,6 +1380,14 @@ class WifiAwareMeshService(private val context: Context) : MeshService, Transpor
 
     override fun sendVerifyResponse(peerID: String, noiseKeyHex: String, nonceA: ByteArray) {
         meshCore.sendVerifyResponse(peerID, noiseKeyHex, nonceA)
+    }
+
+    override fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        meshCore.sendPaymentBroadcastRequest(peerID, payload)
+    }
+
+    override fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        meshCore.sendPaymentBroadcastResult(peerID, payload)
     }
 
     /**

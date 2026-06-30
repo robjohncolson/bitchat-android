@@ -6,6 +6,21 @@
 -dontwarn org.bouncycastle.**
 -keep class org.bouncycastle.** { *; }
 
+# Dogecoin SPV: bitcoinj + libdohj + their transitive deps (protobuf, guava, spongycastle, slf4j).
+# bitcoinj relies on reflection/protobuf for wallet+message (de)serialization, and pulls optional
+# deps not present at runtime — keep its classes and silence missing-class warnings.
+-keep class org.bitcoinj.** { *; }
+-keep class org.libdohj.** { *; }
+-keep class com.google.protobuf.** { *; }
+-keep class org.spongycastle.** { *; }
+-dontwarn org.bitcoinj.**
+-dontwarn org.libdohj.**
+-dontwarn com.google.protobuf.**
+-dontwarn org.spongycastle.**
+-dontwarn com.google.common.**
+-dontwarn javax.annotation.**
+-dontwarn org.slf4j.**
+
 # Keep SecureIdentityStateManager from being obfuscated to prevent reflection issues
 -keep class com.bitchat.android.identity.SecureIdentityStateManager {
     private android.content.SharedPreferences prefs;

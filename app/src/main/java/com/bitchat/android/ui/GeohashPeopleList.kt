@@ -145,8 +145,6 @@ fun GeohashPeopleList(
                     showHashSuffix = (baseNameCounts[com.bitchat.android.ui.splitSuffix(person.displayName).first] ?: 0) > 1,
                     onTap = {
                         if (person.id != myHex) {
-                            // TODO: Re-enable when NIP-17 geohash DM issues are fixed
-                            // Start geohash DM (iOS-compatible)
                             viewModel.startGeohashDM(person.id)
                             onTapPerson()
                         }
@@ -205,7 +203,11 @@ private fun GeohashPersonItem(
             
             Icon(
                 imageVector = icon,
-                contentDescription = if (isTeleported || isMyTeleported) "Teleported user" else "User",
+                contentDescription = if (isTeleported || isMyTeleported) {
+                    stringResource(R.string.cd_teleported_user)
+                } else {
+                    stringResource(R.string.cd_user)
+                },
                 modifier = Modifier.size(12.dp),
                 tint = iconColor.copy(alpha = if (iconName == "face.dashed") 0.6f else 1.0f) // Make dashed faces slightly transparent
             )
@@ -268,5 +270,3 @@ private fun GeohashPersonItem(
         Spacer(modifier = Modifier.width(8.dp))
     }
 }
-
-

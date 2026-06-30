@@ -300,6 +300,25 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             override fun updatePeerInfo(peerID: String, nickname: String, noisePublicKey: ByteArray, signingPublicKey: ByteArray, isVerified: Boolean): Boolean {
                 return peerManager.updatePeerInfo(peerID, nickname, noisePublicKey, signingPublicKey, isVerified)
             }
+
+            override fun updatePeerDogecoinAddress(
+                peerID: String,
+                noisePublicKey: ByteArray,
+                networkId: String,
+                address: String
+            ) {
+                val fingerprint = runCatching { peerManager.storeFingerprintForPeer(peerID, noisePublicKey) }.getOrNull()
+                    ?: return
+                peerManager.updatePeerDogecoinAddress(peerID, networkId, address)
+                runCatching {
+                    com.bitchat.android.identity.SecureIdentityStateManager(context)
+                        .cachePeerDogecoinAddress(fingerprint, networkId, address)
+                }
+            }
+
+            override fun updatePeerHelperNetworks(peerID: String, networks: Set<String>) {
+                peerManager.updatePeerHelperNetworks(peerID, networks)
+            }
             
             // Packet operations
             override fun sendPacket(packet: BitchatPacket) {
@@ -458,6 +477,14 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
 
             override fun onVerifyResponseReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
                 delegate?.didReceiveVerifyResponse(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastRequestReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastRequest(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastResultReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastResult(peerID, payload, timestampMs)
             }
         }
         
@@ -764,7 +791,37 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
      */
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
         if (content.isEmpty()) return
-        
+
+        val payload = if (channel != null || mentions.isNotEmpty()) {
+            val message = BitchatMessage(
+                sender = delegate?.getNickname() ?: myPeerID,
+                content = content,
+                timestamp = Date(),
+                isRelay = false,
+                senderPeerID = myPeerID,
+                mentions = mentions.takeIf { it.isNotEmpty() },
+                channel = channel
+            )
+            message.toBinaryPayload() ?: run {
+                Log.e(TAG, "Failed to encode channel message payload for $channel")
+                return
+            }
+        } else {
+            content.toByteArray(Charsets.UTF_8)
+        }
+
+        sendBroadcastMessagePayload(payload)
+    }
+
+    fun sendChannelMessage(message: BitchatMessage) {
+        val payload = message.toBinaryPayload() ?: run {
+            Log.e(TAG, "Failed to encode channel message payload for ${message.channel}")
+            return
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    private fun sendBroadcastMessagePayload(payload: ByteArray) {
         serviceScope.launch {
             val packet = BitchatPacket(
                 version = 1u,
@@ -772,7 +829,7 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
                 senderID = hexStringToByteArray(myPeerID),
                 recipientID = SpecialRecipients.BROADCAST,
                 timestamp = System.currentTimeMillis().toULong(),
-                payload = content.toByteArray(Charsets.UTF_8),
+                payload = payload,
                 signature = null,
                 ttl = MAX_TTL
             )
@@ -1052,6 +1109,22 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
         sendNoisePayloadToPeer(payload, peerID, "verify response")
     }
 
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_REQUEST, data = payload),
+            peerID,
+            "payment broadcast request"
+        )
+    }
+
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_RESULT, data = payload),
+            peerID,
+            "payment broadcast result"
+        )
+    }
+
     private fun sendNoisePayloadToPeer(payload: NoisePayload, recipientPeerID: String, label: String) {
         serviceScope.launch {
             try {
@@ -1099,7 +1172,15 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             }
             
             // Create iOS-compatible IdentityAnnouncement with TLV encoding
-            val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+            val announcement = IdentityAnnouncement(
+                nickname = nickname,
+                noisePublicKey = staticKey,
+                signingPublicKey = signingKey,
+                dogecoinAddresses = listOfNotNull(
+                    com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+                ),
+                helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
+            )
             var tlvPayload = announcement.encode()
             if (tlvPayload == null) {
                 Log.e(TAG, "Failed to encode announcement as TLV")
@@ -1162,7 +1243,15 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
         }
         
         // Create iOS-compatible IdentityAnnouncement with TLV encoding
-        val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = staticKey,
+            signingPublicKey = signingKey,
+            dogecoinAddresses = listOfNotNull(
+                com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+            ),
+            helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
+        )
         var tlvPayload = announcement.encode()
         if (tlvPayload == null) {
             Log.e(TAG, "Failed to encode peer announcement as TLV")

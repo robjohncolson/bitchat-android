@@ -31,6 +31,9 @@ android {
 
     buildTypes {
         debug {
+            // Separate package id so the debug build installs alongside a release-signed
+            // com.bitchat.droid (e.g. a Play Store install) instead of failing on signature mismatch.
+            applicationIdSuffix = ".debug"
             ndk {
                 // Include x86_64 for emulator support during development
                 abiFilters += listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
@@ -73,6 +76,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -84,6 +88,13 @@ android {
         abortOnError = false
         checkReleaseBuilds = false
     }
+}
+
+configurations.all {
+    // bitcoinj 0.14.7 needs guava 18, which BUNDLES com.google.common.util.concurrent.ListenableFuture;
+    // some Google libs also pull the standalone com.google.guava:listenablefuture, which defines the SAME
+    // class -> duplicate-class build error. guava 18 already provides it, so drop the standalone artifact.
+    exclude(group = "com.google.guava", module = "listenablefuture")
 }
 
 dependencies {
@@ -117,6 +128,16 @@ dependencies {
     
     // Cryptography
     implementation(libs.bundles.cryptography)
+
+    // Dogecoin SPV backend (bitcoinj 0.14.7 + libdohj). See docs/dogecoin-spv-integration-plan.md.
+    // 0.14.7 uses com.madgag.spongycastle (org.spongycastle.*), a SEPARATE namespace from the app's
+    // org.bouncycastle:1.70 — so bitcoinj's crypto is isolated and the money-path signer
+    // (DogecoinTransactionBuilder, on the app's AUDITED bcprov 1.70) is untouched; bitcoinj NEVER signs
+    // (Option B). The DogecoinSignerRegressionTest still guards the app signer byte-for-byte.
+    implementation(libs.libdohj)
+    // bitcoinj exposes Guava (ListenableFuture via waitForPeers) in its public API but declares it
+    // `implementation`; pin the version bitcoinj 0.14.7 uses.
+    implementation(libs.guava)
     
     // JSON
     implementation(libs.gson)

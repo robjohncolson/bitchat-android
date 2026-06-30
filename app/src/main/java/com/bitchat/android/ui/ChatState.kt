@@ -109,6 +109,9 @@ class ChatState(
     private val _peerRSSI = MutableStateFlow<Map<String, Int>>(emptyMap())
     val peerRSSI: StateFlow<Map<String, Int>> = _peerRSSI.asStateFlow()
 
+    private val _peerDogecoinAddresses = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+    val peerDogecoinAddresses: StateFlow<Map<String, Map<String, String>>> = _peerDogecoinAddresses.asStateFlow()
+
     // Direct connection status per peer (for live UI updates)
     private val _peerDirect = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val peerDirect: StateFlow<Map<String, Boolean>> = _peerDirect.asStateFlow()
@@ -187,6 +190,7 @@ class ChatState(
     fun getFavoritePeersValue() = _favoritePeers.value
     fun getPeerSessionStatesValue() = _peerSessionStates.value
     fun getPeerFingerprintsValue() = _peerFingerprints.value
+    fun getPeerDogecoinAddressesValue() = _peerDogecoinAddresses.value
     fun getShowAppInfoValue() = _showAppInfo.value
     fun getGeohashPeopleValue() = _geohashPeople.value
 
@@ -300,6 +304,10 @@ class ChatState(
 
     fun setPeerRSSI(rssi: Map<String, Int>) {
         _peerRSSI.value = rssi
+    }
+
+    fun setPeerDogecoinAddresses(addresses: Map<String, Map<String, String>>) {
+        _peerDogecoinAddresses.value = addresses
     }
 
     fun setPeerDirect(direct: Map<String, Boolean>) {

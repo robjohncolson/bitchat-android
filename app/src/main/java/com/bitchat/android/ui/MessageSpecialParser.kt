@@ -59,6 +59,12 @@ object MessageSpecialParser {
         if (text.isEmpty()) return emptyList()
         val results = mutableListOf<UrlMatch>()
 
+        // 0) Dogecoin payment request URIs are not web URLs, but they use the
+        // same inline click/open path.
+        for (match in DogecoinUri.findPaymentUris(text)) {
+            results.add(UrlMatch(match.start, match.endExclusive, match.uri))
+        }
+
         // 1) Use Android's WEB_URL for robust detection of http(s) and www.*
         val webUrl = Patterns.WEB_URL
         val matcher = webUrl.matcher(text)
@@ -72,6 +78,10 @@ object MessageSpecialParser {
                 endExclusive -= 1
                 token = text.substring(start, endExclusive)
             }
+
+            val overlapsExisting = results.any { start < it.endExclusive && endExclusive > it.start }
+            if (overlapsExisting) continue
+
             results.add(UrlMatch(start, endExclusive, token))
         }
 
@@ -106,5 +116,3 @@ object MessageSpecialParser {
         return results
     }
 }
-
-

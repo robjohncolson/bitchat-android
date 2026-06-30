@@ -18,7 +18,10 @@ import androidx.core.content.edit
  * - Secure storage using Android EncryptedSharedPreferences
  * - Fingerprint calculation and identity validation
  */
-class SecureIdentityStateManager(private val context: Context) {
+class SecureIdentityStateManager private constructor(
+    private val context: Context?,
+    private val prefsOverride: SharedPreferences?
+) {
     
     companion object {
         private const val TAG = "SecureIdentityStateManager"
@@ -32,19 +35,27 @@ class SecureIdentityStateManager(private val context: Context) {
         private const val KEY_CACHED_PEER_NOISE_KEYS = "cached_peer_noise_keys"
         private const val KEY_CACHED_NOISE_FINGERPRINTS = "cached_noise_fingerprints"
         private const val KEY_CACHED_FINGERPRINT_NICKNAMES = "cached_fingerprint_nicknames"
+        private const val KEY_CACHED_PEER_DOGECOIN_ADDRESSES = "cached_peer_dogecoin_addresses"
     }
     
+    constructor(context: Context) : this(context.applicationContext, null)
+
+    internal constructor(testPrefs: SharedPreferences, @Suppress("UNUSED_PARAMETER") forTesting: Boolean) :
+        this(null, testPrefs)
+
     private val prefs: SharedPreferences
     private val lock = Any()
     
     init {
-        // Create master key for encryption
+        prefs = prefsOverride ?: createEncryptedPreferences(requireNotNull(context))
+    }
+
+    private fun createEncryptedPreferences(context: Context): SharedPreferences {
         val masterKey = MasterKey.Builder(context, MasterKey.DEFAULT_MASTER_KEY_ALIAS)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        
-        // Create encrypted shared preferences
-        prefs = EncryptedSharedPreferences.create(
+
+        return EncryptedSharedPreferences.create(
             context,
             PREFS_NAME,
             masterKey,
@@ -292,6 +303,55 @@ class SecureIdentityStateManager(private val context: Context) {
             current.add("$key=$encoded")
             prefs.edit { putStringSet(KEY_CACHED_FINGERPRINT_NICKNAMES, current) }
         }
+    }
+
+    fun cachePeerDogecoinAddress(fingerprint: String, networkId: String, address: String) {
+        if (!isValidFingerprint(fingerprint)) return
+
+        val fingerprintKey = fingerprint.lowercase()
+        val networkKey = normalizeDogecoinNetworkId(networkId) ?: return
+        val cleanAddress = address.trim()
+        if (cleanAddress.isBlank()) return
+
+        val encodedAddress = Base64.encodeToString(cleanAddress.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        val prefix = "$fingerprintKey:$networkKey="
+        synchronized(lock) {
+            val current = prefs.getStringSet(KEY_CACHED_PEER_DOGECOIN_ADDRESSES, emptySet())?.toMutableSet()
+                ?: mutableSetOf()
+            current.removeAll { it.startsWith(prefix) }
+            current.add("$prefix$encodedAddress")
+            prefs.edit { putStringSet(KEY_CACHED_PEER_DOGECOIN_ADDRESSES, current) }
+        }
+    }
+
+    fun getPeerDogecoinAddress(peerIDOrFingerprint: String, networkId: String): String? {
+        val key = peerIDOrFingerprint.lowercase()
+        val fingerprint = getCachedPeerFingerprint(key)?.lowercase()
+            ?: getCachedNoiseFingerprint(key)?.lowercase()
+            ?: key.takeIf { isValidFingerprint(it) }
+            ?: return null
+
+        return getCachedPeerDogecoinAddress(fingerprint, networkId)
+    }
+
+    fun getCachedPeerDogecoinAddress(fingerprint: String, networkId: String): String? {
+        if (!isValidFingerprint(fingerprint)) return null
+        val networkKey = normalizeDogecoinNetworkId(networkId) ?: return null
+        val prefix = "${fingerprint.lowercase()}:$networkKey="
+        val entries = prefs.getStringSet(KEY_CACHED_PEER_DOGECOIN_ADDRESSES, emptySet()) ?: return null
+        val entry = entries.firstOrNull { it.startsWith(prefix) } ?: return null
+        val encodedAddress = entry.substringAfter('=')
+        return runCatching {
+            val bytes = Base64.decode(encodedAddress, Base64.NO_WRAP)
+            String(bytes, Charsets.UTF_8)
+        }.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun normalizeDogecoinNetworkId(networkId: String): String? {
+        val cleanNetworkId = networkId.trim().lowercase()
+        if (cleanNetworkId.isBlank()) return null
+        if (!cleanNetworkId.matches(Regex("^[a-z0-9_-]{1,16}$"))) return null
+        return cleanNetworkId
     }
     
     // MARK: - Peer ID Rotation Management (removed)

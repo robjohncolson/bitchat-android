@@ -125,7 +125,10 @@ object AppConstants {
         const val SYSTEM_EVENT_DEDUP_TIMEOUT_MS: Long = 5_000L
         const val ACTIVE_PEERS_NOTIFICATION_INTERVAL_MS: Long = 300_000L
         const val ACTION_FORCE_FINISH: String = "com.bitchat.android.ACTION_FORCE_FINISH"
-        const val PERMISSION_FORCE_FINISH: String = "com.bitchat.android.permission.FORCE_FINISH"
+        // Derive from the applicationId so debug (com.bitchat.droid.debug) and release each declare a
+        // distinct custom permission and can coexist on one device. Must match the manifest's
+        // ${applicationId}.permission.FORCE_FINISH.
+        val PERMISSION_FORCE_FINISH: String = com.bitchat.android.BuildConfig.APPLICATION_ID + ".permission.FORCE_FINISH"
     }
 
     object Media {

@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
+import com.bitchat.android.features.dogecoin.DogecoinWalletSheet
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.ui.media.FullScreenImageViewer
 
@@ -38,7 +40,11 @@ import com.bitchat.android.ui.media.FullScreenImageViewer
  * - ChatUIUtils: Utility functions for formatting and colors
  */
 @Composable
-fun ChatScreen(viewModel: ChatViewModel) {
+fun ChatScreen(
+    viewModel: ChatViewModel,
+    externalDogecoinPaymentRequest: DogecoinPaymentRequest? = null,
+    onDogecoinPaymentRequestConsumed: () -> Unit = {}
+) {
     val colorScheme = MaterialTheme.colorScheme
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val connectedPeers by viewModel.connectedPeers.collectAsStateWithLifecycle()
@@ -74,6 +80,29 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var initialViewerIndex by remember { mutableStateOf(0) }
     var forceScrollToBottom by remember { mutableStateOf(false) }
     var isScrolledUp by remember { mutableStateOf(false) }
+    var showDogecoinWalletSheet by remember { mutableStateOf(false) }
+    var dogecoinPaymentRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+    var showRequestDogeDialog by remember { mutableStateOf(false) }
+    var requestDogeRequiresPublicConfirmation by remember { mutableStateOf(true) }
+
+    fun openDogecoinPaymentUri(uri: String) {
+        DogecoinPaymentRequest.parse(uri)?.let { request ->
+            dogecoinPaymentRequest = request
+            showDogecoinWalletSheet = true
+        }
+    }
+
+    fun openRequestDogeDialog(requiresPublicConfirmation: Boolean) {
+        requestDogeRequiresPublicConfirmation = requiresPublicConfirmation
+        showRequestDogeDialog = true
+    }
+
+    LaunchedEffect(externalDogecoinPaymentRequest?.uri) {
+        val request = externalDogecoinPaymentRequest ?: return@LaunchedEffect
+        dogecoinPaymentRequest = request
+        showDogecoinWalletSheet = true
+        onDogecoinPaymentRequestConsumed()
+    }
 
     // Show password dialog when needed
     LaunchedEffect(showPasswordPrompt) {
@@ -137,6 +166,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 modifier = Modifier.weight(1f),
                 forceScrollToBottom = forceScrollToBottom,
                 onScrolledUpChanged = { isUp -> isScrolledUp = isUp },
+                onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
                 onNicknameClick = { fullSenderName ->
                     // Single click - mention user in text input
                     val currentText = messageText.text
@@ -236,8 +266,29 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 currentChannel = currentChannel,
                 nickname = nickname,
                 colorScheme = colorScheme,
-                showMediaButtons = showMediaButtons
+                showMediaButtons = showMediaButtons,
+                onRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = true) }
             )
+            if (showRequestDogeDialog) {
+                RequestDogeDialog(
+                    requiresPublicConfirmation = requestDogeRequiresPublicConfirmation,
+                    onDismiss = { showRequestDogeDialog = false },
+                    onPostRequest = { uri ->
+                        // A request opened from the private sheet (requiresPublicConfirmation = false)
+                        // must never silently fall back to a public/channel send that would expose the
+                        // receive address. If no private chat is active, drop it instead of leaking.
+                        val willReachPublicAudience = selectedPrivatePeer == null
+                        if (willReachPublicAudience && !requestDogeRequiresPublicConfirmation) {
+                            // no active private chat for a private-intent request: do not post publicly
+                        } else {
+                            viewModel.sendMessage(uri)
+                            // Note: when triggered from the private sheet this scrolls the main list;
+                            // the private sheet keeps its own scroll state.
+                            forceScrollToBottom = !forceScrollToBottom
+                        }
+                    }
+                )
+            }
         }
 
         // Floating header - positioned absolutely at top, ignores keyboard
@@ -343,6 +394,21 @@ fun ChatScreen(viewModel: ChatViewModel) {
         onSecurityVerificationSheetDismiss = viewModel::hideSecurityVerificationSheet,
         showMeshPeerListSheet = showMeshPeerListSheet,
         onMeshPeerListDismiss = viewModel::hideMeshPeerList,
+        showDogecoinWalletSheet = showDogecoinWalletSheet,
+        dogecoinPaymentRequest = dogecoinPaymentRequest,
+        onShowDogecoinWallet = {
+            dogecoinPaymentRequest = null
+            showDogecoinWalletSheet = true
+            // Proactive: start helper Noise handshakes now so a BLE session is ready by send time (the BLE
+            // handshake can take many seconds — too slow to start only at send). See docs/dogecoin-offline-mesh-relay-findings.md.
+            viewModel.prewarmBroadcastHelperSessions()
+        },
+        onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
+        onPrivateRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = false) },
+        onDogecoinWalletDismiss = {
+            showDogecoinWalletSheet = false
+            dogecoinPaymentRequest = null
+        },
     )
 }
 
@@ -364,7 +430,8 @@ fun ChatInputSection(
     currentChannel: String?,
     nickname: String,
     colorScheme: ColorScheme,
-    showMediaButtons: Boolean
+    showMediaButtons: Boolean,
+    onRequestDoge: (() -> Unit)? = null
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -401,6 +468,7 @@ fun ChatInputSection(
                 currentChannel = currentChannel,
                 nickname = nickname,
                 showMediaButtons = showMediaButtons,
+                onRequestDoge = onRequestDoge,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -489,6 +557,12 @@ private fun ChatDialogs(
     onSecurityVerificationSheetDismiss: () -> Unit,
     showMeshPeerListSheet: Boolean,
     onMeshPeerListDismiss: () -> Unit,
+    showDogecoinWalletSheet: Boolean,
+    dogecoinPaymentRequest: DogecoinPaymentRequest?,
+    onShowDogecoinWallet: () -> Unit,
+    onDogecoinUriClick: (String) -> Unit,
+    onPrivateRequestDoge: () -> Unit,
+    onDogecoinWalletDismiss: () -> Unit,
 ) {
     val privateChatSheetPeer by viewModel.privateChatSheetPeer.collectAsStateWithLifecycle()
 
@@ -507,8 +581,31 @@ private fun ChatDialogs(
     AboutSheet(
         isPresented = showAppInfo,
         onDismiss = onAppInfoDismiss,
-        onShowDebug = { showDebugSheet = true }
+        onShowDebug = { showDebugSheet = true },
+        onShowDogecoinWallet = onShowDogecoinWallet
     )
+    if (showDogecoinWalletSheet) {
+        val peerBroadcastState by viewModel.peerBroadcastState.collectAsStateWithLifecycle()
+        DogecoinWalletSheet(
+            isPresented = showDogecoinWalletSheet,
+            onDismiss = onDogecoinWalletDismiss,
+            onShareToChat = { text ->
+                viewModel.sendMessage(text)
+                onDogecoinWalletDismiss()
+            },
+            onAdvertisedAddressChanged = {
+                viewModel.reannounceIdentity()
+            },
+            onHelperEnabledChanged = {
+                viewModel.reannounceIdentity()
+            },
+            onRequestPeerBroadcast = { signedTx -> viewModel.requestPeerBroadcast(signedTx) },
+            peerBroadcastState = peerBroadcastState,
+            hasHelperCandidate = viewModel.hasBroadcastHelperCandidate(),
+            onClearPeerBroadcast = { viewModel.clearPeerBroadcastState() },
+            paymentRequest = dogecoinPaymentRequest
+        )
+    }
     if (showDebugSheet) {
         com.bitchat.android.ui.debug.DebugSettingsSheet(
             isPresented = showDebugSheet,
@@ -553,7 +650,8 @@ private fun ChatDialogs(
             onShowVerification = {
                 onMeshPeerListDismiss()
                 viewModel.showVerificationSheet(fromSidebar = true)
-            }
+            },
+            onDogecoinUriClick = onDogecoinUriClick
         )
     }
 
@@ -561,7 +659,8 @@ private fun ChatDialogs(
         VerificationSheet(
             isPresented = showVerificationSheet,
             onDismiss = onVerificationSheetDismiss,
-            viewModel = viewModel
+            viewModel = viewModel,
+            onDogecoinUriClick = onDogecoinUriClick
         )
     }
 
@@ -578,6 +677,8 @@ private fun ChatDialogs(
             isPresented = true,
             peerID = privateChatSheetPeer!!,
             viewModel = viewModel,
+            onDogecoinUriClick = onDogecoinUriClick,
+            onRequestDoge = onPrivateRequestDoge,
             onDismiss = {
                 viewModel.hidePrivateChatSheet()
                 viewModel.endPrivateChat()

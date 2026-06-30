@@ -139,6 +139,36 @@ fun LocationChannelsSheet(
                         )
                     }
 
+                    if (appLocationEnabled && !systemLocationEnabled) {
+                        item(key = "system_location_disabled") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 24.dp)
+                                    .padding(bottom = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.location_system_disabled),
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = Color.Red.copy(alpha = 0.8f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                    }
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.open_location_settings),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // Permission controls if services enabled
                     if (locationServicesEnabled) {
                         item(key = "permissions") {
@@ -477,19 +507,19 @@ fun LocationChannelsSheet(
                         ) {
                             Button(
                                 onClick = {
-                                    if (locationServicesEnabled) {
+                                    if (appLocationEnabled) {
                                         locationManager.disableLocationServices()
                                     } else {
                                         locationManager.enableLocationServices()
                                     }
                                 },
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (locationServicesEnabled) {
+                                    containerColor = if (appLocationEnabled) {
                                         Color.Red.copy(alpha = 0.08f)
                                     } else {
                                         standardGreen.copy(alpha = 0.12f)
                                     },
-                                    contentColor = if (locationServicesEnabled) {
+                                    contentColor = if (appLocationEnabled) {
                                         Color(0xFFBF1A1A)
                                     } else {
                                         standardGreen
@@ -498,7 +528,7 @@ fun LocationChannelsSheet(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = if (locationServicesEnabled) stringResource(R.string.disable_location_services) else stringResource(R.string.enable_location_services),
+                                    text = if (appLocationEnabled) stringResource(R.string.disable_location_services) else stringResource(R.string.enable_location_services),
                                     fontSize = 12.sp,
                                     fontFamily = FontFamily.Monospace
                                 )

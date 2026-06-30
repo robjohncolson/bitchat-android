@@ -1,6 +1,7 @@
 package com.bitchat.android.mesh
 
 import com.bitchat.android.model.BitchatFilePacket
+import com.bitchat.android.model.BitchatMessage
 
 /**
  * Transport-agnostic mesh service API for UI and routing layers.
@@ -13,12 +14,17 @@ interface MeshService {
     fun stopServices()
 
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null)
+    fun sendChannelMessage(message: BitchatMessage) {
+        sendMessage(message.content, message.mentions ?: emptyList(), message.channel)
+    }
     fun sendPrivateMessage(content: String, recipientPeerID: String, recipientNickname: String, messageID: String? = null)
     fun sendReadReceipt(messageID: String, recipientPeerID: String, readerNickname: String)
     fun sendDeliveryAck(messageID: String, recipientPeerID: String) {}
     fun sendFavoriteNotification(peerID: String, isFavorite: Boolean) {}
     fun sendVerifyChallenge(peerID: String, noiseKeyHex: String, nonceA: ByteArray)
     fun sendVerifyResponse(peerID: String, noiseKeyHex: String, nonceA: ByteArray)
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray)
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray)
     fun sendFileBroadcast(file: BitchatFilePacket)
     fun sendFilePrivate(recipientPeerID: String, file: BitchatFilePacket)
     fun cancelFileTransfer(transferId: String): Boolean

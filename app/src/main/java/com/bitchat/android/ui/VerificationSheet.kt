@@ -32,12 +32,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Paid
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
@@ -94,6 +98,7 @@ fun VerificationSheet(
     isPresented: Boolean,
     onDismiss: () -> Unit,
     viewModel: ChatViewModel,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (!isPresented) return
@@ -143,7 +148,7 @@ fun VerificationSheet(
                     onClick = { selectedTab = 0 },
                     text = {
                         Text(
-                            text = "My QR",
+                            text = stringResource(R.string.verify_tab_my_qr),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 14.sp
                         )
@@ -154,7 +159,7 @@ fun VerificationSheet(
                     onClick = { selectedTab = 1 },
                     text = {
                         Text(
-                            text = "Scan",
+                            text = stringResource(R.string.verify_tab_scan),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 14.sp
                         )
@@ -182,19 +187,48 @@ fun VerificationSheet(
                             val qr = VerificationService.verifyScannedQR(code)
                             if (qr != null && viewModel.beginQRVerification(qr)) {
                                 selectedTab = 0
+                                true
+                            } else {
+                                false
                             }
                         }
                     )
                 }
             }
             
-            // Unverify Action
             val peerID by viewModel.selectedPrivateChatPeer.collectAsStateWithLifecycle()
+            val peerDogecoinAddresses by viewModel.peerDogecoinAddresses.collectAsStateWithLifecycle()
             val fingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
-            
+            val currentDogecoinNetwork = viewModel.currentDogecoinNetwork()
+            val peerDogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerID?.let { viewModel.getPeerDogecoinAddress(it, currentDogecoinNetwork) }
+            }
+            val peerFingerprint = peerID?.let { viewModel.getMeshPeerFingerprint(it) }
+            // The address was only Ed25519 signature-checked at announce time, which is weaker than
+            // the user having verified this peer's identity. Only show the identity-verified styling
+            // when the peer is actually identity-verified; otherwise present it as merely "signed".
+            val isPeerIdentityVerified = peerFingerprint != null && fingerprints.contains(peerFingerprint)
+
+            if (peerID != null && peerDogecoinAddress != null && onDogecoinUriClick != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                VerifiedDogecoinAddressCard(
+                    networkName = currentDogecoinNetwork.displayName,
+                    address = peerDogecoinAddress,
+                    accent = accent,
+                    identityVerified = isPeerIdentityVerified,
+                    onSendDoge = {
+                        viewModel.getPeerDogecoinPaymentUri(peerID!!)?.let { uri ->
+                            onDismiss()
+                            onDogecoinUriClick(uri)
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
+            // Unverify Action
             if (peerID != null) {
-                val fingerprint = viewModel.getMeshPeerFingerprint(peerID!!)
-                if (fingerprint != null && fingerprints.contains(fingerprint)) {
+                if (peerFingerprint != null && fingerprints.contains(peerFingerprint)) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = { viewModel.unverifyFingerprint(peerID!!) },
@@ -236,6 +270,82 @@ private fun VerificationHeader(
             color = accent
         )
         CloseButton(onClick = onClose)
+    }
+}
+
+@Composable
+private fun VerifiedDogecoinAddressCard(
+    networkName: String,
+    address: String,
+    accent: Color,
+    identityVerified: Boolean,
+    onSendDoge: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Only reuse the identity-verified green check when the peer is actually
+                // identity-verified; otherwise the address is merely signature-checked ("signed").
+                Icon(
+                    imageVector = if (identityVerified) Icons.Filled.Verified else Icons.Filled.Paid,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = if (identityVerified) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+                Text(
+                    text = stringResource(
+                        if (identityVerified) R.string.dogecoin_peer_verified_address_network
+                        else R.string.dogecoin_peer_signed_address_network,
+                        networkName
+                    ),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Text(
+                text = address,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Text(
+                text = stringResource(R.string.dogecoin_peer_address_reuse_note),
+                style = MaterialTheme.typography.bodySmall,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+
+            Button(
+                onClick = onSendDoge,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Paid,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    text = stringResource(R.string.dogecoin_send_doge),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp
+                )
+            }
+        }
     }
 }
 
@@ -318,9 +428,11 @@ private fun MyQrTabContent(
 @Composable
 private fun ScanTabContent(
     accent: Color,
-    onScan: (String) -> Unit
+    onScan: (String) -> Boolean
 ) {
     val permissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
+    var pastedCode by remember { mutableStateOf("") }
+    var pasteError by remember { mutableStateOf(false) }
     
     Column(
         modifier = Modifier
@@ -338,7 +450,10 @@ private fun ScanTabContent(
                     .background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                ScannerView(onScan = onScan)
+                ScannerView(onScan = { code ->
+                    onScan(code)
+                    Unit
+                })
                 
                 // Overlay border
                 Box(
@@ -401,6 +516,45 @@ private fun ScanTabContent(
                     )
                 }
             }
+        }
+
+        OutlinedTextField(
+            value = pastedCode,
+            onValueChange = {
+                pastedCode = it
+                pasteError = false
+            },
+            label = {
+                Text(
+                    text = stringResource(R.string.verify_paste_label),
+                    fontFamily = FontFamily.Monospace
+                )
+            },
+            isError = pasteError,
+            supportingText = if (pasteError) {
+                {
+                    Text(
+                        text = stringResource(R.string.verify_invalid_url),
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            } else null,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Button(
+            onClick = {
+                pasteError = !onScan(pastedCode.trim())
+            },
+            enabled = pastedCode.isNotBlank(),
+            colors = ButtonDefaults.buttonColors(containerColor = accent),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = stringResource(R.string.verify_validate),
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }

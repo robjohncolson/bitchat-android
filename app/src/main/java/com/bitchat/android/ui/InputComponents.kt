@@ -171,6 +171,7 @@ fun MessageInput(
     currentChannel: String?,
     nickname: String,
     showMediaButtons: Boolean,
+    onRequestDoge: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -253,66 +254,80 @@ fun MessageInput(
         
         Spacer(modifier = Modifier.width(8.dp)) // Reduced spacing
         
-        // Voice and image buttons when no text (only visible in Mesh chat)
-        if (value.text.isEmpty() && showMediaButtons) {
-            // Hold-to-record microphone
-            val bg = if (colorScheme.background == Color.Black) Color(0xFF00FF00).copy(alpha = 0.75f) else Color(0xFF008000).copy(alpha = 0.75f)
-
-            // Ensure latest values are used when finishing recording
-            val latestSelectedPeer = rememberUpdatedState(selectedPrivatePeer)
-            val latestChannel = rememberUpdatedState(currentChannel)
-            val latestOnSendVoiceNote = rememberUpdatedState(onSendVoiceNote)
-
-            // Image button (image picker) - hide during recording
-            if (!isRecording) {
-                // Revert to original separate buttons: round File button (left) and the old Image plus button (right)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    // DISABLE FILE PICKER
-                    //FilePickerButton(
-                    //    onFileReady = { path ->
-                    //        onSendFileNote(latestSelectedPeer.value, latestChannel.value, path)
-                    //    }
-                    //)
-                    ImagePickerButton(
-                        onImageReady = { outPath ->
-                            onSendImageNote(latestSelectedPeer.value, latestChannel.value, outPath)
-                        }
+        // Empty-composer actions. Media stays limited to mesh chat; DOGE requests can appear in any chat.
+        if (value.text.isEmpty() && (showMediaButtons || onRequestDoge != null)) {
+            if (onRequestDoge != null && !isRecording) {
+                IconButton(
+                    onClick = onRequestDoge,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AccountBalanceWallet,
+                        contentDescription = stringResource(R.string.dogecoin_request_doge),
+                        modifier = Modifier.size(22.dp),
+                        tint = colorScheme.primary
                     )
                 }
             }
 
-            Spacer(Modifier.width(1.dp))
+            if (showMediaButtons) {
+                // Hold-to-record microphone
+                val bg = if (colorScheme.background == Color.Black) Color(0xFF00FF00).copy(alpha = 0.75f) else Color(0xFF008000).copy(alpha = 0.75f)
 
-            VoiceRecordButton(
-                backgroundColor = bg,
-                onStart = {
-                    isRecording = true
-                    elapsedMs = 0L
-                    // Keep existing focus to avoid IME collapse, but do not force-show keyboard
-                    if (isFocused.value) {
-                        try { focusRequester.requestFocus() } catch (_: Exception) {}
+                // Ensure latest values are used when finishing recording
+                val latestSelectedPeer = rememberUpdatedState(selectedPrivatePeer)
+                val latestChannel = rememberUpdatedState(currentChannel)
+                val latestOnSendVoiceNote = rememberUpdatedState(onSendVoiceNote)
+
+                // Image button (image picker) - hide during recording
+                if (!isRecording) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        FilePickerButton(
+                            onFileReady = { path ->
+                                onSendFileNote(latestSelectedPeer.value, latestChannel.value, path)
+                            }
+                        )
+                        ImagePickerButton(
+                            onImageReady = { outPath ->
+                                onSendImageNote(latestSelectedPeer.value, latestChannel.value, outPath)
+                            }
+                        )
                     }
-                },
-                onAmplitude = { amp, ms ->
-                    amplitude = amp
-                    elapsedMs = ms
-                },
-                onFinish = { path ->
-                    isRecording = false
-                    // Extract and cache waveform from the actual audio file to match receiver rendering
-                    AudioWaveformExtractor.extractAsync(path, sampleCount = 120) { arr ->
-                        if (arr != null) {
-                            try { com.bitchat.android.features.voice.VoiceWaveformCache.put(path, arr) } catch (_: Exception) {}
-                        }
-                    }
-                    // BLE path (private or public) — use latest values to avoid stale captures
-                    latestOnSendVoiceNote.value(
-                        latestSelectedPeer.value,
-                        latestChannel.value,
-                        path
-                    )
                 }
-            )
+
+                Spacer(Modifier.width(1.dp))
+
+                VoiceRecordButton(
+                    backgroundColor = bg,
+                    onStart = {
+                        isRecording = true
+                        elapsedMs = 0L
+                        // Keep existing focus to avoid IME collapse, but do not force-show keyboard
+                        if (isFocused.value) {
+                            try { focusRequester.requestFocus() } catch (_: Exception) {}
+                        }
+                    },
+                    onAmplitude = { amp, ms ->
+                        amplitude = amp
+                        elapsedMs = ms
+                    },
+                    onFinish = { path ->
+                        isRecording = false
+                        // Extract and cache waveform from the actual audio file to match receiver rendering
+                        AudioWaveformExtractor.extractAsync(path, sampleCount = 120) { arr ->
+                            if (arr != null) {
+                                try { com.bitchat.android.features.voice.VoiceWaveformCache.put(path, arr) } catch (_: Exception) {}
+                            }
+                        }
+                        // BLE path (private or public) — use latest values to avoid stale captures
+                        latestOnSendVoiceNote.value(
+                            latestSelectedPeer.value,
+                            latestChannel.value,
+                            path
+                        )
+                    }
+                )
+            }
             
         } else {
             // Send button with enabled/disabled state

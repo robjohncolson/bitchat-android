@@ -25,6 +25,17 @@ class FragmentingPacketSender(
 ) {
     private val transferJobs = ConcurrentHashMap<String, Job>()
 
+    private companion object {
+        // Option B (relay-hop arm): a single GATT connection allows one outstanding op, so a later
+        // fragment of a TARGETED/relayed send (sendSingle returns the real write result) can momentarily
+        // return false ("busy"). Previously that ABORTED the whole set after N/total fragments. Now we
+        // retry the same fragment a bounded number of times before giving up, so the helper still
+        // reassembles. (The broadcast arm's sendSingle always returns true and retries inside the
+        // broadcaster instead, so this loop is a no-op there.)
+        const val FRAGMENT_MAX_ATTEMPTS = 8
+        const val FRAGMENT_RETRY_DELAY_MS = 50L
+    }
+
     fun send(
         routed: RoutedPacket,
         description: String,
@@ -58,11 +69,22 @@ class FragmentingPacketSender(
                 if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
 
                 val fragment = routed.copy(packet = packet, transferId = transferId)
-                val delivered = try {
-                    sendSingle(fragment)
-                } catch (e: Exception) {
-                    Log.e(logTag, "Fragment send failed for $description: ${e.message}", e)
-                    false
+                var delivered = false
+                var attempt = 0
+                while (attempt < FRAGMENT_MAX_ATTEMPTS && !delivered && isActive) {
+                    delivered = try {
+                        sendSingle(fragment)
+                    } catch (e: Exception) {
+                        Log.e(logTag, "Fragment send failed for $description: ${e.message}", e)
+                        false
+                    }
+                    if (!delivered) {
+                        attempt += 1
+                        if (attempt < FRAGMENT_MAX_ATTEMPTS) {
+                            Log.d(logTag, "Fragment ${sent + 1}/$total busy for $description, retry $attempt/$FRAGMENT_MAX_ATTEMPTS")
+                            delay(FRAGMENT_RETRY_DELAY_MS)
+                        }
+                    }
                 }
 
                 if (!delivered) {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only command surface for adb-driven introspection. Present ONLY in debug builds.
+  Drive it with an `am broadcast` to the component below, passing a string extra `cmd`.
+  Output goes to logcat under tag "DbgConsole". See DebugConsole.kt for the command list.
+
+  Also relabels the launcher to "bitchat dev" so the debug build (applicationId .debug) is
+  visually distinct from a side-by-side Play-store install on the home screen.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:label="bitchat dev"
+        tools:replace="android:label">
+        <activity
+            android:name="com.bitchat.android.MainActivity"
+            android:label="bitchat dev"
+            tools:replace="android:label" />
+        <receiver
+            android:name="com.bitchat.android.debug.DebugCommandReceiver"
+            android:enabled="true"
+            android:exported="true" />
+    </application>
+</manifest>

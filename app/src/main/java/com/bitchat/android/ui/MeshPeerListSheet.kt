@@ -48,6 +48,7 @@ fun MeshPeerListSheet(
     viewModel: ChatViewModel,
     onDismiss: () -> Unit,
     onShowVerification: () -> Unit,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -167,6 +168,7 @@ fun MeshPeerListSheet(
                                     selectedPrivatePeer = selectedPrivatePeer,
                                     wifiAwarePeerIDs = wifiAwarePeerIDs,
                                     viewModel = viewModel,
+                                    onDogecoinUriClick = onDogecoinUriClick,
                                     onPrivateChatStart = { peerID ->
                                         viewModel.showPrivateChatSheet(peerID)
                                         onDismiss()
@@ -284,6 +286,7 @@ fun PeopleSection(
     selectedPrivatePeer: String?,
     wifiAwarePeerIDs: Set<String> = emptySet(),
     viewModel: ChatViewModel,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
     onPrivateChatStart: (String) -> Unit
 ) {
     Column(modifier = modifier) {
@@ -317,7 +320,9 @@ fun PeopleSection(
         val privateChats by viewModel.privateChats.collectAsStateWithLifecycle()
         val favoritePeers by viewModel.favoritePeers.collectAsStateWithLifecycle()
         val peerFingerprints by viewModel.peerFingerprints.collectAsStateWithLifecycle()
+        val peerDogecoinAddresses by viewModel.peerDogecoinAddresses.collectAsStateWithLifecycle()
         val verifiedFingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
+        val currentDogecoinNetwork = viewModel.currentDogecoinNetwork()
 
         // Reactive favorite computation for all peers
         val peerFavoriteStates = remember(favoritePeers, peerFingerprints, connectedPeers) {
@@ -416,6 +421,13 @@ fun PeopleSection(
 
             val directMap by viewModel.peerDirect.collectAsStateWithLifecycle()
             val isDirectLive = directMap[peerID] ?: try { viewModel.getMeshPeerInfo(peerID)?.isDirectConnection == true } catch (_: Exception) { false }
+            // Memoized so the cached-address lookup (which decrypts EncryptedSharedPreferences when
+            // the peer has no live announced address) does not re-run on every unrelated recompose.
+            val dogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerDogecoinAddresses[peerID]?.get(currentDogecoinNetwork.id)
+                    ?: viewModel.getPeerDogecoinAddress(peerID, currentDogecoinNetwork)
+            }
+            val hasDogecoinAddress = onDogecoinUriClick != null && dogecoinAddress != null
             PeerItem(
                 peerID = peerID,
                 displayName = displayName,
@@ -428,6 +440,15 @@ fun PeopleSection(
                 colorScheme = colorScheme,
                 viewModel = viewModel,
                 onItemClick = { onPrivateChatStart(peerID) },
+                onSendDoge = if (hasDogecoinAddress) {
+                    {
+                        viewModel.getPeerDogecoinPaymentUri(peerID)?.let { uri ->
+                            onDogecoinUriClick?.invoke(uri)
+                        }
+                    }
+                } else {
+                    null
+                },
                 onToggleFavorite = { 
                     Log.d("SidebarComponents", "Sidebar toggle favorite: peerID=$peerID, currentFavorite=$isFavorite")
                     viewModel.toggleFavorite(peerID) 
@@ -469,6 +490,11 @@ fun PeopleSection(
             val showHash = (baseNameCounts[bName] ?: 0) > 1
 
             val isVerified = viewModel.isNoisePublicKeyVerified(fav.peerNoisePublicKey, verifiedFingerprints)
+            val dogecoinAddress = remember(favPeerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+                peerDogecoinAddresses[favPeerID]?.get(currentDogecoinNetwork.id)
+                    ?: viewModel.getPeerDogecoinAddress(favPeerID, currentDogecoinNetwork)
+            }
+            val hasDogecoinAddress = onDogecoinUriClick != null && dogecoinAddress != null
 
             // Compute unreadCount from either noise conversation or Nostr conversation
             val unreadCount = (
@@ -488,6 +514,15 @@ fun PeopleSection(
                 colorScheme = colorScheme,
                 viewModel = viewModel,
                 onItemClick = { onPrivateChatStart(mappedConnectedPeerID ?: favPeerID) },
+                onSendDoge = if (hasDogecoinAddress) {
+                    {
+                        viewModel.getPeerDogecoinPaymentUri(favPeerID)?.let { uri ->
+                            onDogecoinUriClick?.invoke(uri)
+                        }
+                    }
+                } else {
+                    null
+                },
                 onToggleFavorite = { 
                     Log.d("SidebarComponents", "Sidebar toggle favorite (offline): peerID=$favPeerID")
                     viewModel.toggleFavorite(favPeerID)
@@ -528,9 +563,10 @@ fun PeopleSection(
                     isFavorite = false,
                     hasUnreadDM = hasUnreadPrivateMessages.contains(convKey),
                     colorScheme = colorScheme,
-                    viewModel = viewModel,
-                    onItemClick = { onPrivateChatStart(convKey) },
-                    onToggleFavorite = { viewModel.toggleFavorite(convKey) },
+                viewModel = viewModel,
+                onItemClick = { onPrivateChatStart(convKey) },
+                    onSendDoge = null,
+                onToggleFavorite = { viewModel.toggleFavorite(convKey) },
                     unreadCount = privateChats[convKey]?.count { msg ->
                         msg.sender != nickname && hasUnreadPrivateMessages.contains(convKey)
                     } ?: if (hasUnreadPrivateMessages.contains(convKey)) 1 else 0,
@@ -544,6 +580,7 @@ fun PeopleSection(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PeerItem(
     peerID: String,
@@ -557,6 +594,7 @@ private fun PeerItem(
     colorScheme: ColorScheme,
     viewModel: ChatViewModel,
     onItemClick: () -> Unit,
+    onSendDoge: (() -> Unit)?,
     onToggleFavorite: () -> Unit,
     unreadCount: Int = 0,
     showNostrGlobe: Boolean = false,
@@ -573,139 +611,171 @@ private fun PeerItem(
     val isDark = colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue < 1.5f
     val assignedColor = viewModel.colorForMeshPeer(peerID, isDark)
     val baseColor = if (isMe) Color(0xFFFF9500) else assignedColor
+    var showPeerActions by remember(peerID, onSendDoge) { mutableStateOf(false) }
 
-    Surface(
-        onClick = onItemClick,
-        color = if (isSelected) {
-            colorScheme.primaryContainer.copy(alpha = 0.15f)
-        } else {
-            Color.Transparent
-        },
-        shape = MaterialTheme.shapes.medium,
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 2.dp)
     ) {
-        Row(
+        Surface(
+            color = if (isSelected) {
+                colorScheme.primaryContainer.copy(alpha = 0.15f)
+            } else {
+                Color.Transparent
+            },
+            shape = MaterialTheme.shapes.medium,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .combinedClickable(
+                    onClick = onItemClick,
+                    onLongClick = {
+                        if (onSendDoge != null) {
+                            showPeerActions = true
+                        }
+                    }
+                )
         ) {
             Row(
-                modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Connection/status indicator
-                if (hasUnreadDM) {
-                    // Show mail icon for unread DMs (iOS orange)
-                    Icon(
-                        imageVector = Icons.Filled.Email,
-                        contentDescription = stringResource(R.string.cd_unread_message),
-                        modifier = Modifier.size(16.dp),
-                        tint = Color(0xFFFF9500) // iOS orange
-                    )
-                } else if (showNostrGlobe) {
-                    // Purple globe to indicate Nostr availability
-                    Icon(
-                        imageVector = Icons.Filled.Public,
-                        contentDescription = stringResource(R.string.cd_reachable_via_nostr),
-                        modifier = Modifier.size(16.dp),
-                        tint = Color(0xFF9C27B0) // Purple
-                    )
-                } else if (!isDirect && isFavorite) {
-                    // Offline favorited user: show outlined circle icon
-                    Icon(
-                        imageVector = Icons.Outlined.Circle,
-                        contentDescription = stringResource(R.string.cd_offline_favorite),
-                        modifier = Modifier.size(16.dp),
-                        tint = Color.Gray
-                    )
-                } else {
-                    Icon(
-                        imageVector = when {
-                            isWifiAware -> Icons.Filled.Wifi
-                            isDirect -> Icons.Outlined.Bluetooth
-                            else -> Icons.Filled.Route
-                        },
-                        contentDescription = when {
-                            isWifiAware -> "Direct Wi-Fi Aware"
-                            isDirect -> "Direct Bluetooth"
-                            else -> "Routed"
-                        },
-                        modifier = Modifier.size(16.dp),
-                        tint = colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Connection/status indicator
+                    if (hasUnreadDM) {
+                        // Show mail icon for unread DMs (iOS orange)
+                        Icon(
+                            imageVector = Icons.Filled.Email,
+                            contentDescription = stringResource(R.string.cd_unread_message),
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFFFF9500) // iOS orange
+                        )
+                    } else if (showNostrGlobe) {
+                        // Purple globe to indicate Nostr availability
+                        Icon(
+                            imageVector = Icons.Filled.Public,
+                            contentDescription = stringResource(R.string.cd_reachable_via_nostr),
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFF9C27B0) // Purple
+                        )
+                    } else if (!isDirect && isFavorite) {
+                        // Offline favorited user: show outlined circle icon
+                        Icon(
+                            imageVector = Icons.Outlined.Circle,
+                            contentDescription = stringResource(R.string.cd_offline_favorite),
+                            modifier = Modifier.size(16.dp),
+                            tint = Color.Gray
+                        )
+                    } else {
+                        Icon(
+                            imageVector = when {
+                                isWifiAware -> Icons.Filled.Wifi
+                                isDirect -> Icons.Outlined.Bluetooth
+                                else -> Icons.Filled.Route
+                            },
+                            contentDescription = when {
+                                isWifiAware -> stringResource(R.string.cd_direct_wifi_aware)
+                                isDirect -> stringResource(R.string.cd_direct_bluetooth)
+                                else -> stringResource(R.string.cd_routed)
+                            },
+                            modifier = Modifier.size(16.dp),
+                            tint = colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
 
-                // Display name with iOS-style color and hashtag suffix support
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Base name with peer-specific color
-                    Text(
-                        text = baseName,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = BASE_FONT_SIZE.sp,
-                            fontWeight = if (isMe) FontWeight.Bold else FontWeight.Normal
-                        ),
-                        color = baseColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    // Hashtag suffix in lighter shade (iOS-style)
-                    if (suffix.isNotEmpty()) {
+                    // Display name with iOS-style color and hashtag suffix support
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Base name with peer-specific color
                         Text(
-                            text = suffix,
+                            text = baseName,
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = BASE_FONT_SIZE.sp
+                                fontSize = BASE_FONT_SIZE.sp,
+                                fontWeight = if (isMe) FontWeight.Bold else FontWeight.Normal
                             ),
-                            color = baseColor.copy(alpha = 0.6f)
+                            color = baseColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                    }
 
-                    if (isWifiAware && hasUnreadDM) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Filled.Wifi,
-                            contentDescription = "Direct Wi-Fi Aware",
-                            modifier = Modifier.size(13.dp),
-                            tint = colorScheme.onSurface.copy(alpha = 0.8f)
-                        )
+                        // Hashtag suffix in lighter shade (iOS-style)
+                        if (suffix.isNotEmpty()) {
+                            Text(
+                                text = suffix,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = BASE_FONT_SIZE.sp
+                                ),
+                                color = baseColor.copy(alpha = 0.6f)
+                            )
+                        }
+
+                        if (isWifiAware && hasUnreadDM) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Filled.Wifi,
+                                contentDescription = stringResource(R.string.cd_direct_wifi_aware),
+                                modifier = Modifier.size(13.dp),
+                                tint = colorScheme.onSurface.copy(alpha = 0.8f)
+                            )
+                        }
                     }
                 }
-            }
 
-            if (isVerified) {
-                Spacer(modifier = Modifier.width(4.dp))
-                Icon(
-                    imageVector = Icons.Filled.Verified,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = Color(0xFF32D74B) // iOS Green
-                )
-            }
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Favorite star with proper filled/outlined states
-                IconButton(
-                    onClick = onToggleFavorite,
-                    modifier = Modifier.size(32.dp)
-                ) {
+                if (isVerified) {
+                    Spacer(modifier = Modifier.width(4.dp))
                     Icon(
-                        imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
-                        contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
-                        modifier = Modifier.size(16.dp),
-                        tint = if (isFavorite) Color(0xFFFFD700) else Color(0xFF4CAF50)
+                        imageVector = Icons.Filled.Verified,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = Color(0xFF32D74B) // iOS Green
                     )
                 }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Favorite star with proper filled/outlined states
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+                            contentDescription = if (isFavorite) stringResource(R.string.cd_remove_favorite) else stringResource(R.string.cd_add_favorite),
+                            modifier = Modifier.size(16.dp),
+                            tint = if (isFavorite) Color(0xFFFFD700) else Color(0xFF4CAF50)
+                        )
+                    }
+                }
             }
+        }
+
+        DropdownMenu(
+            expanded = showPeerActions && onSendDoge != null,
+            onDismissRequest = { showPeerActions = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.dogecoin_send_doge)) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Paid,
+                        contentDescription = null
+                    )
+                },
+                onClick = {
+                    showPeerActions = false
+                    onSendDoge?.invoke()
+                }
+            )
         }
     }
 }
@@ -774,6 +844,8 @@ fun PrivateChatSheet(
     isPresented: Boolean,
     peerID: String,
     viewModel: ChatViewModel,
+    onDogecoinUriClick: ((String) -> Unit)? = null,
+    onRequestDoge: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -785,6 +857,7 @@ fun PrivateChatSheet(
     val peerSessionStates by viewModel.peerSessionStates.collectAsStateWithLifecycle()
     val favoritePeers by viewModel.favoritePeers.collectAsStateWithLifecycle()
     val peerFingerprints by viewModel.peerFingerprints.collectAsStateWithLifecycle()
+    val peerDogecoinAddresses by viewModel.peerDogecoinAddresses.collectAsStateWithLifecycle()
 
     val verifiedFingerprints by viewModel.verifiedFingerprints.collectAsStateWithLifecycle()
     val wifiAwareConnected by com.bitchat.android.wifiaware.WifiAwareController.connectedPeers.collectAsStateWithLifecycle()
@@ -826,6 +899,10 @@ fun PrivateChatSheet(
     val isVerified = remember(peerID, verifiedFingerprints) {
         viewModel.isPeerVerified(peerID, verifiedFingerprints)
     }
+    val currentDogecoinNetwork = viewModel.currentDogecoinNetwork()
+    val peerDogecoinAddress = remember(peerID, peerDogecoinAddresses, currentDogecoinNetwork) {
+        viewModel.getPeerDogecoinAddress(peerID, currentDogecoinNetwork)
+    }
 
     val securityModifier = if (!isNostrPeer) {
         Modifier.clickable { viewModel.showSecurityVerificationSheet() }
@@ -864,7 +941,8 @@ fun PrivateChatSheet(
                         onNicknameClick = { /* handle mention */ },
                         onMessageLongPress = { /* handle long press */ },
                         onCancelTransfer = { msg -> viewModel.cancelMediaSend(msg.id) },
-                        onImageClick = { _, _, _ -> /* handle image click */ }
+                        onImageClick = { _, _, _ -> /* handle image click */ },
+                        onDogecoinUriClick = onDogecoinUriClick
                     )
 
                     HorizontalDivider(color = colorScheme.outline.copy(alpha = 0.3f))
@@ -910,7 +988,8 @@ fun PrivateChatSheet(
                         currentChannel = null,
                         nickname = nickname,
                         colorScheme = colorScheme,
-                        showMediaButtons = true
+                        showMediaButtons = true,
+                        onRequestDoge = onRequestDoge
                     )
                 }
 
@@ -952,7 +1031,7 @@ fun PrivateChatSheet(
                                 isWifiAware -> {
                                     Icon(
                                         imageVector = Icons.Filled.Wifi,
-                                        contentDescription = "Direct Wi-Fi Aware",
+                                        contentDescription = stringResource(R.string.cd_direct_wifi_aware),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )
@@ -960,7 +1039,7 @@ fun PrivateChatSheet(
                                 isDirect -> {
                                     Icon(
                                         imageVector = Icons.Outlined.Bluetooth,
-                                        contentDescription = "Direct Bluetooth",
+                                        contentDescription = stringResource(R.string.cd_direct_bluetooth),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )
@@ -968,7 +1047,7 @@ fun PrivateChatSheet(
                                 isConnected -> {
                                     Icon(
                                         imageVector = Icons.Filled.Route,
-                                        contentDescription = "Routed",
+                                        contentDescription = stringResource(R.string.cd_routed),
                                         modifier = Modifier.size(14.dp),
                                         tint = colorScheme.onSurface.copy(alpha = 0.6f)
                                     )
@@ -1002,6 +1081,24 @@ fun PrivateChatSheet(
                                         contentDescription = stringResource(R.string.verify_title),
                                         modifier = Modifier.size(14.dp),
                                         tint = Color(0xFF32D74B) // iOS Green
+                                    )
+                                }
+                            }
+
+                            if (peerDogecoinAddress != null && onDogecoinUriClick != null) {
+                                IconButton(
+                                    onClick = {
+                                        viewModel.getPeerDogecoinPaymentUri(peerID)?.let { uri ->
+                                            onDogecoinUriClick.invoke(uri)
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Paid,
+                                        contentDescription = stringResource(R.string.cd_send_doge),
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color(0xFFFFC107)
                                     )
                                 }
                             }

@@ -3,7 +3,6 @@ package com.bitchat.android.ui.media
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.bitchat.android.R
@@ -37,7 +37,7 @@ import java.io.File
 fun FileViewerDialog(
     packet: BitchatFilePacket,
     onDismiss: () -> Unit,
-    onSaveToDevice: (ByteArray, String) -> Unit
+    onSaveToDevice: (ByteArray, String) -> Boolean
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -69,7 +69,7 @@ fun FileViewerDialog(
                     Text(
                         text = stringResource(R.string.file_viewer_name, packet.fileName),
                         style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                        fontWeight = FontWeight.Medium
                     )
                     Text(
                         text = stringResource(R.string.file_viewer_size, FileUtils.formatFileSize(packet.fileSize)),
@@ -94,12 +94,15 @@ fun FileViewerDialog(
                     Button(
                         onClick = {
                             coroutineScope.launch {
-                                // Try to save to Downloads first
-                                try {
+                                val saved = try {
                                     onSaveToDevice(packet.content, packet.fileName)
+                                } catch (_: Exception) {
+                                    false
+                                }
+
+                                if (saved) {
                                     onDismiss()
-                                } catch (e: Exception) {
-                                    // If save fails, try to open directly
+                                } else {
                                     tryOpenFile(context, packet)
                                     onDismiss()
                                 }

@@ -235,6 +235,25 @@ class MeshCore(
                 return peerManager.updatePeerInfo(peerID, nickname, noisePublicKey, signingPublicKey, isVerified)
             }
 
+            override fun updatePeerDogecoinAddress(
+                peerID: String,
+                noisePublicKey: ByteArray,
+                networkId: String,
+                address: String
+            ) {
+                val fingerprint = runCatching { peerManager.storeFingerprintForPeer(peerID, noisePublicKey) }.getOrNull()
+                    ?: return
+                peerManager.updatePeerDogecoinAddress(peerID, networkId, address)
+                runCatching {
+                    com.bitchat.android.identity.SecureIdentityStateManager(context)
+                        .cachePeerDogecoinAddress(fingerprint, networkId, address)
+                }
+            }
+
+            override fun updatePeerHelperNetworks(peerID: String, networks: Set<String>) {
+                peerManager.updatePeerHelperNetworks(peerID, networks)
+            }
+
             override fun sendPacket(packet: BitchatPacket) {
                 val signedPacket = signPacketBeforeBroadcast(packet)
                 dispatchGlobal(RoutedPacket(signedPacket))
@@ -320,6 +339,14 @@ class MeshCore(
 
             override fun onVerifyResponseReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
                 delegate?.didReceiveVerifyResponse(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastRequestReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastRequest(peerID, payload, timestampMs)
+            }
+
+            override fun onPaymentBroadcastResultReceived(peerID: String, payload: ByteArray, timestampMs: Long) {
+                delegate?.didReceivePaymentBroadcastResult(peerID, payload, timestampMs)
             }
         }
 
@@ -413,6 +440,35 @@ class MeshCore(
 
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
         if (content.isEmpty()) return
+        val payload = if (channel != null || mentions.isNotEmpty()) {
+            val message = BitchatMessage(
+                sender = delegate?.getNickname() ?: myPeerID,
+                content = content,
+                timestamp = java.util.Date(),
+                isRelay = false,
+                senderPeerID = myPeerID,
+                mentions = mentions.takeIf { it.isNotEmpty() },
+                channel = channel
+            )
+            message.toBinaryPayload() ?: run {
+                Log.e("MeshCore", "Failed to encode channel message payload for $channel")
+                return
+            }
+        } else {
+            content.toByteArray(Charsets.UTF_8)
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    fun sendChannelMessage(message: BitchatMessage) {
+        val payload = message.toBinaryPayload() ?: run {
+            Log.e("MeshCore", "Failed to encode channel message payload for ${message.channel}")
+            return
+        }
+        sendBroadcastMessagePayload(payload)
+    }
+
+    private fun sendBroadcastMessagePayload(payload: ByteArray) {
         scope.launch {
             val packet = BitchatPacket(
                 version = 1u,
@@ -420,7 +476,7 @@ class MeshCore(
                 senderID = MeshPacketUtils.hexStringToByteArray(myPeerID),
                 recipientID = SpecialRecipients.BROADCAST,
                 timestamp = System.currentTimeMillis().toULong(),
-                payload = content.toByteArray(Charsets.UTF_8),
+                payload = payload,
                 signature = null,
                 ttl = maxTtl
             )
@@ -566,6 +622,20 @@ class MeshCore(
         sendNoisePayloadToPeer(payload, peerID)
     }
 
+    fun sendPaymentBroadcastRequest(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_REQUEST, data = payload),
+            peerID
+        )
+    }
+
+    fun sendPaymentBroadcastResult(peerID: String, payload: ByteArray) {
+        sendNoisePayloadToPeer(
+            NoisePayload(type = NoisePayloadType.PAYMENT_BROADCAST_RESULT, data = payload),
+            peerID
+        )
+    }
+
     private fun sendNoisePayloadToPeer(payload: NoisePayload, recipientPeerID: String) {
         scope.launch {
             try {
@@ -600,7 +670,15 @@ class MeshCore(
                 Log.e("MeshCore", "No signing public key available for announcement")
                 return@launch
             }
-            val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+            val announcement = IdentityAnnouncement(
+                nickname = nickname,
+                noisePublicKey = staticKey,
+                signingPublicKey = signingKey,
+                dogecoinAddresses = listOfNotNull(
+                    com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+                ),
+                helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
+            )
             val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return@launch
             val announcePacket = BitchatPacket(
                 type = MessageType.ANNOUNCE.value,
@@ -621,7 +699,15 @@ class MeshCore(
             ?: myPeerID
         val staticKey = encryptionService.getStaticPublicKey() ?: return
         val signingKey = encryptionService.getSigningPublicKey() ?: return
-        val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+        val announcement = IdentityAnnouncement(
+            nickname = nickname,
+            noisePublicKey = staticKey,
+            signingPublicKey = signingKey,
+            dogecoinAddresses = listOfNotNull(
+                com.bitchat.android.features.dogecoin.DogecoinIdentityAnnouncement.currentReceiveAddress(context)
+            ),
+            helperNetworks = com.bitchat.android.features.dogecoin.DogecoinHelperAnnouncement.helperNetworks(context)
+        )
         val tlvPayload = buildAnnouncementPayload(announcement, nickname) ?: return
         val packet = BitchatPacket(
             type = MessageType.ANNOUNCE.value,

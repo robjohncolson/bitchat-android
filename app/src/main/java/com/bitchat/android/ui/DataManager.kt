@@ -109,6 +109,28 @@ class DataManager(private val context: Context) {
             apply()
         }
     }
+
+    fun loadChannelKeyCommitments(): Map<String, String> {
+        val commitmentsJson = prefs.getString("channel_key_commitments", "{}")
+        return try {
+            val parsed = gson.fromJson(commitmentsJson, Map::class.java) as? Map<*, *>
+            parsed?.mapNotNull { (key, value) ->
+                val channel = key as? String
+                val commitment = value as? String
+                if (channel != null && commitment != null) {
+                    channel to commitment
+                } else {
+                    null
+                }
+            }?.toMap() ?: emptyMap()
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun saveChannelKeyCommitments(commitments: Map<String, String>) {
+        prefs.edit().putString("channel_key_commitments", gson.toJson(commitments)).apply()
+    }
     
     fun addChannelCreator(channel: String, creatorID: String) {
         _channelCreators[channel] = creatorID

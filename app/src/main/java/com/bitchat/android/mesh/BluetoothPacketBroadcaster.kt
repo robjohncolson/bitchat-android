@@ -47,6 +47,15 @@ class BluetoothPacketBroadcaster(
     companion object {
         private const val TAG = "BluetoothPacketBroadcaster"
         private const val CLEANUP_DELAY = com.bitchat.android.util.AppConstants.Mesh.BROADCAST_CLEANUP_DELAY_MS
+        // Option B fragment-delivery hardening: a single GATT connection allows only ONE outstanding
+        // write/notify, so the 2nd fragment of a multi-fragment DIRECTED send often returns false ("busy")
+        // because the 1st is still draining over the air, and was previously dropped with no retry. We now
+        // retry a busy directed write a bounded number of times (~WRITE_MAX_ATTEMPTS * WRITE_RETRY_DELAY_MS
+        // total) so the next fragment is queued once the stack frees up. Scoped to directed/source-routed
+        // sends (payment-broadcast, large private messages); the broadcast-to-all loop is untouched so
+        // single-packet announces are never slowed.
+        private const val WRITE_MAX_ATTEMPTS = 8
+        private const val WRITE_RETRY_DELAY_MS = 50L
     }
 
     // Optional nickname resolver injected by higher layer (peerID -> nickname?)
@@ -284,7 +293,7 @@ class BluetoothPacketBroadcaster(
             
             if (serverTarget != null) {
                 Log.d(TAG, "Source Routing: sending directly to first hop (server conn) $firstHop: ${serverTarget.address}")
-                if (notifyDevice(serverTarget, data, gattServer, characteristic)) {
+                if (notifyDeviceWithRetry(serverTarget, data, gattServer, characteristic)) {
                     val toPeer = connectionTracker.addressPeerMap[serverTarget.address]
                     logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, serverTarget.address, packet.ttl, packet.version, routeInfo)
                     sent = true
@@ -298,7 +307,7 @@ class BluetoothPacketBroadcaster(
                 
                 if (clientTarget != null) {
                     Log.d(TAG, "Source Routing: sending directly to first hop (client conn) $firstHop: ${clientTarget.device.address}")
-                    if (writeToDeviceConn(clientTarget, data)) {
+                    if (writeToDeviceConnWithRetry(clientTarget, data)) {
                         val toPeer = connectionTracker.addressPeerMap[clientTarget.device.address]
                         logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, clientTarget.device.address, packet.ttl, packet.version, routeInfo)
                         sent = true
@@ -321,7 +330,7 @@ class BluetoothPacketBroadcaster(
             // If found, send directly
             if (targetDevice != null) {
                 Log.d(TAG, "Send packet type ${packet.type} directly to target device for recipient $recipientID: ${targetDevice.address}")
-                if (notifyDevice(targetDevice, data, gattServer, characteristic)) {
+                if (notifyDeviceWithRetry(targetDevice, data, gattServer, characteristic)) {
                     val toPeer = connectionTracker.addressPeerMap[targetDevice.address]
                     logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, targetDevice.address, packet.ttl, packet.version, routeInfo)
                     return  // Sent, no need to continue
@@ -335,7 +344,7 @@ class BluetoothPacketBroadcaster(
             // If found, send directly
             if (targetDeviceConn != null) {
                 Log.d(TAG, "Send packet type ${packet.type} directly to target client connection for recipient $recipientID: ${targetDeviceConn.device.address}")
-                if (writeToDeviceConn(targetDeviceConn, data)) {
+                if (writeToDeviceConnWithRetry(targetDeviceConn, data)) {
                     val toPeer = connectionTracker.addressPeerMap[targetDeviceConn.device.address]
                     logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, targetDeviceConn.device.address, packet.ttl, packet.version, routeInfo)
                     return  // Sent, no need to continue
@@ -437,6 +446,47 @@ class BluetoothPacketBroadcaster(
         }
     }
     
+    /**
+     * Retry-on-busy wrapper around [notifyDevice] for DIRECTED sends. A `false` return means the GATT
+     * stack could not queue the notification right now (typically the previous fragment's op is still
+     * outstanding on this connection), NOT a hard failure — so we back off briefly and retry instead of
+     * dropping the fragment. Runs inside the serialized broadcaster actor (already a coroutine).
+     */
+    private suspend fun notifyDeviceWithRetry(
+        device: BluetoothDevice,
+        data: ByteArray,
+        gattServer: BluetoothGattServer?,
+        characteristic: BluetoothGattCharacteristic?
+    ): Boolean {
+        repeat(WRITE_MAX_ATTEMPTS) { attempt ->
+            if (notifyDevice(device, data, gattServer, characteristic)) return true
+            if (attempt < WRITE_MAX_ATTEMPTS - 1) {
+                Log.d(TAG, "notify busy for ${device.address}, retry ${attempt + 1}/$WRITE_MAX_ATTEMPTS")
+                delay(WRITE_RETRY_DELAY_MS)
+            }
+        }
+        Log.w(TAG, "notify to ${device.address} still busy after $WRITE_MAX_ATTEMPTS attempts; dropping")
+        return false
+    }
+
+    /**
+     * Retry-on-busy wrapper around [writeToDeviceConn] for DIRECTED sends. See [notifyDeviceWithRetry].
+     */
+    private suspend fun writeToDeviceConnWithRetry(
+        deviceConn: BluetoothConnectionTracker.DeviceConnection,
+        data: ByteArray
+    ): Boolean {
+        repeat(WRITE_MAX_ATTEMPTS) { attempt ->
+            if (writeToDeviceConn(deviceConn, data)) return true
+            if (attempt < WRITE_MAX_ATTEMPTS - 1) {
+                Log.d(TAG, "write busy for ${deviceConn.device.address}, retry ${attempt + 1}/$WRITE_MAX_ATTEMPTS")
+                delay(WRITE_RETRY_DELAY_MS)
+            }
+        }
+        Log.w(TAG, "write to ${deviceConn.device.address} still busy after $WRITE_MAX_ATTEMPTS attempts; dropping")
+        return false
+    }
+
     /**
      * Get debug information
      */
