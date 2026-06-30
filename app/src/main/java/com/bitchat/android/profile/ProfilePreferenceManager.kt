@@ -37,6 +37,7 @@ object ProfilePreferenceManager {
     private const val PREFS_NAME = "bitchat_settings"
     private const val KEY_PROFILE = "app_profile"
     private const val KEY_PROFILE_CHOSEN = "profile_chosen"
+    private const val KEY_WALLET_ENABLED = "simple_wallet_enabled"
 
     // The onboarding-complete flag lives in PermissionManager's own prefs; we read it directly (no
     // dependency) to migrate already-onboarded installs at startup.
@@ -50,10 +51,16 @@ object ProfilePreferenceManager {
     /** Whether a profile has been explicitly chosen; drives the one-time onboarding picker. */
     val profileChosenFlow: StateFlow<Boolean> = _profileChosenFlow
 
+    private val _walletEnabledFlow = MutableStateFlow(false)
+    /** SIMPLE profile: whether the user opted into the Dogecoin wallet (default off; reversible). */
+    val walletEnabledFlow: StateFlow<Boolean> = _walletEnabledFlow
+
     fun init(context: Context) {
         _profileFlow.value = read(context)
         migrateExistingInstall(context)
         _profileChosenFlow.value = isProfileChosen(context)
+        _walletEnabledFlow.value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_WALLET_ENABLED, false)
     }
 
     fun set(context: Context, profile: AppProfile) {
@@ -72,6 +79,13 @@ object ProfilePreferenceManager {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_PROFILE_CHOSEN, true).apply()
         _profileChosenFlow.value = true
+    }
+
+    /** SIMPLE profile: opt into / out of the Dogecoin wallet (visibility only; functionality always exists). */
+    fun setWalletEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_WALLET_ENABLED, enabled).apply()
+        _walletEnabledFlow.value = enabled
     }
 
     /** DEBUG/testing only: clear the 'chosen' flag so the picker re-appears (a real pick restores it). */

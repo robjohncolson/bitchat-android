@@ -161,6 +161,7 @@ fun DogecoinWalletSheet(
     hasHelperCandidate: Boolean = false,
     onClearPeerBroadcast: () -> Unit = {},
     paymentRequest: DogecoinPaymentRequest? = null,
+    isSimpleProfile: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (!isPresented) return
@@ -1559,7 +1560,10 @@ fun DogecoinWalletSheet(
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            if (walletAction == DogeWalletAction.NONE) {
+                            // The settings gear (network / backend / advanced) is hidden in the SIMPLE profile so a
+                            // non-technical user can't change the network or break connectivity. The money-path
+                            // gates (WIF backup, mainnet/high-fee/policy acks, fail-closed verifier) are unaffected.
+                            if (walletAction == DogeWalletAction.NONE && !isSimpleProfile) {
                                 IconButton(onClick = { walletAction = DogeWalletAction.SETTINGS }) {
                                     Icon(
                                         imageVector = Icons.Filled.Settings,

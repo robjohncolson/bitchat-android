@@ -151,6 +151,7 @@ private fun SimpleHome(
     val contacts = remember(refreshKey) { FavoritesPersistenceService.shared.getMutualFavorites() }
     var showSettings by remember { mutableStateOf(false) }
     var showAddFamily by remember { mutableStateOf(false) }
+    var showWallet by remember { mutableStateOf(false) }
 
     if (showAddFamily) {
         BackHandler { showAddFamily = false }
@@ -224,7 +225,21 @@ private fun SimpleHome(
     }
 
     if (showSettings) {
-        SimpleSettingsSheet(viewModel = viewModel, onDismiss = { showSettings = false })
+        SimpleSettingsSheet(
+            viewModel = viewModel,
+            onDismiss = { showSettings = false },
+            onOpenWallet = { showWallet = true }
+        )
+    }
+    if (showWallet) {
+        // The opt-in family wallet: the existing wallet sheet LOCKED (no settings gear -> no network/advanced
+        // reachable); money-path gates stay intact.
+        com.bitchat.android.features.dogecoin.DogecoinWalletSheet(
+            isPresented = true,
+            onDismiss = { showWallet = false },
+            onShareToChat = {},
+            isSimpleProfile = true
+        )
     }
 }
 
@@ -378,7 +393,7 @@ private fun formatBubbleTime(date: java.util.Date): String =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
+private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit, onOpenWallet: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val nickname by viewModel.nickname.collectAsState()
@@ -482,6 +497,37 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit)
                         }
                     }
                 )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+            // Dogecoin wallet opt-in (secondary; off by default, reversible — functionality always exists).
+            val walletEnabled by com.bitchat.android.profile.ProfilePreferenceManager.walletEnabledFlow.collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "Use Dogecoin",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "A simple wallet to send and receive Dogecoin",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = walletEnabled,
+                    onCheckedChange = {
+                        com.bitchat.android.profile.ProfilePreferenceManager.setWalletEnabled(context, it)
+                    }
+                )
+            }
+            if (walletEnabled) {
+                TextButton(onClick = { onDismiss(); onOpenWallet() }) {
+                    Text("Open wallet")
+                }
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline)
