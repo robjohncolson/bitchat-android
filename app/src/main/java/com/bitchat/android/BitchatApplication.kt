@@ -30,6 +30,13 @@ class BitchatApplication : Application() {
             com.bitchat.android.favorites.FavoritesPersistenceService.initialize(this)
         } catch (_: Exception) { }
 
+        // Restore persisted chat history (DMs + channels) BEFORE any UI subscribes to AppStateStore, so the
+        // first emission already carries history instead of starting empty after a process kill.
+        try {
+            com.bitchat.android.services.AppStateStore.init(this)
+            com.bitchat.android.services.AppStateStore.load()
+        } catch (_: Exception) { }
+
         // Warm up Nostr identity to ensure npub is available for favorite notifications
         try {
             com.bitchat.android.nostr.NostrIdentityBridge.getCurrentNostrIdentity(this)

@@ -93,7 +93,7 @@ import kotlinx.coroutines.launch
  */
 private sealed interface SimpleTarget {
     data object Room : SimpleTarget
-    data class Contact(val peerID: String, val name: String) : SimpleTarget
+    data class Contact(val peerID: String, val name: String, val noiseHex: String?) : SimpleTarget
 }
 
 @Composable
@@ -110,13 +110,13 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     viewModel.endPrivateChat()
                     target = SimpleTarget.Room
                 },
-                onOpenContact = { npub, name ->
+                onOpenContact = { npub, name, noiseHex ->
                     val hex = nostrPubkeyToHex(npub)
                     if (hex != null) {
                         val convKey = "nostr_${hex.take(16)}"
                         viewModel.startGeohashDM(hex)        // register the conv-key -> pubkey mapping + subscription
                         viewModel.startPrivateChat(convKey)  // make it the active private-chat context for sends
-                        target = SimpleTarget.Contact(convKey, name)
+                        target = SimpleTarget.Contact(convKey, name, noiseHex)
                     }
                 }
             )
@@ -129,6 +129,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     title = "Family Room",
                     isPrivate = false,
                     peerID = null,
+                    noiseHex = null,
                     onBack = { target = null }
                 )
             }
@@ -141,6 +142,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     title = t.name,
                     isPrivate = true,
                     peerID = t.peerID,
+                    noiseHex = t.noiseHex,
                     onBack = { viewModel.endPrivateChat(); target = null }
                 )
             }
@@ -163,7 +165,7 @@ private fun nostrPubkeyToHex(value: String?): String? {
 private fun SimpleHome(
     viewModel: ChatViewModel,
     onOpenRoom: () -> Unit,
-    onOpenContact: (npub: String?, name: String) -> Unit
+    onOpenContact: (npub: String?, name: String, noiseHex: String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -281,7 +283,12 @@ private fun SimpleHome(
                     subtitle = if (c.peerNostrPublicKey != null) "Tap to chat" else "No internet contact yet",
                     avatarInitial = c.peerNickname.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFF9AA3AB),
-                    onClick = { if (c.peerNostrPublicKey != null) onOpenContact(c.peerNostrPublicKey, name) }
+                    onClick = {
+                        if (c.peerNostrPublicKey != null) {
+                            val noiseHex = c.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
+                            onOpenContact(c.peerNostrPublicKey, name, noiseHex)
+                        }
+                    }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
@@ -313,12 +320,14 @@ private fun SimpleConversation(
     title: String,
     isPrivate: Boolean,
     peerID: String?,
+    noiseHex: String?,
     onBack: () -> Unit
 ) {
     val nickname by viewModel.nickname.collectAsState()
     val privateChats by viewModel.privateChats.collectAsState()
     val channelMessages by viewModel.channelMessages.collectAsState()
     val selectedLoc by viewModel.selectedLocationChannel.collectAsState()
+    val selectedPrivatePeer by viewModel.selectedPrivateChatPeer.collectAsState()
     val walletEnabled by ProfilePreferenceManager.walletEnabledFlow.collectAsState()
     val context = LocalContext.current
     // The Simple wallet is locked to ONE network. A payment request for a DIFFERENT network must not be
@@ -332,7 +341,19 @@ private fun SimpleConversation(
     var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
 
     val messages: List<BitchatMessage> = if (isPrivate && peerID != null) {
-        privateChats[peerID] ?: emptyList()
+        // A contact's DM messages can be filed under several keys depending on transport + the app's
+        // opportunistic consolidation: the temporary nostr_<pub16> alias this screen opened with, the
+        // canonical 64-hex Noise key (offline favorite), and — when the contact is connected over BLE mesh
+        // — an ephemeral mesh peerID (the app's current "canonical" peer, exposed as selectedPrivateChatPeer).
+        // Union all of them so messages show regardless of transport, deduped by id and time-sorted.
+        val keys = buildList {
+            add(peerID)
+            noiseHex?.let { add(it) }
+            selectedPrivatePeer?.let { add(it) }
+        }
+        keys.flatMap { privateChats[it] ?: emptyList() }
+            .distinctBy { it.id }
+            .sortedBy { it.timestamp }
     } else {
         val gh = (selectedLoc as? ChannelID.Location)?.channel?.geohash
         if (gh != null) channelMessages["geo:$gh"] ?: emptyList() else emptyList()
