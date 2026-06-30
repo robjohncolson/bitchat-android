@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -146,8 +147,20 @@ private fun SimpleHome(
     onOpenRoom: () -> Unit,
     onOpenContact: (npub: String?, name: String) -> Unit
 ) {
-    val contacts = remember { FavoritesPersistenceService.shared.getMutualFavorites() }
+    var refreshKey by remember { mutableStateOf(0) }
+    val contacts = remember(refreshKey) { FavoritesPersistenceService.shared.getMutualFavorites() }
     var showSettings by remember { mutableStateOf(false) }
+    var showAddFamily by remember { mutableStateOf(false) }
+
+    if (showAddFamily) {
+        BackHandler { showAddFamily = false }
+        AddFamilyScreen(
+            viewModel = viewModel,
+            onClose = { showAddFamily = false },
+            onAdded = { refreshKey++ }
+        )
+        return
+    }
 
     Column(Modifier.fillMaxSize()) {
         Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
@@ -165,6 +178,13 @@ private fun SimpleHome(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.weight(1f))
+                IconButton(onClick = { showAddFamily = true }) {
+                    Icon(
+                        Icons.Filled.PersonAdd,
+                        contentDescription = "Add family",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(
                         Icons.Filled.Settings,
