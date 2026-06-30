@@ -116,12 +116,16 @@ class NostrDirectMessageHandler(
     private fun handleNostrFavoriteNotification(content: String, senderPubkey: String, senderNickname: String) {
         try {
             val isFavorite = content.startsWith("[FAVORITED]")
-            val npub = content.substringAfter(":", "").trim().takeIf { it.startsWith("npub1") }
             val fav = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+            // Resolve the relationship from the CRYPTOGRAPHICALLY AUTHENTICATED gift-wrap sender pubkey. We do
+            // NOT (re)bind the npub carried in the message CONTENT: that field is attacker-chosen, and
+            // overwriting the stored Nostr key with it would let a peer point their own Noise key's Nostr
+            // routing at an arbitrary npub (poisoning the npub<->Noise index / misrouting our future DMs).
+            // findNoiseKey already matched THIS relationship on a stored npub that normalizes to senderPubkey,
+            // so the authenticated binding is already in place — the rebind only ever changed state on a lie.
             val noiseKey = fav.findNoiseKey(senderPubkey)
             if (noiseKey != null) {
                 fav.updatePeerFavoritedUs(noiseKey, isFavorite)
-                if (npub != null) fav.updateNostrPublicKey(noiseKey, npub)
                 Log.d(TAG, "Processed Nostr ${if (isFavorite) "[FAVORITED]" else "[UNFAVORITED]"} from $senderNickname → theyFavoritedUs=$isFavorite")
             } else {
                 Log.d(TAG, "Nostr ${if (isFavorite) "[FAVORITED]" else "[UNFAVORITED]"} from $senderNickname but no Noise key resolves from their pubkey — cannot record")
@@ -261,17 +265,24 @@ class NostrDirectMessageHandler(
             NoisePayloadType.PAYMENT_BROADCAST_RESULT -> {
                 // 3b.1 Nostr fallback (SENDER side): a helper returned a broadcast result over Nostr.
                 // Canonicalize the corroboration source id to the helper's STABLE Noise key (resolved from
-                // their Nostr pubkey via favorites) and DROP anything that doesn't resolve to a known
-                // favorite. This is the money-safety crux: a free-to-mint Nostr keypair never resolves, so a
-                // single helper cannot mint identities to fake the two-helper Confirmed; and because the
-                // mesh path also keys by Noise key, one physical helper is one identity across transports.
-                val helperNoiseKeyHex = runCatching {
+                // their Nostr pubkey via favorites) and require a MUTUAL favorite — SYMMETRIC with the REQUEST
+                // arm above (which only SERVES mutual favorites). This is the money-safety crux: a free-to-mint
+                // Nostr keypair never resolves, AND a bare npub<->Noise binding is cheap to seed (a one-time
+                // [FAVORITED] makes findNoiseKey resolve with isFavorite=false), so counting non-mutual keys
+                // would let a pre-positioned helper mint a second identity and forge the two-helper Confirmed.
+                // Mutual status requires the user's OWN favoriting, which an attacker cannot self-grant. The
+                // coordinator's scarce-positive gate enforces the same rule centrally; this is defense-in-depth.
+                val helperNoiseKey = runCatching {
                     com.bitchat.android.favorites.FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
-                        ?.joinToString("") { "%02x".format(it) }
                 }.getOrNull()
-                if (helperNoiseKeyHex == null) {
-                    Log.d(TAG, "Dropping Nostr broadcast RESULT from non-favorite $convKey")
+                val helperIsMutual = helperNoiseKey != null && runCatching {
+                    com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                        .getFavoriteStatus(helperNoiseKey)?.isMutual == true
+                }.getOrDefault(false)
+                if (!helperIsMutual) {
+                    Log.d(TAG, "Dropping Nostr broadcast RESULT from non-mutual-favorite $convKey")
                 } else {
+                    val helperNoiseKeyHex = helperNoiseKey!!.joinToString("") { "%02x".format(it) }
                     Log.d(TAG, "💸 Payment broadcast RESULT via Nostr from $convKey")
                     com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter
                         .deliver(helperNoiseKeyHex, payload.data)

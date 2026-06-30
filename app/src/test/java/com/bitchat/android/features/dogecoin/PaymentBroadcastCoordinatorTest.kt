@@ -47,6 +47,7 @@ class PaymentBroadcastCoordinatorTest {
      */
     private fun coordinatorWith(
         candidates: List<String>,
+        isScarceHelper: (peerID: String) -> Boolean = { true },
         send: (peerID: String, uuid: ByteArray, emit: (ByteArray) -> Unit) -> Boolean
     ): PaymentBroadcastCoordinator {
         lateinit var coordinator: PaymentBroadcastCoordinator
@@ -55,7 +56,8 @@ class PaymentBroadcastCoordinatorTest {
             sendRequestToPeer = { peerID, payload ->
                 val uuid = PaymentBroadcastRequest.decode(payload)!!.requestUuid
                 send(peerID, uuid) { reply -> coordinator.onResult(peerID, reply) }
-            }
+            },
+            isScarceHelper = isScarceHelper
         )
         return coordinator
     }
@@ -131,6 +133,42 @@ class PaymentBroadcastCoordinatorTest {
             // FANOUT=2: attempt 1 reaches A,B; attempt 2 reaches C. A accepts, B declines, C accepts -> Confirmed.
             val coordinator = coordinatorWith(listOf("A", "B", "C")) { peer, uuid, emit ->
                 emit(if (peer == "B") declinedReply(uuid) else acceptedReply(uuid)); true
+            }
+            val outcome = coordinator.broadcast(rawHex, txid, network)
+            assertTrue("expected Confirmed, was $outcome", outcome is PaymentBroadcastCoordinator.Outcome.Confirmed)
+        }
+
+    @Test
+    fun `two NON-scarce helpers accepting stays Claimed, never Confirmed (sybil cannot self-confirm)`() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The #2 fix: a single sybil running two free-to-mint helper identities (neither a mutual favorite)
+            // must NOT reach Confirmed. Both accept the real txid, but with isScarceHelper=false for everyone
+            // the two positives are only a CLAIM — the node-less broadcast still works (relay happened), it
+            // just can't be falsely presented as settled.
+            val coordinator = coordinatorWith(listOf("A", "B"), isScarceHelper = { false }) { _, uuid, emit ->
+                emit(acceptedReply(uuid)); true
+            }
+            val outcome = coordinator.broadcast(rawHex, txid, network)
+            assertTrue("expected Claimed, was $outcome", outcome is PaymentBroadcastCoordinator.Outcome.Claimed)
+        }
+
+    @Test
+    fun `one scarce plus one non-scarce acceptance is only a Claim`() = runTest(UnconfinedTestDispatcher()) {
+        // Confirmed needs TWO scarce (mutual-favorite) corroborations. A scarce A + non-scarce B = one scarce
+        // positive -> Claimed, not Confirmed.
+        val coordinator = coordinatorWith(listOf("A", "B"), isScarceHelper = { it == "A" }) { _, uuid, emit ->
+            emit(acceptedReply(uuid)); true
+        }
+        val outcome = coordinator.broadcast(rawHex, txid, network)
+        assertTrue("expected Claimed, was $outcome", outcome is PaymentBroadcastCoordinator.Outcome.Claimed)
+    }
+
+    @Test
+    fun `two scarce helpers accepting yields Confirmed (mutual-favorite corroboration still works)`() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The validated offline flow uses mutual favorites; they remain scarce, so Confirmed is reachable.
+            val coordinator = coordinatorWith(listOf("A", "B"), isScarceHelper = { true }) { _, uuid, emit ->
+                emit(acceptedReply(uuid)); true
             }
             val outcome = coordinator.broadcast(rawHex, txid, network)
             assertTrue("expected Confirmed, was $outcome", outcome is PaymentBroadcastCoordinator.Outcome.Confirmed)

@@ -137,9 +137,27 @@ class ChatViewModel(
                 val target = resolveConnectedMeshPeerId(candidateNoiseKeyHex) ?: candidateNoiseKeyHex
                 com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
                     .sendPaymentBroadcastRequest(payload, target)
-            }
+            },
+            // Only a MUTUAL favorite (a scarce identity the user themselves vetted) may count toward the
+            // two-helper "Confirmed". Opt-in/NODE_HELPER advertisers are admitted as relay candidates but are
+            // free to mint, so without this a single sybil running two helper identities could fake a settled
+            // payment. onResult is fed the helper's canonical Noise-key hex (mesh + Nostr share one id space).
+            isScarceHelper = { noiseKeyHex -> isMutualFavoriteNoiseKeyHex(noiseKeyHex) }
         )
     }
+
+    /**
+     * True if [noiseKeyHex] (a canonical 32-byte Noise static key, lowercase hex) belongs to a MUTUAL
+     * favorite. Used to decide whether a helper's corroboration may count toward a Confirmed peer-broadcast
+     * (free-to-mint helper identities must not). Fail-closed: any decode/lookup error => not scarce.
+     */
+    private fun isMutualFavoriteNoiseKeyHex(noiseKeyHex: String): Boolean = runCatching {
+        val bytes = ByteArray(noiseKeyHex.length / 2) {
+            noiseKeyHex.substring(it * 2, it * 2 + 2).toInt(16).toByte()
+        }
+        com.bitchat.android.favorites.FavoritesPersistenceService.shared
+            .getFavoriteStatus(bytes)?.isMutual == true
+    }.getOrDefault(false)
 
     /** Debug-only: build + sign a REAL Dogecoin tx for the console money-path commands (suspend; lists UTXOs). */
     private suspend fun debugBuildSignedDogeTx(

@@ -30,6 +30,10 @@ import java.security.SecureRandom
  *    had the tx, which is independent evidence it propagated) are required for [Outcome.Confirmed]; a
  *    lone positive is surfaced as [Outcome.Claimed], an uncorroborated claim the UI must not present as
  *    settled. (A stronger on-chain txid poll for the single-helper case is the 3b.1 follow-up.)
+ *  - corroboration toward [Outcome.Confirmed] counts ONLY SCARCE identities ([isScarceHelper] — mutual
+ *    favorites the user vetted), NOT bare opt-in/NODE_HELPER advertisers (which are free to mint). Without
+ *    this a single sybil running two self-minted helper identities could forge a Confirmed. Non-scarce
+ *    helpers still relay and yield [Outcome.Claimed]; they just cannot manufacture corroboration.
  *  - a SINGLE helper's terminal REJECTED does NOT abort — a lying helper could fabricate it — so a
  *    terminal reason must reproduce from two distinct helpers before we surface failure;
  *  - REJECT_DETAIL is attacker-controlled and is never shown; failure text is a fixed app string mapped
@@ -48,7 +52,18 @@ sealed interface PeerBroadcastUiState {
 
 class PaymentBroadcastCoordinator(
     private val listCandidateHelpers: (DogecoinNetwork) -> List<String>,
-    private val sendRequestToPeer: (peerID: String, payload: ByteArray) -> Boolean
+    private val sendRequestToPeer: (peerID: String, payload: ByteArray) -> Boolean,
+    /**
+     * Whether a corroborating helper — identified by the canonical Noise-key id fed to [onResult] — is a
+     * SCARCE identity (a mutual favorite the user themselves vetted) and may therefore count toward the
+     * two-helper [Outcome.Confirmed] upgrade. A bare opt-in / NODE_HELPER advertiser is FREE to mint (one
+     * actor can run many Noise identities), so counting it toward Confirmed would let a single sybil fake a
+     * "settled" send with two self-minted identities. Non-scarce helpers still RELAY and yield
+     * [Outcome.Claimed] (the node-less broadcast path is unchanged) — they simply cannot manufacture
+     * corroboration. Defaults to treating every helper as scarce, so existing callers/tests keep their
+     * behavior; production wiring injects a mutual-favorite check.
+     */
+    private val isScarceHelper: (peerID: String) -> Boolean = { true }
 ) {
     sealed interface Outcome {
         /** [REQUIRED_CORROBORATIONS] or more distinct helpers independently accepted (or already had) the tx. */
@@ -101,6 +116,10 @@ class PaymentBroadcastCoordinator(
             // matching txid, or ALREADY_KNOWN). REQUIRED_CORROBORATIONS of them => Confirmed; a single
             // one => Claimed (see the class doc — one helper's word isn't chain proof).
             val positives = LinkedHashSet<String>()
+            // Subset of [positives] from SCARCE (mutual-favorite) helpers — ONLY these count toward the
+            // two-helper Confirmed (see [isScarceHelper]). A non-scarce positive still yields Claimed, so the
+            // node-less relay path is unaffected; it just can't manufacture a forged "settled" send.
+            val scarcePositives = LinkedHashSet<String>()
             val terminalSeen = HashMap<PaymentBroadcastRejectCode, MutableSet<String>>()
             var lastReason = "No connected peer accepted the transaction."
             var everDispatched = false
@@ -125,7 +144,8 @@ class PaymentBroadcastCoordinator(
                         when {
                             isPositive(res, expectedTxid) -> {
                                 positives.add(peerID)
-                                if (positives.size >= REQUIRED_CORROBORATIONS)
+                                if (isScarceHelper(peerID)) scarcePositives.add(peerID)
+                                if (scarcePositives.size >= REQUIRED_CORROBORATIONS)
                                     return@withTimeoutOrNull Outcome.Confirmed(expectedTxid)
                             }
                             res.status == PaymentBroadcastStatus.REJECTED &&
@@ -160,8 +180,8 @@ class PaymentBroadcastCoordinator(
             }
 
             when {
-                positives.size >= REQUIRED_CORROBORATIONS -> Outcome.Confirmed(expectedTxid)
-                positives.size == 1 -> Outcome.Claimed(expectedTxid)
+                scarcePositives.size >= REQUIRED_CORROBORATIONS -> Outcome.Confirmed(expectedTxid)
+                positives.isNotEmpty() -> Outcome.Claimed(expectedTxid)
                 !everDispatched -> Outcome.Failed("No reachable peer can broadcast this transaction right now.")
                 else -> Outcome.Failed(lastReason)
             }
