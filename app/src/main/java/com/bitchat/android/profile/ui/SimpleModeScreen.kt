@@ -127,6 +127,37 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         target = SimpleTarget.Group(convKey, g?.subject, g?.members ?: emptyList())
     }
 
+    // Open (or re-open) a 1:1 contact thread by conv-key, resolving name + keys from what we already know.
+    // Mirrors onOpenContact but starts from the convKey (the notification deep-link has only that). The full
+    // pubkey comes from GeohashAliasRegistry (populated when the message that raised the notification arrived);
+    // if it's missing (e.g. a cold start after the OS killed the app), fall back to the last incoming sender
+    // name and still open the thread — its history persists under the convKey.
+    val openContactByConvKey: (String) -> Unit = { convKey ->
+        val hex = GeohashAliasRegistry.get(convKey)
+        val name = if (hex != null) {
+            viewModel.geohashViewModel.displayNameForNostrPubkeyUI(hex)
+        } else {
+            viewModel.privateChats.value[convKey]?.lastOrNull { it.senderPeerID == convKey }?.sender ?: "Family"
+        }
+        val noiseHex = hex?.let { h ->
+            FavoritesPersistenceService.shared.findNoiseKey(h)?.joinToString("") { b -> "%02x".format(b) }
+        }
+        if (hex != null) viewModel.startGeohashDM(hex)
+        viewModel.startPrivateChat(convKey)
+        target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
+    }
+
+    // Deep-link from a notification tap (see MainActivity.handleNotificationIntent → requestOpenConversation):
+    // navigate to the requested conversation, then consume the one-shot signal.
+    LaunchedEffect(Unit) {
+        viewModel.pendingOpenConversation.collect { convKey ->
+            if (convKey != null) {
+                if (convKey.startsWith("nostr_grp_")) openGroup(convKey) else openContactByConvKey(convKey)
+                viewModel.consumePendingOpenConversation()
+            }
+        }
+    }
+
     when (val t = target) {
         null -> LineTheme {
             SimpleHome(

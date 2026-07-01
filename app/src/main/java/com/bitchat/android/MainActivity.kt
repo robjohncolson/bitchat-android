@@ -871,11 +871,19 @@ class MainActivity : OrientationAwareActivity() {
                 
                 if (peerID != null) {
                     Log.d("MainActivity", "Opening private chat with $senderNickname (peerID: $peerID) from notification")
-                    
-                    // Open the private chat sheet with this peer
+
+                    // Open the private chat sheet with this peer (Power UI)
                     chatViewModel.showMeshPeerList()
                     chatViewModel.showPrivateChatSheet(peerID)
-                    
+                    // Also drive the SIMPLE profile, which renders its own screen and can't be opened by the
+                    // sheet calls above. SimpleModeScreen observes this signal and navigates to the thread. Emit
+                    // only in SIMPLE mode so a Power-mode tap can't leave a stale value that fires on a later
+                    // profile switch.
+                    if (com.bitchat.android.profile.ProfilePreferenceManager.get(applicationContext) ==
+                        com.bitchat.android.profile.AppProfile.SIMPLE) {
+                        chatViewModel.requestOpenConversation(peerID)
+                    }
+
                     // Clear notifications for this sender since user is now viewing the chat
                     chatViewModel.clearNotificationsForSender(peerID)
                 }

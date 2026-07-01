@@ -1210,6 +1210,18 @@ class ChatViewModel(
         hidePrivateChatSheet()
     }
 
+    // MARK: - Deep-link: open a conversation from a notification tap
+    // The Power UI opens the private-chat sheet directly (see MainActivity.handleNotificationIntent), but the
+    // SIMPLE profile renders its own screen with local navigation state, so a tapped notification has no way to
+    // drive it. This one-shot signal carries the conversation key (a `nostr_…`/`nostr_grp_…` convKey or a mesh
+    // peerID); SimpleModeScreen observes it, navigates to that thread, and consumes it. Harmless in Power mode
+    // (nothing observes it there).
+    private val _pendingOpenConversation = MutableStateFlow<String?>(null)
+    val pendingOpenConversation: StateFlow<String?> = _pendingOpenConversation.asStateFlow()
+
+    fun requestOpenConversation(convKey: String) { _pendingOpenConversation.value = convKey }
+    fun consumePendingOpenConversation() { _pendingOpenConversation.value = null }
+
     // MARK: - Open Latest Unread Private Chat
 
     fun openLatestUnreadPrivateChat() {
