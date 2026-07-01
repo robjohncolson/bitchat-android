@@ -81,17 +81,40 @@ class NostrDirectMessageHandler(
 
                 // E2E "family group": a rumor carrying a sealed `bg` group tag threads under ONE shared group
                 // key for all members, instead of the per-sender 1:1 alias. A rumor with NO `bg` tag is the
-                // exact existing 1:1 path (additive, zero regression).
-                // NOTE (Increment 1): there is NO trust gate yet — group routing is reachable only via the
-                // debug console for the two-phone transport test. Increment 2 adds the mutual-favorite
-                // transitive gate BEFORE any family-facing UI surfaces group conversations.
+                // exact existing 1:1 path (additive, zero regression — 1:1 DMs are NEVER gated here).
                 val groupId = rumor.tags.firstOrNull { it.size >= 2 && it[0] == "bg" }?.get(1)
                 val convKey: String
+                var groupSenderName: String? = null
                 if (groupId != null) {
                     convKey = "nostr_grp_$groupId"
-                    val members = rumor.tags.filter { it.size >= 2 && it[0] == "p" }.map { it[1].lowercase() }.distinct()
+                    // ── TRANSITIVE-TRUST GATE (mandatory) ──────────────────────────────────────────────────
+                    // Accept a group message ONLY if the gift-wrap sender is a MUTUAL FAVORITE, or is already a
+                    // STORED member of this group (introduced earlier by a mutual favorite). A cold stranger who
+                    // knows our npub — or even an existing groupId — is dropped. The registry put() runs ONLY
+                    // AFTER accept, so an untrusted sender can never poison the stored member set.
+                    val fav = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                    val senderIsMutualFavorite = run {
+                        val nk = runCatching { fav.findNoiseKey(senderPubkey) }.getOrNull()
+                        nk != null && runCatching { fav.getFavoriteStatus(nk)?.isMutual == true }.getOrDefault(false)
+                    }
+                    val storedGroup = NostrGroupRegistry.get(convKey)   // STORED members, read BEFORE any put
+                    val senderIsInStoredGroup =
+                        storedGroup?.members?.any { it.pubkeyHex.equals(senderPubkey, ignoreCase = true) } == true
+                    if (!senderIsMutualFavorite && !senderIsInStoredGroup) {
+                        Log.d(TAG, "Dropping group msg from untrusted sender (not a mutual favorite, not a known member)")
+                        return@launch
+                    }
+                    val members = parseGroupMembers(rumor)
+                    // Defense-in-depth: the member set MUST hash to the claimed groupId, so membership is
+                    // IMMUTABLE PER THREAD — even a trusted member cannot silently expand the roster under a
+                    // fixed id (adding anyone forces a new, independently-derivable id = a visibly new thread).
+                    if (NostrGroupRegistry.computeGroupId(members.map { it.pubkeyHex }) != groupId) {
+                        Log.d(TAG, "Dropping group msg: member set does not hash to the claimed groupId")
+                        return@launch
+                    }
                     val subject = rumor.tags.firstOrNull { it.size >= 2 && it[0] == "subject" }?.get(1)
-                    com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
+                    NostrGroupRegistry.put(convKey, groupId, members, subject)
+                    groupSenderName = members.firstOrNull { it.pubkeyHex.equals(senderPubkey, ignoreCase = true) }?.name
                 } else {
                     convKey = "nostr_${senderPubkey.take(16)}"
                     repo.putNostrKeyMapping(convKey, senderPubkey)
@@ -114,7 +137,9 @@ class NostrDirectMessageHandler(
                     repo.updateParticipant(geohash, senderPubkey, messageTimestamp)
                 }
 
-                val senderNickname = repo.displayNameForNostrPubkeyUI(senderPubkey)
+                // For a group, use the per-member display name carried in the sealed `bgm` tag (authenticated by
+                // the rumor signer); for 1:1, the existing geohash/nostr display name.
+                val senderNickname = groupSenderName ?: repo.displayNameForNostrPubkeyUI(senderPubkey)
 
                 processNoisePayload(noisePayload, convKey, senderNickname, messageTimestamp, senderPubkey, identity)
 
@@ -122,6 +147,25 @@ class NostrDirectMessageHandler(
                 Log.e(TAG, "onGiftWrap error: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Parse a group rumor's member set: prefer the identity-carrying ["bgm", hex, name] tags, fall back to a
+     * bare ["p", hex]; dedup by hex with the named entry winning. Used by the trust gate + the groupId integrity
+     * check. (Members live in the SEALED kind-14 rumor, never the public gift wrap.)
+     */
+    private fun parseGroupMembers(rumor: NostrEvent): List<NostrGroupRegistry.GroupMember> {
+        val byHex = LinkedHashMap<String, NostrGroupRegistry.GroupMember>()
+        rumor.tags.forEach { tag ->
+            if (tag.size < 2) return@forEach
+            val hex = when (tag[0]) {
+                "bgm", "p" -> tag[1].lowercase()
+                else -> return@forEach
+            }
+            val name = if (tag[0] == "bgm" && tag.size >= 3) tag[2].takeIf { it.isNotBlank() } else null
+            byHex[hex] = NostrGroupRegistry.GroupMember(hex, name ?: byHex[hex]?.name)
+        }
+        return byHex.values.toList()
     }
 
     /**
@@ -175,6 +219,8 @@ class NostrDirectMessageHandler(
                 val existingMessages = state.getPrivateChatsValue()[convKey] ?: emptyList()
                 if (existingMessages.any { it.id == pm.messageID }) return
 
+                val isGroup = convKey.startsWith("nostr_grp_")
+
                 val message = BitchatMessage(
                     id = pm.messageID,
                     sender = senderNickname,
@@ -184,7 +230,9 @@ class NostrDirectMessageHandler(
                     isPrivate = true,
                     recipientNickname = state.getNicknameValue(),
                     senderPeerID = convKey,
-                    deliveryStatus = DeliveryStatus.Delivered(to = state.getNicknameValue() ?: "Unknown", at = Date())
+                    deliveryStatus = DeliveryStatus.Delivered(to = state.getNicknameValue() ?: "Unknown", at = Date()),
+                    // Group bubbles need the individual sender's account pubkey for tap-to-add (Increment 2c).
+                    senderNostrPubkey = if (isGroup) senderPubkey else null
                 )
 
                 val isViewing = state.getSelectedPrivateChatPeerValue() == convKey
@@ -194,13 +242,15 @@ class NostrDirectMessageHandler(
                     privateChatManager.handleIncomingPrivateMessage(message, suppressUnread)
                 }
 
-                if (!seenStore.hasDelivered(pm.messageID)) {
+                // Per-author delivery/read acks make no sense for a group (the ack reaches only the one author,
+                // not the set), so suppress them for group keys. Per-member group receipts are future work.
+                if (!isGroup && !seenStore.hasDelivered(pm.messageID)) {
                     val nostrTransport = NostrTransport.getInstance(application)
                     nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity)
                     seenStore.markDelivered(pm.messageID)
                 }
 
-                if (isViewing && !suppressUnread) {
+                if (!isGroup && isViewing && !suppressUnread) {
                     val nostrTransport = NostrTransport.getInstance(application)
                     nostrTransport.sendReadReceiptGeohash(pm.messageID, senderPubkey, recipientIdentity)
                     seenStore.markRead(pm.messageID)

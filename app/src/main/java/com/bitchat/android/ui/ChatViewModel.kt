@@ -2158,19 +2158,31 @@ class ChatViewModel(
     fun startNostrGroup(memberPubkeysHex: List<String>, subject: String?): String {
         val myHex = com.bitchat.android.nostr.NostrIdentityBridge
             .getCurrentNostrIdentity(getApplication())?.publicKeyHex?.lowercase()
-        val members = (memberPubkeysHex.map { it.lowercase() } + listOfNotNull(myHex)).distinct().sorted()
-        val groupId = groupIdFor(members)
+        val hexes = (memberPubkeysHex.map { it.lowercase() } + listOfNotNull(myHex)).distinct().sorted()
+        val groupId = com.bitchat.android.nostr.NostrGroupRegistry.computeGroupId(hexes)
         val convKey = "nostr_grp_$groupId"
+        val members = hexes.map { hex ->
+            com.bitchat.android.nostr.NostrGroupRegistry.GroupMember(
+                hex,
+                if (hex == myHex) state.getNicknameValue() else resolveMemberName(hex)
+            )
+        }
         com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
         startPrivateChat(convKey)
         return convKey
     }
 
-    private fun groupIdFor(sortedMemberHexes: List<String>): String =
-        java.security.MessageDigest.getInstance("SHA-256")
-            .digest(sortedMemberHexes.joinToString(",").toByteArray())
-            .joinToString("") { "%02x".format(it) }
-            .take(16)
+    /** Best-effort display name for a group member's account pubkey: favorites' nickname first, else geohash name. */
+    private fun resolveMemberName(pubkeyHex: String): String? {
+        runCatching {
+            val svc = com.bitchat.android.favorites.FavoritesPersistenceService.shared
+            svc.findNoiseKey(pubkeyHex)?.let { svc.getFavoriteStatus(it)?.peerNickname }
+        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { return it }
+        return runCatching {
+            geohashViewModel.displayNameForNostrPubkeyUI(pubkeyHex).substringBefore("#")
+                .takeIf { it != "anon" && it.isNotBlank() }
+        }.getOrNull()
+    }
 
     fun startGeohashDMByNickname(nickname: String) {
         geohashViewModel.startGeohashDMByNickname(nickname) { convKey ->

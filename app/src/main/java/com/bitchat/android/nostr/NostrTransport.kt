@@ -485,7 +485,7 @@ class NostrTransport(
      */
     fun sendGroupMessage(
         groupId: String,
-        memberPubkeysHex: List<String>,
+        members: List<NostrGroupRegistry.GroupMember>,
         content: String,
         messageID: String,
         subject: String? = null
@@ -494,7 +494,15 @@ class NostrTransport(
             Log.e(TAG, "sendGroupMessage: no account identity")
             return
         }
-        val members = (memberPubkeysHex + identity.publicKeyHex).map { it.lowercase() }.distinct()
+        // Normalize + dedup by lowercased hex, and guarantee a self entry (the self-copy lets the sender see
+        // their own group messages — 1:1 NIP-17 has no self-copy).
+        val byHex = LinkedHashMap<String, NostrGroupRegistry.GroupMember>()
+        (members + NostrGroupRegistry.GroupMember(identity.publicKeyHex)).forEach { m ->
+            val hex = m.pubkeyHex.lowercase()
+            val name = m.name?.takeIf { it.isNotBlank() } ?: byHex[hex]?.name
+            byHex[hex] = NostrGroupRegistry.GroupMember(hex, name)
+        }
+        val memberList = byHex.values.toList()
         transportScope.launch {
             try {
                 val embedded = NostrEmbeddedBitChat.encodePMForNostrNoRecipient(
@@ -505,17 +513,21 @@ class NostrTransport(
                     Log.e(TAG, "sendGroupMessage: failed to embed group PM packet")
                     return@launch
                 }
-                // Sealed-inside-the-rumor group metadata: groupId + (optional) subject + the member set.
+                // Sealed-inside-the-rumor group metadata: groupId + (optional) subject + per-member identity
+                // ("bgm" = bitchat-group-member: account-pubkey hex + display name) for discovery. createPrivateMessage
+                // still prepends the per-recipient ["p", recipientHex] NIP-17 routing tag.
                 val groupTags = listOf(listOf("bg", groupId)) +
                     (subject?.takeIf { it.isNotBlank() }?.let { listOf(listOf("subject", it)) } ?: emptyList()) +
-                    members.map { listOf("p", it) }
-                members.forEach { hex ->
-                    NostrProtocol.createPrivateMessage(embedded, hex, identity, groupTags).forEach { event ->
+                    memberList.map { m ->
+                        if (m.name.isNullOrBlank()) listOf("bgm", m.pubkeyHex) else listOf("bgm", m.pubkeyHex, m.name)
+                    }
+                memberList.forEach { m ->
+                    NostrProtocol.createPrivateMessage(embedded, m.pubkeyHex, identity, groupTags).forEach { event ->
                         NostrRelayManager.registerPendingGiftWrap(event.id)
                         NostrRelayManager.getInstance(context).sendEvent(event)
                     }
                 }
-                Log.d(TAG, "sendGroupMessage: group=${groupId.take(8)}… members=${members.size} mid=${messageID.take(8)}…")
+                Log.d(TAG, "sendGroupMessage: group=${groupId.take(8)}… members=${memberList.size} mid=${messageID.take(8)}…")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send group message: ${e.message}")
             }
