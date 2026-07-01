@@ -456,10 +456,12 @@ class PrivateChatManager(
         } catch (_: Exception) { }
 
         // Also merge any directly-addressed temp key used by incoming messages (without mapping yet)
-        // Search existing chats for keys that begin with "nostr_" and have messages from the same nickname
-        state.getPrivateChatsValue().keys.filter { it.startsWith("nostr_") }.forEach { tempKey ->
-            if (!tryMergeKeys.contains(tempKey)) tryMergeKeys.add(tempKey)
-        }
+        // Search existing chats for keys that begin with "nostr_" and have messages from the same nickname.
+        // NEVER sweep E2E family-group threads (nostr_grp_<id>): those are a distinct shared conversation, not a
+        // per-sender 1:1 alias, so merging them into a 1:1 contact would silently destroy the group's history.
+        state.getPrivateChatsValue().keys
+            .filter { it.startsWith("nostr_") && !it.startsWith("nostr_grp_") }
+            .forEach { tempKey -> if (!tryMergeKeys.contains(tempKey)) tryMergeKeys.add(tempKey) }
 
         if (tryMergeKeys.isEmpty()) return
 

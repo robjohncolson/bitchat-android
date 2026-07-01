@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -76,6 +77,7 @@ import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
+import com.bitchat.android.nostr.NostrGroupRegistry
 import com.bitchat.android.nostr.NostrRelayManager
 import com.bitchat.android.profile.AppProfile
 import com.bitchat.android.profile.ProfilePreferenceManager
@@ -93,7 +95,12 @@ import kotlinx.coroutines.launch
  * untouched; this is presentation only.
  */
 private sealed interface SimpleTarget {
-    data class Contact(val peerID: String, val name: String, val noiseHex: String?) : SimpleTarget
+    data class Contact(
+        val peerID: String, val name: String, val noiseHex: String?, val pubkeyHex: String?
+    ) : SimpleTarget
+    data class Group(
+        val convKey: String, val subject: String?, val members: List<NostrGroupRegistry.GroupMember>
+    ) : SimpleTarget
 }
 
 @Composable
@@ -110,6 +117,14 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
     }
     var target by remember { mutableStateOf<SimpleTarget?>(null) }
 
+    // Open (or re-open) a group thread by conv-key: make it the active private-chat context for sends and
+    // resolve its subject + members from the registry.
+    val openGroup: (String) -> Unit = { convKey ->
+        val g = NostrGroupRegistry.get(convKey)
+        viewModel.startPrivateChat(convKey)
+        target = SimpleTarget.Group(convKey, g?.subject, g?.members ?: emptyList())
+    }
+
     when (val t = target) {
         null -> LineTheme {
             SimpleHome(
@@ -120,9 +135,10 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                         val convKey = "nostr_${hex.take(16)}"
                         viewModel.startGeohashDM(hex)        // register the conv-key -> pubkey mapping + subscription
                         viewModel.startPrivateChat(convKey)  // make it the active private-chat context for sends
-                        target = SimpleTarget.Contact(convKey, name, noiseHex)
+                        target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
                     }
-                }
+                },
+                onOpenGroup = openGroup
             )
         }
         is SimpleTarget.Contact -> {
@@ -132,9 +148,28 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     viewModel = viewModel,
                     title = t.name,
                     isPrivate = true,
+                    isGroup = false,
                     peerID = t.peerID,
                     noiseHex = t.noiseHex,
-                    onBack = { viewModel.endPrivateChat(); target = null }
+                    contactPubkeyHex = t.pubkeyHex,
+                    onBack = { viewModel.endPrivateChat(); target = null },
+                    onOpenGroup = openGroup
+                )
+            }
+        }
+        is SimpleTarget.Group -> {
+            BackHandler { viewModel.endPrivateChat(); target = null }
+            LineTheme {
+                SimpleConversation(
+                    viewModel = viewModel,
+                    title = t.subject ?: "Family group",
+                    isPrivate = true,
+                    isGroup = true,
+                    peerID = t.convKey,
+                    noiseHex = null,
+                    contactPubkeyHex = null,
+                    onBack = { viewModel.endPrivateChat(); target = null },
+                    onOpenGroup = openGroup
                 )
             }
         }
@@ -155,7 +190,8 @@ private fun nostrPubkeyToHex(value: String?): String? {
 @Composable
 private fun SimpleHome(
     viewModel: ChatViewModel,
-    onOpenContact: (npub: String?, name: String, noiseHex: String) -> Unit
+    onOpenContact: (npub: String?, name: String, noiseHex: String) -> Unit,
+    onOpenGroup: (convKey: String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -175,6 +211,12 @@ private fun SimpleHome(
     }
 
     val contacts = remember(refreshKey) { FavoritesPersistenceService.shared.getMutualFavorites() }
+    val privateChats by viewModel.privateChats.collectAsState()
+    // The user's E2E family groups, surfaced from the registry. Keyed on privateChats so a freshly-received
+    // group appears once its first message lands (the receive path registers it AND appends to privateChats).
+    val groups = remember(refreshKey, privateChats) {
+        NostrGroupRegistry.snapshot().filterValues { it.members.size >= 2 }.entries.toList()
+    }
     var showSettings by remember { mutableStateOf(false) }
     var showAddFamily by remember { mutableStateOf(false) }
     var showWallet by remember { mutableStateOf(false) }
@@ -253,7 +295,7 @@ private fun SimpleHome(
         }
 
         LazyColumn(Modifier.fillMaxSize()) {
-            if (contacts.isEmpty()) {
+            if (contacts.isEmpty() && groups.isEmpty()) {
                 item(key = "empty") {
                     Column(
                         Modifier
@@ -276,6 +318,16 @@ private fun SimpleHome(
                         )
                     }
                 }
+            }
+            items(groups, key = { "grp_" + it.key }) { entry ->
+                ChatListRow(
+                    title = entry.value.subject ?: "Family group",
+                    subtitle = "Family group",
+                    avatarInitial = null,
+                    avatarColor = MaterialTheme.colorScheme.primary,
+                    onClick = { onOpenGroup(entry.key) }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
             items(
                 items = contacts,
@@ -323,9 +375,12 @@ private fun SimpleConversation(
     viewModel: ChatViewModel,
     title: String,
     isPrivate: Boolean,
+    isGroup: Boolean,
     peerID: String?,
     noiseHex: String?,
-    onBack: () -> Unit
+    contactPubkeyHex: String?,
+    onBack: () -> Unit,
+    onOpenGroup: (convKey: String) -> Unit
 ) {
     val nickname by viewModel.nickname.collectAsState()
     val privateChats by viewModel.privateChats.collectAsState()
@@ -343,6 +398,7 @@ private fun SimpleConversation(
     }
     var showRequestDialog by remember { mutableStateOf(false) }
     var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+    var showAddPeople by remember { mutableStateOf(false) }
 
     // A contact's DM messages can be filed under several keys depending on transport + the app's
     // opportunistic consolidation: the temporary nostr_<pub16> alias this screen opened with, the canonical
@@ -397,8 +453,19 @@ private fun SimpleConversation(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
+                // From a 1:1, start a private E2E group by adding more family members.
+                if (!isGroup && contactPubkeyHex != null) {
+                    IconButton(onClick = { showAddPeople = true }) {
+                        Icon(
+                            Icons.Filled.PersonAdd,
+                            contentDescription = "Start a group",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
 
@@ -424,13 +491,13 @@ private fun SimpleConversation(
                         request = payReq,
                         isMine = isMine,
                         senderName = m.sender,
-                        showSender = !isPrivate,
+                        showSender = isGroup,
                         canPay = walletEnabled && !isMine && payReq.network == walletNetwork,
                         timestamp = m.timestamp,
                         onPay = { payRequest = payReq }
                     )
                 } else {
-                    MessageBubble(message = m, isMine = isMine, showSender = !isPrivate)
+                    MessageBubble(message = m, isMine = isMine, showSender = isGroup)
                 }
             }
         }
@@ -445,7 +512,7 @@ private fun SimpleConversation(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (walletEnabled) {
+                if (walletEnabled && !isGroup) {
                     // Ask a family member for DOGE: posts a payment-request message they can tap to pay.
                     IconButton(onClick = { showRequestDialog = true }) {
                         Icon(
@@ -482,6 +549,17 @@ private fun SimpleConversation(
         }
     }
 
+    if (showAddPeople) {
+        // Turn this 1:1 into a private E2E group by adding more family (the current contact is auto-included).
+        AddPeopleSheet(
+            excludeHex = contactPubkeyHex,
+            onDismiss = { showAddPeople = false },
+            onCreate = { extra ->
+                val members = (listOfNotNull(contactPubkeyHex) + extra).distinct()
+                if (members.isNotEmpty()) onOpenGroup(viewModel.startNostrGroup(members, null))
+            }
+        )
+    }
     if (showRequestDialog) {
         // Reuse the app's request-DOGE dialog (self-contained: builds the URI from this device's locked
         // wallet). Public confirmation only for the Family Room (a public geohash); 1:1 DMs are private.
@@ -545,6 +623,78 @@ private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: 
 
 private fun formatBubbleTime(date: java.util.Date): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(date)
+
+/**
+ * Pick family members (mutual favorites reachable over Nostr) to form a private E2E group with the current
+ * 1:1 contact. The current contact is auto-included ([excludeHex]), so this lists the OTHER family members.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddPeopleSheet(
+    excludeHex: String?,
+    onDismiss: () -> Unit,
+    onCreate: (memberHexes: List<String>) -> Unit
+) {
+    val candidates = remember {
+        FavoritesPersistenceService.shared.getMutualFavorites().mapNotNull { fav ->
+            val hex = nostrPubkeyToHex(fav.peerNostrPublicKey)
+            if (hex == null || hex == excludeHex) null else hex to fav.peerNickname.ifBlank { "Family" }
+        }
+    }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    BitchatBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Start a group",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "Add more family to this chat to make a private group. Everyone's messages stay encrypted.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (candidates.isEmpty()) {
+                Text(
+                    text = "No other family members to add yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            candidates.forEach { (hex, name) ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { selected = if (hex in selected) selected - hex else selected + hex },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = hex in selected,
+                        onCheckedChange = { on -> selected = if (on) selected + hex else selected - hex }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Button(
+                onClick = { onCreate(selected.toList()); onDismiss() },
+                enabled = selected.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Create group")
+            }
+        }
+    }
+}
 
 private val DogeGold = Color(0xFFC2A633)
 
