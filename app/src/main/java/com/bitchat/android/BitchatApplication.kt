@@ -63,6 +63,7 @@ class BitchatApplication : Application() {
             com.bitchat.android.nostr.GeohashAliasRegistry.initialize(this)
             com.bitchat.android.nostr.GeohashConversationRegistry.initialize(this)
             com.bitchat.android.nostr.NostrGroupRegistry.initialize(this)
+            com.bitchat.android.nostr.KnownNpubStore.initialize(this)
         } catch (_: Exception) { }
 
         // Initialize mesh service preferences

@@ -64,16 +64,21 @@ class MessageRouter private constructor(
             nostr.sendGroupMessage(g.groupId, g.members, content, messageID, g.subject)
             return
         }
-        // First: if this is a geohash DM alias (nostr_<pub16>), route via Nostr using global registry
+        // If this is a Nostr alias (nostr_<pub16>) with a known account pubkey, route via Nostr. A recorded
+        // source geohash => a geohash DM (derive the geohash identity); NO source geohash => an ACCOUNT DM
+        // (e.g. a tap-added npub-only family contact who isn't a mutual favorite, so canSendViaNostr is false
+        // and the geohash path would fail for lack of a geohash) — send a 1:1 account DM to the raw pubkey.
         if (com.bitchat.android.nostr.GeohashAliasRegistry.contains(toPeerID)) {
-            Log.d(TAG, "Routing PM via Nostr (geohash) to alias ${toPeerID.take(12)}… id=${messageID.take(8)}…")
             val recipientHex = com.bitchat.android.nostr.GeohashAliasRegistry.get(toPeerID)
             if (recipientHex != null) {
-                // Resolve the conversation's source geohash, so we can send from anywhere
                 val sourceGeohash = com.bitchat.android.nostr.GeohashConversationRegistry.get(toPeerID)
-
-                // If repository knows the source geohash, pass it so NostrTransport derives the correct identity
-                nostr.sendPrivateMessageGeohash(content, recipientHex, messageID, sourceGeohash)
+                if (sourceGeohash != null) {
+                    Log.d(TAG, "Routing PM via Nostr (geohash) to alias ${toPeerID.take(12)}… id=${messageID.take(8)}…")
+                    nostr.sendPrivateMessageGeohash(content, recipientHex, messageID, sourceGeohash)
+                } else {
+                    Log.d(TAG, "Routing PM via Nostr (account) to alias ${toPeerID.take(12)}… id=${messageID.take(8)}…")
+                    nostr.sendPrivateMessageToPubkey(content, recipientHex, messageID)
+                }
                 return
             }
         }

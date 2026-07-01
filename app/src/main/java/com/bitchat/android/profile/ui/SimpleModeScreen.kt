@@ -77,6 +77,8 @@ import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
 import com.bitchat.android.nostr.Bech32
+import com.bitchat.android.nostr.GeohashAliasRegistry
+import com.bitchat.android.nostr.KnownNpubStore
 import com.bitchat.android.nostr.NostrGroupRegistry
 import com.bitchat.android.nostr.NostrRelayManager
 import com.bitchat.android.profile.AppProfile
@@ -190,7 +192,7 @@ private fun nostrPubkeyToHex(value: String?): String? {
 @Composable
 private fun SimpleHome(
     viewModel: ChatViewModel,
-    onOpenContact: (npub: String?, name: String, noiseHex: String) -> Unit,
+    onOpenContact: (npub: String?, name: String, noiseHex: String?) -> Unit,
     onOpenGroup: (convKey: String) -> Unit
 ) {
     val context = LocalContext.current
@@ -216,6 +218,12 @@ private fun SimpleHome(
     // group appears once its first message lands (the receive path registers it AND appends to privateChats).
     val groups = remember(refreshKey, privateChats) {
         NostrGroupRegistry.snapshot().filterValues { it.members.size >= 2 }.entries.toList()
+    }
+    // npub-only contacts added by tapping a group member's name (a real mutual favorite supersedes them).
+    val known = remember(refreshKey) {
+        KnownNpubStore.snapshot().entries
+            .filter { FavoritesPersistenceService.shared.findNoiseKey(it.key) == null }
+            .toList()
     }
     var showSettings by remember { mutableStateOf(false) }
     var showAddFamily by remember { mutableStateOf(false) }
@@ -295,7 +303,7 @@ private fun SimpleHome(
         }
 
         LazyColumn(Modifier.fillMaxSize()) {
-            if (contacts.isEmpty() && groups.isEmpty()) {
+            if (contacts.isEmpty() && groups.isEmpty() && known.isEmpty()) {
                 item(key = "empty") {
                     Column(
                         Modifier
@@ -345,6 +353,16 @@ private fun SimpleHome(
                             onOpenContact(c.peerNostrPublicKey, name, noiseHex)
                         }
                     }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            }
+            items(known, key = { "npub_" + it.key }) { entry ->
+                ChatListRow(
+                    title = entry.value,
+                    subtitle = "Tap to chat",
+                    avatarInitial = entry.value.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                    avatarColor = Color(0xFF9AA3AB),
+                    onClick = { onOpenContact(entry.key, entry.value, null) }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
@@ -399,6 +417,7 @@ private fun SimpleConversation(
     var showRequestDialog by remember { mutableStateOf(false) }
     var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
     var showAddPeople by remember { mutableStateOf(false) }
+    var tapAddMember by remember { mutableStateOf<Pair<String, String>?>(null) }  // (accountPubkeyHex, name)
 
     // A contact's DM messages can be filed under several keys depending on transport + the app's
     // opportunistic consolidation: the temporary nostr_<pub16> alias this screen opened with, the canonical
@@ -497,7 +516,20 @@ private fun SimpleConversation(
                         onPay = { payRequest = payReq }
                     )
                 } else {
-                    MessageBubble(message = m, isMine = isMine, showSender = isGroup)
+                    val memberHex = m.senderNostrPubkey
+                    MessageBubble(
+                        message = m,
+                        isMine = isMine,
+                        showSender = isGroup,
+                        // Offer "Add" only for a group member you don't already have (favorite or tap-added).
+                        onSenderClick = if (
+                            isGroup && !isMine && memberHex != null &&
+                            FavoritesPersistenceService.shared.findNoiseKey(memberHex) == null &&
+                            !KnownNpubStore.contains(memberHex)
+                        ) {
+                            { tapAddMember = memberHex to m.sender }
+                        } else null
+                    )
                 }
             }
         }
@@ -560,6 +592,25 @@ private fun SimpleConversation(
             }
         )
     }
+    tapAddMember?.let { (hex, name) ->
+        // Discovery: add a group member you don't already have as a 1:1 Nostr contact (from their npub — NOT a
+        // verified mutual favorite; upgrading to that still needs the signed QR). No fake Noise key.
+        AlertDialog(
+            onDismissRequest = { tapAddMember = null },
+            title = { Text("Add $name?") },
+            text = { Text("Add $name to your contacts so you can message them privately, one-to-one.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val convKey = "nostr_${hex.take(16)}"
+                    viewModel.startGeohashDM(hex)          // register the alias -> pubkey mapping + subscription
+                    GeohashAliasRegistry.put(convKey, hex) // enable 1:1 account-DM routing (no favorite needed)
+                    KnownNpubStore.put(hex, name)          // surface them in the Simple contacts list
+                    tapAddMember = null
+                }) { Text("Add") }
+            },
+            dismissButton = { TextButton(onClick = { tapAddMember = null }) { Text("Cancel") } }
+        )
+    }
     if (showRequestDialog) {
         // Reuse the app's request-DOGE dialog (self-contained: builds the URI from this device's locked
         // wallet). Public confirmation only for the Family Room (a public geohash); 1:1 DMs are private.
@@ -582,7 +633,12 @@ private fun SimpleConversation(
 }
 
 @Composable
-private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: Boolean) {
+private fun MessageBubble(
+    message: BitchatMessage,
+    isMine: Boolean,
+    showSender: Boolean,
+    onSenderClick: (() -> Unit)? = null
+) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start
@@ -592,11 +648,16 @@ private fun MessageBubble(message: BitchatMessage, isMine: Boolean, showSender: 
             modifier = Modifier.widthIn(max = 290.dp)
         ) {
             if (showSender && !isMine) {
+                // In a group, an unknown sender's name is tappable → "Add" them as a contact (onSenderClick),
+                // shown in the accent colour as an affordance.
                 Text(
                     text = message.sender,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 12.dp, bottom = 2.dp)
+                    color = if (onSenderClick != null) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .then(if (onSenderClick != null) Modifier.clickable { onSenderClick() } else Modifier)
+                        .padding(start = 12.dp, bottom = 2.dp)
                 )
             }
             Surface(

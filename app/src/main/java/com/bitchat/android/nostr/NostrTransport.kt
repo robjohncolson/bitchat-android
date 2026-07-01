@@ -534,6 +534,34 @@ class NostrTransport(
         }
     }
 
+    /**
+     * Send a 1:1 account DM directly to a raw account pubkey (no favorite + no geohash context needed) via
+     * the ACCOUNT identity. Used to message a tap-added npub-only contact (KnownNpubStore) — a plain NIP-17
+     * private message (NO group tag), so the recipient threads it as an ordinary 1:1.
+     */
+    fun sendPrivateMessageToPubkey(content: String, recipientPubkeyHex: String, messageID: String) {
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: run {
+            Log.e(TAG, "sendPrivateMessageToPubkey: no account identity")
+            return
+        }
+        transportScope.launch {
+            try {
+                val embedded = NostrEmbeddedBitChat.encodePMForNostrNoRecipient(
+                    content = content, messageID = messageID, senderPeerID = senderPeerID
+                ) ?: run {
+                    Log.e(TAG, "sendPrivateMessageToPubkey: failed to embed PM")
+                    return@launch
+                }
+                NostrProtocol.createPrivateMessage(embedded, recipientPubkeyHex, identity).forEach { event ->
+                    NostrRelayManager.registerPendingGiftWrap(event.id)
+                    NostrRelayManager.getInstance(context).sendEvent(event)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send account private message: ${e.message}")
+            }
+        }
+    }
+
     // MARK: - Broadcast-over-mesh (Milestone 3b.1) Nostr fallback
 
     /**
