@@ -11,61 +11,108 @@ Simple/Family profile (PR open). Work autonomously, inspect the relevant files f
 focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
 **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (2026-06-30)
+## ▶️ NEXT SESSION — START HERE (2026-06-30, updated)
 
-**Two big bodies of work are done — one merged, one in an open PR.**
+**Branch `simple-family-profile` (PR #2). Latest COMMITTED = the Nostr-notification fix (new HEAD this session; see
+`git log` for the hash), on top of Increment 2 (`3b13d5b`), in sync with origin. Dogecoin wallet is already MERGED
+to `main` (PR #1) — HISTORICAL below.** This session pushed the Simple/Family profile a long way past its first
+"feature-complete" state; the headline new thing is a **real E2E "family group"** that REPLACES the old public
+geohash "Family Room". Full running detail (every file:line) is in memory `simple-family-profile-plan.md` — READ IT
+FIRST.
 
-### 1. Dogecoin wallet — ✅ MERGED to `main` (PR #1, merge commit `b71eef4`)
-The full self-contained Dogecoin SPV wallet (node-less send/receive on testnet + mainnet, offline BLE mesh
-relay, Nostr off-mesh fallback, Tor-for-SPV, the "Coin" UI) is **merged to `main`**. Before merge it got an
-11-dimension adversarial pre-merge review (verdict: safe to merge — no theft / key-leak-to-logs / ungated
-mainnet) plus 3 corroboration/auth hardenings (commit `9fcba2f`): sybil-proof "Confirmed" (only mutual-favorite
-helpers count toward the two-helper upgrade), a Nostr RESULT mutual-favorite gate, and an npub-binding fix. The
-detailed Dogecoin handoff is preserved as HISTORICAL below.
+### 🔔 Nostr messages now raise notifications (fix on top of Increment 2)
+On-device finding: incoming messages "don't always come up as a notification — no way to know unless you open the
+convo." ROOT CAUSE = notifications were fired ONLY by the mesh receive path (`MeshDelegateHandler.didReceiveMessage`);
+**Nostr-delivered** DMs/group messages were filed straight into the chat by `NostrDirectMessageHandler` with NO
+notify call — and the Simple family profile is Nostr-centric (off-mesh clearnet), so family messages arrived silently
+unless the two phones were in BLE range. FIX (additive, presentation-only): new `MeshDelegateHandler.notifyIncoming
+NostrMessage(convKey, senderNickname, message, groupSubject?)` reuses the existing `NotificationManager` +
+its "don't notify the chat you're viewing" gate; called from `NostrDirectMessageHandler.processNoisePayload` for
+`PRIVATE_MESSAGE`, group messages, and `FILE_TRANSFER`, gated on `!suppressUnread && !isViewing` (no re-notify of
+already-read re-fetches). Group banners read "Sender · Subject". Wiring verified: dmHandler's meshDelegateHandler is
+the SAME instance owning the UI `NotificationManager` (ChatViewModel 841→867→880→GeohashViewModel 61). No money/mesh/
+trust gating touched. Build+tests green. **CAVEAT (still open):** covers foreground + backgrounded-but-alive only; if
+the OS fully KILLS the app (Samsung/Doze), Nostr reception itself stops → no notification until relaunch. A truly
+reliable "notify when killed" needs a service-owned Nostr subscription or push — bigger follow-up, not done.
 
-### 2. Simple ("Family") profile — ✅ PR #2 OPEN, awaiting merge
-**Branch `simple-family-profile` — PR #2: https://github.com/robjohncolson/bitchat-android/pull/2 — 13 commits,
-build + tests green, pushed.** A friendly LINE-style messenger mode for non-technical relatives (the user's
-parents + relatives in Kashima/Kanzaki, Saga, Japan; user is in Wakefield, MA), ALONGSIDE the full "Power" UI
-(untouched — presentation + curated config over the same `ChatViewModel`/`ChatState`). **Feature-complete; every
-phase proven on-device** (Pixel 3 `89VX0HPX1` + Galaxy S24 `RFCX81GNBRE`):
-- `AppProfile{POWER,SIMPLE}` + `ProfilePreferenceManager` (default POWER; one-time migration so already-onboarded
-  installs never see the picker). Fresh-install onboarding "Power / Simple" picker. **Settings seeder**: SIMPLE →
-  Tor OFF (clearnet Nostr = reliable) + PoW OFF (no silent message drops) + pin/lock the family-room geohash.
-- **Family room = a pinned high-precision geohash** (`drt3ydn6` = 30 Wakefield Ave @ building precision). The shared
-  constant every family phone pins; private-by-obscurity. **Reach-you privately** = a pre-seeded 1:1 Nostr DM.
-- **Provisioning** reuses the app's existing signed identity QR (`services/VerificationService.VerificationQR` carries
-  noiseKey+npub+nickname, Ed25519-signed) + the camera scanner; `profile/FamilyProvisioning.provisionFamilyContact`
-  injects a MUTUAL favorite (no BLE/Noise handshake — NIP-17 self-contained). In-app **"Add family" QR scan**
-  (`profile/ui/AddFamilyScreen`: My-code / Scan tabs).
-- **LINE UI**: scoped `profile/ui/LineTheme` + `profile/ui/SimpleModeScreen` (chat-list home + a NATIVE bubble
-  conversation, NOT the terminal) routed in `MainActivity` for `appProfile==SIMPLE`. Minimal Settings: edit name,
-  "Stronger connection (Tor)" punch-through toggle, Power⇄Simple switch.
-- **Opt-in LOCKED wallet**: a "Use Dogecoin" toggle → `DogecoinWalletSheet(isSimpleProfile=true)` which HIDES the
-  settings gear, so the network selector + backend/connection/node/helper/corroboration are all unreachable
-  (network effectively locked). **Presentation-only — money-path gates UNTOUCHED.**
-- **⭐ CURATION PRINCIPLE (steers all Simple work):** expose only cosmetic / safe-opt-in settings (name, wallet,
-  Tor punch-through); **lock + hide anything that could stop two people from talking** (proof-of-work, the
-  family-room region, Nostr relays, the network selector, mesh/node internals, debug). A non-tech user can't break
-  their own ability to chat.
+### ✅ E2E family group Increment 2 COMPLETE — committed `3b13d5b`, pushed, installed on the tablet
+2c (tap-a-name-to-add discovery) shipped clean (zero-findings adversarial review). The WHOLE E2E family group —
+transport + transitive-trust gate + Simple UI + tap-to-add discovery — is now on `simple-family-profile` (PR #2),
+build+tests green, pushed. **IMMEDIATE NEXT = the on-device 2–3-phone group test (see REMAINING).** Process pattern
+this whole session: implement → adversarial review (Workflow) → fold fixes → build green → commit → push → install;
+the user consistently chose "commit + push + install" after each reviewed slice.
 
-**USER-FACING SWITCH:** Power→Simple = tap the app title → App Info → "Simple (Family) mode"; Simple→Power = the
-⚙ gear → "Switch to full bitchat (advanced)". (Simple mode shows only when profile=SIMPLE; a real relative's phone
-is provisioned once and stays there — they never see the terminal UI.)
+### The E2E "family group" (the big new architecture)
+The public "Family Room" was a PUBLIC pinned geohash channel and it LEAKED STRANGER messages (geohash chat is
+public + it was pinned to the user's real Wakefield location, so local bitchat users appeared). It is **REMOVED**
+(commit `ddc3dc7`: UI gone, seeder selects `ChannelID.Mesh`, a LaunchedEffect un-pins existing installs). Replaced
+by a real **E2E group reached as "add a person" from inside a 1:1 DM** (downgraded visibility, the user's stated
+direction). How it works: a group message = **N NIP-17 1:1 gift wraps** (one per member + a self-copy) that all
+carry the same `groupId` + member set **SEALED INSIDE the kind-14 rumor** (never the public kind-1059 wrap → no
+membership leak; PFS preserved; NO new crypto). Deterministic `groupId = sha256(sorted member account-pubkey hexes
+incl self).take(16)` so every member derives the same thread with no handshake; members thread under
+`nostr_grp_<groupId>`. **Transitive trust (user requirement — "add a person only one of us knows"):** accept a
+group message iff the sender is a MUTUAL FAVORITE **or** already a STORED member (introduced earlier by a mutual
+favorite); a cold stranger is dropped BEFORE any registry write; PLUS a MANDATORY `computeGroupId(parsed members)
+== bg groupId` integrity check so membership is immutable-per-thread (nobody can silently expand the roster to
+inject an eavesdropper). **Increments:** 1 = transport (`69c41aa`, console-only); 2a = trust gate + member identity
+(`bgm` tags) + receipt suppression + `BitchatMessage.senderNostrPubkey` (`0c52fb7`); 2b = the Simple UI —
+`SimpleTarget.Group`, group list from the registry, `AddPeopleSheet`, sender-names-in-group-bubbles, wallet-request
+hidden in groups (`5867a15`, ALSO fixed a pre-existing data-loss bug: `PrivateChatManager.consolidateNostrTemp…`
+swept `nostr_grp_` keys into a 1:1 on send → excluded them); **2c = tap-a-member-name → Add as an npub-only contact
++ the account-DM routing fix (`3b13d5b`) — Increment 2 COMPLETE.** Key files: `nostr/{NostrGroupRegistry,KnownNpubStore}.kt`, `NostrProtocol.{createPrivateMessage
+(additionalRumorTags),decryptPrivateMessageRumor}`, `NostrTransport.{sendGroupMessage,sendPrivateMessageToPubkey}`,
+`NostrDirectMessageHandler.onGiftWrap` (the gate) + `parseGroupMembers`, `services/MessageRouter.sendPrivate` (group
+branch + the account-DM routing), `ui/ChatViewModel.startNostrGroup`, `profile/ui/SimpleModeScreen` (all group UI).
 
-**REMAINING (user / on-device):** (1) verify the opt-in wallet on the funded S24 — open it + a real receive/send
-(deliberately NOT driven by blind taps on a money path). (2) live Nostr DM round-trip between two online phones.
-Optional polish: P5 Tor "punch-through" smart-surface (only show when relays unreachable); make the Power→Simple
-switch (in AboutSheet) more discoverable; reactive contacts/wallet flows.
+**⭐ MONEY-SAFETY RULE (do not break):** tap-to-add writes ONLY to `KnownNpubStore` (npub→name) + `GeohashAliasRegistry`
++ `repo.nostrKeyMapping`, **NEVER a FavoriteRelationship** — a fabricated 32-byte Noise key would poison the Dogecoin
+broadcast-helper mutual-favorite gate AND the new group trust gate. A tap-added contact can 1:1 Nostr-DM + appears in
+the list but is NOT a verified favorite (upgrade still needs the signed QR). **ROUTING FIX in 2c (design had it wrong):**
+a non-favorite `nostr_<hex16>` alias returns false from `canSendViaNostr`, so `MessageRouter.sendPrivate` now routes a
+known-alias with NO source geohash via the new `sendPrivateMessageToPubkey` (account-identity NIP-17 to the raw pubkey);
+also fixes replying to any received non-favorite Nostr 1:1.
 
-**REQUESTED NEXT FEATURE (user idea 2026-06-30, NOT yet built):** an **address search in Simple mode** — type an
-address → geocode to lat/long → encode to a geohash → pin that as the family room (so the power user doesn't
-hand-pick a geohash code). Building blocks already exist: `geohash/Geohash.encode(lat, lon, precision)`,
-`LocationChannelManager.select(ChannelID.Location(GeohashChannel(level, geohash)))`. Needs a geocoder — Android
-`android.location.Geocoder` (offline-ish, on-device) or a web geocoding API.
+### Other Simple work SHIPPED this session (all on `simple-family-profile`, pushed)
+- **DM persistence + display fix (`d52844e`):** chat history now SURVIVES a process kill — `services/AppStateStore`
+  persists private+channel messages to `filesDir/chat_history_v1.json` (flat Gson DTO — preserves type/deliveryStatus,
+  no size cap; atomic temp-file+rename under a lock; loaded in `BitchatApplication.onCreate`). AND the Simple DM screen
+  now reads the UNION of the `nostr_<pub16>` alias + the contact's Noise key + the app's canonical `selectedPrivateChatPeer`
+  (the app files a contact under different keys per transport) so sent/mesh/consolidated messages all show.
+- **On-device friction fixes (`bc87d42`):** IME padding so the keyboard no longer hides the send button; a "Copy my
+  code" text button on the QR "My code" tab (camera-less relatives paste it); **invoice-in-chat** — a request-DOGE icon
+  posts a `dogecoin:` URI that renders as a tappable Pay card opening the locked wallet prefilled (net-locked so a
+  cross-network invoice can't switch the Simple wallet's network).
+- **P5 polish (`4a3c888`):** reactive contacts (FavoritesChangeListener), an honest 3-state Tor "punch-through" banner
+  (offline/suggest-Tor/tor-on) driven by `NostrRelayManager.isConnected` + `rememberHasInternet()`, and a discoverable
+  Power→Simple card in the AboutSheet.
 
-**Full Simple-profile plan + all file:line anchors live in memory `simple-family-profile-plan.md`. Console cmds added
-this session: `profile [show|power|simple [geohash]|pick]`, `myqr`, `provision <url|base64>`.**
+### Curation + design notes (steer future Simple work)
+- **CURATION PRINCIPLE:** expose only cosmetic/safe-opt-in settings; LOCK + HIDE anything that could stop two people
+  talking (proof-of-work, relays, network selector, mesh/node internals). A non-tech user can't break their own chat.
+- **Media stays lean (text + Dogecoin-request) ON PURPOSE** — large media over BLE mesh is bandwidth-prohibitive; if
+  ever added it'd be Nostr-only, never mesh. Not a gap.
+- Simple is now **people-first** (favorites + tap-added contacts + private groups), no public channel at all.
+
+### REMAINING after 2c
+1. **On-device 2–3-phone group test** (tablet + 2 phones): switch to Simple, provision family (Add-family QR), create a
+   group (1:1 → PersonAdd → pick members), send both ways, tap an unknown member's name → Add. Console drivers:
+   `nostr-id`, `group-send <hex1,hex2,…> <msg>`, `group-show`.
+2. Verify the DM-history persistence + the union display fix on-device (send DMs → force-stop → relaunch → history there).
+3. Deferred/optional: per-member group DELIVERED/READ receipts (2a suppresses them for group keys); group subject/naming
+   UX; the address-search idea (geocode→geohash — superseded by the private group but still capturable).
+
+### Operational state
+- **Devices (all arm64, debug app `com.bitchat.droid.debug`, PIN 5555):** Pixel 3 `89VX0HPX1`, Galaxy S24
+  `RFCX81GNBRE`, **Pixel Tablet `47251HFH807FLS`** (added this session). **Pixel Tablet + S24 both have the latest
+  build `3b13d5b` installed (ready for the 2-phone group test); Pixel 3 was not connected — install it when plugged in.**
+  Install: `adb -s <serial> install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` then
+  `adb -s <serial> shell monkey -p com.bitchat.droid.debug -c android.intent.category.LAUNCHER 1`.
+- **Simple UI access:** app relaunch → onboarding may show the Power/Simple picker on a fresh install; or Power→Simple
+  via app title → App Info → "Simple (Family) mode".
+- **GitNexus:** the workspace index (`C:/Users/rober/Downloads/Projects/.gitnexus`, name "Projects") was reindexed
+  earlier this session (`indexedAt` 2026-06-30) but goes stale after each commit; `npx gitnexus analyze` from the
+  workspace root refreshes it (slow — spans the whole multi-project tree).
 
 ---
 

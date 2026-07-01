@@ -242,6 +242,21 @@ class NostrDirectMessageHandler(
                     privateChatManager.handleIncomingPrivateMessage(message, suppressUnread)
                 }
 
+                // Surface a system notification. Nostr deliveries were previously SILENT (only the mesh path
+                // notifies inline), so a family member on the Simple profile — which is Nostr-centric — only
+                // ever learned of an incoming message by opening the thread. Skip if already read (a re-fetch
+                // after restart) or if this exact thread is already open; NotificationManager applies the same
+                // "currently-viewing" gate as a backstop.
+                if (!suppressUnread && !isViewing) {
+                    val groupSubject = if (isGroup) NostrGroupRegistry.get(convKey)?.subject else null
+                    meshDelegateHandler.notifyIncomingNostrMessage(
+                        convKey = convKey,
+                        senderNickname = senderNickname,
+                        message = message,
+                        groupSubject = groupSubject
+                    )
+                }
+
                 // Per-author delivery/read acks make no sense for a group (the ack reaches only the one author,
                 // not the set), so suppress them for group keys. Per-member group receipts are future work.
                 if (!isGroup && !seenStore.hasDelivered(pm.messageID)) {
@@ -288,6 +303,16 @@ class NostrDirectMessageHandler(
                     Log.d(TAG, "📄 Saved Nostr encrypted incoming file to $savedPath (msgId=$uniqueMsgId)")
                     withContext(Dispatchers.Main) {
                         privateChatManager.handleIncomingPrivateMessage(message, suppressUnread = false)
+                    }
+                    // Same silent-delivery fix as PRIVATE_MESSAGE: notify unless this thread is already open.
+                    if (state.getSelectedPrivateChatPeerValue() != convKey) {
+                        val groupSubject = if (convKey.startsWith("nostr_grp_")) NostrGroupRegistry.get(convKey)?.subject else null
+                        meshDelegateHandler.notifyIncomingNostrMessage(
+                            convKey = convKey,
+                            senderNickname = senderNickname,
+                            message = message,
+                            groupSubject = groupSubject
+                        )
                     }
                 } else {
                     Log.w(TAG, "⚠️ Failed to decode Nostr file transfer from $convKey")

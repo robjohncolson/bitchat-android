@@ -94,6 +94,34 @@ class MeshDelegateHandler(
         }
     }
     
+    /**
+     * Fire a system notification for a message delivered over a NON-mesh transport (Nostr account/geohash
+     * DMs and E2E family-group messages). The mesh path notifies inline in [didReceiveMessage]; Nostr
+     * messages are filed straight into the chat by NostrDirectMessageHandler and were previously SILENT —
+     * a recipient only saw them by opening the conversation. Reuses NotificationManager's own
+     * "don't notify the chat you're currently viewing" gate (keyed by [convKey] == the conversation's
+     * senderPeerID), so the open thread stays quiet while every other conversation surfaces a banner.
+     *
+     * Presentation only: no money-path or trust gate is involved, and 1:1 DMs remain ungated.
+     */
+    fun notifyIncomingNostrMessage(
+        convKey: String,
+        senderNickname: String,
+        message: BitchatMessage,
+        groupSubject: String? = null
+    ) {
+        val preview = NotificationTextUtils.buildPrivateMessagePreview(message)
+        // For a group, prefix the individual sender with the group's subject so the banner reads
+        // "Alice · Family" instead of a bare "Alice" (which member set the message came from is the
+        // useful bit; the thread is opened by tapping).
+        val title = groupSubject?.takeIf { it.isNotBlank() }?.let { "$senderNickname · $it" } ?: senderNickname
+        notificationManager.showPrivateMessageNotification(
+            senderPeerID = convKey,
+            senderNickname = title,
+            messageContent = preview
+        )
+    }
+
     override fun didUpdatePeerList(peers: List<String>) {
         coroutineScope.launch {
             processPeerUpdate(peers.distinct())
