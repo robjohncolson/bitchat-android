@@ -1,6 +1,7 @@
 package com.bitchat.android.services
 
 import android.content.Context
+import android.util.Log
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.BitchatMessageType
 import com.bitchat.android.model.DeliveryStatus
@@ -22,6 +23,7 @@ import java.util.Date
  * The foreground Mesh service updates this store; UI subscribes/hydrates from it.
  */
 object AppStateStore {
+    private const val TAG = "AppStateStore"
     // Global de-dup set by message id to avoid duplicate keys in Compose lists
     private val seenMessageIds = mutableSetOf<String>()
     private val seenPublicMessageKeys = mutableSetOf<String>()
@@ -73,19 +75,27 @@ object AppStateStore {
     fun load() {
         val ctx = appContext ?: return
         synchronized(this) {
-            runCatching {
-                val file = File(ctx.filesDir, HISTORY_FILE)
-                if (!file.exists()) return
-                val stored = gson.fromJson(file.readText(), StoredHistory::class.java) ?: return
-                val priv = decodeMap(stored.privateChats)
-                val chan = decodeMap(stored.channels)
-                // Seed the de-dup set so a re-received message (e.g. a Nostr DM redelivered within the 48h
-                // window, or a mesh echo) is not appended again on top of the restored copy.
-                priv.values.forEach { list -> list.forEach { seenMessageIds.add(it.id) } }
-                chan.values.forEach { list -> list.forEach { seenMessageIds.add(it.id) } }
-                if (priv.isNotEmpty()) _privateMessages.value = priv
-                if (chan.isNotEmpty()) _channelMessages.value = chan
-            }
+            val file = File(ctx.filesDir, HISTORY_FILE)
+            if (!file.exists()) return
+            val stored = try {
+                gson.fromJson(file.readText(), StoredHistory::class.java)
+            } catch (e: Exception) {
+                // Corrupt / unparseable history (truncated write, disk error, or a future schema change).
+                // Quarantine the bad file instead of silently discarding it — otherwise the first new message
+                // would call persistNow() and overwrite the only (possibly recoverable) copy, making the loss
+                // permanent. Start empty this session; the .corrupt-* copy is left for manual recovery.
+                Log.e(TAG, "Failed to parse chat history; quarantining and starting empty: ${e.message}")
+                runCatching { file.renameTo(File(ctx.filesDir, "$HISTORY_FILE.corrupt-${file.lastModified()}")) }
+                return
+            } ?: return
+            val priv = decodeMap(stored.privateChats)
+            val chan = decodeMap(stored.channels)
+            // Seed the de-dup set so a re-received message (e.g. a Nostr DM redelivered within the 48h
+            // window, or a mesh echo) is not appended again on top of the restored copy.
+            priv.values.forEach { list -> list.forEach { seenMessageIds.add(it.id) } }
+            chan.values.forEach { list -> list.forEach { seenMessageIds.add(it.id) } }
+            if (priv.isNotEmpty()) _privateMessages.value = priv
+            if (chan.isNotEmpty()) _channelMessages.value = chan
         }
     }
 

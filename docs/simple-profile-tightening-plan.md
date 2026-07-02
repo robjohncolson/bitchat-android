@@ -148,6 +148,16 @@ class the Simple profile exists to prevent.
     the Power sheet state nothing renders. **Fix:** the `clearedIntent` pattern `handleDogecoinIntent`
     already uses; gate the Power-sheet calls on profile.
 
+> **STATUS (2026-07-01): WP4 partially done + the WP3 #14 quarantine fix landed with it.** Added
+> `NostrGroupRegistryTest` (pinned wire-format vector + order/case/dup invariance + distinctness + format —
+> the security-invariant hash, item 17), `KnownNpubStoreTest` (case round-trip, item 22), and
+> `AppStateStorePersistenceTest` (corrupt-file quarantine + delivery-status round-trip + cap-keeps-newest-1000,
+> items 14/18). Also implemented the **corrupt-file quarantine** (WP3 #14): `AppStateStore.load()` now renames
+> an unparseable history file to `.corrupt-<ts>` and logs, instead of silently discarding it and letting the
+> first new message overwrite the only copy. All 14 new tests green. **Deferred:** MessageRouter branch-order
+> test (#19, needs an internal ctor seam) and provisionFamilyContact (#20, needs a DI seam) — larger refactors,
+> not yet done.
+
 ## WP4 — Test hardening (risk × testability order)
 
 17. **computeGroupId pinned-vector test** — the cross-device thread-identity AND integrity-gate hash,
