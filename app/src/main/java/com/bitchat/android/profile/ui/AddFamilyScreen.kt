@@ -43,10 +43,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.bitchat.android.R
 import com.bitchat.android.profile.FamilyProvisioning
 import com.bitchat.android.services.VerificationService
 import com.bitchat.android.ui.ChatViewModel
@@ -84,7 +86,7 @@ fun AddFamilyScreen(
         else runCatching { String(Base64.decode(code, Base64.URL_SAFE)) }.getOrNull() ?: code
         val qr = VerificationService.verifyScannedQR(url, maxAgeSeconds = Long.MAX_VALUE) ?: return false
         FamilyProvisioning.provisionFamilyContact(qr)
-        Toast.makeText(context, "Added ${qr.nickname}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, context.getString(R.string.simple_added_toast, qr.nickname), Toast.LENGTH_SHORT).show()
         onAdded()
         onClose()
         return true
@@ -100,10 +102,10 @@ fun AddFamilyScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurface)
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.simple_cd_close), tint = MaterialTheme.colorScheme.onSurface)
                 }
                 Text(
-                    text = "Add family",
+                    text = stringResource(R.string.simple_add_family_title),
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -116,8 +118,8 @@ fun AddFamilyScreen(
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.primary
         ) {
-            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("My code") })
-            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Scan") })
+            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(stringResource(R.string.simple_tab_my_code)) })
+            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(stringResource(R.string.simple_tab_scan)) })
         }
 
         when (tab) {
@@ -130,7 +132,7 @@ fun AddFamilyScreen(
             ) {
                 Spacer(Modifier.height(24.dp))
                 Text(
-                    text = "Show this to your family member,\nand have them tap “Scan”.",
+                    text = stringResource(R.string.simple_show_qr_instructions),
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurface
@@ -156,7 +158,7 @@ fun AddFamilyScreen(
                     // work can receive it (text/email) and add you by pasting it under "Scan".
                     Spacer(Modifier.height(28.dp))
                     Text(
-                        text = "No camera? Copy your code and send it to them (text, email…). They add you by pasting it under “Scan”.",
+                        text = stringResource(R.string.simple_no_camera_body),
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -165,13 +167,13 @@ fun AddFamilyScreen(
                     val clipboard = LocalClipboardManager.current
                     Button(onClick = {
                         clipboard.setText(AnnotatedString(qrString))
-                        Toast.makeText(context, "Code copied", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.simple_code_copied), Toast.LENGTH_SHORT).show()
                     }) {
-                        Text("Copy my code")
+                        Text(stringResource(R.string.simple_copy_my_code))
                     }
                 } else {
                     Text(
-                        text = "Your code isn't ready yet — try again in a moment.",
+                        text = stringResource(R.string.simple_code_not_ready),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -194,7 +196,7 @@ fun AddFamilyScreen(
                     ) {
                         ScannerView(onScan = { code -> tryAdd(code) })
                         Text(
-                            text = "Point at their code",
+                            text = stringResource(R.string.simple_point_at_code),
                             color = Color.White,
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
@@ -219,13 +221,13 @@ fun AddFamilyScreen(
                         )
                         Spacer(Modifier.height(16.dp))
                         Text(
-                            text = "Allow the camera to scan a family member's code.",
+                            text = stringResource(R.string.simple_allow_camera_body),
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Spacer(Modifier.height(24.dp))
                         Button(onClick = { cameraPermission.launchPermissionRequest() }) {
-                            Text("Allow camera")
+                            Text(stringResource(R.string.simple_allow_camera))
                         }
                     }
                 }
@@ -234,7 +236,7 @@ fun AddFamilyScreen(
                 OutlinedTextField(
                     value = pasted,
                     onValueChange = { pasted = it; pasteError = false },
-                    label = { Text("Or paste their code") },
+                    label = { Text(stringResource(R.string.simple_paste_code_label)) },
                     isError = pasteError,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
@@ -244,7 +246,7 @@ fun AddFamilyScreen(
                     onClick = { if (!tryAdd(pasted.trim())) pasteError = true },
                     enabled = pasted.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Add") }
+                ) { Text(stringResource(R.string.simple_add)) }
             }
         }
     }

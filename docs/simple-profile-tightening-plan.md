@@ -184,6 +184,18 @@ class the Simple profile exists to prevent.
     to make the security invariant testable (also enables #3's pending-buffer change safely).
 22. **KnownNpubStore case-normalization round-trip** — free (works without Context).
 
+> **STATUS (2026-07-02): WP5 #23 (localization) DONE + a perf fix.** (a) **Slow conversation open FIXED**
+> (`4bc5132`): `startPrivateChat` looped `SeenMessageStore.markRead` per message (each = Gson serialize +
+> AES-encrypted write) on the main thread → new `markReadBulk` (one write, off-thread). An investigation
+> ruled out the disk history parse (files are ~8KB). (b) **Localization**: all ~65 Simple-surface strings
+> (SimpleModeScreen/AddFamilyScreen/ProfilePickScreen) extracted to `values/strings.xml` + `values-ja` (the
+> base app was already JP-localized), replaced with `stringResource`/`getString`; auto-follows the phone
+> language, PLUS an in-app **Language** picker (System / English / 日本語) in Simple settings via a
+> `SimpleLanguage` pref + `attachBaseContext` wrapping in `OrientationAwareActivity` (Activities are
+> ComponentActivity, not AppCompat, so AppCompatDelegate wouldn't apply) + Activity recreate. **Deferred:**
+> the 12h→locale time format (`formatBubbleTime`, needs context threading) — minor; and the other WP5 items
+> below (home-list unread/preview, confirm dialog, QR error feedback).
+
 ## WP5 — Target-user UX
 
 23. **Localization: the entire Simple surface is hardcoded English** across

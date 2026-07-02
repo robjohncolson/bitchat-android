@@ -64,6 +64,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,6 +78,7 @@ import com.bitchat.android.model.DeliveryStatus
 import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
+import com.bitchat.android.R
 import com.bitchat.android.nostr.Bech32
 import com.bitchat.android.nostr.GeohashAliasRegistry
 import com.bitchat.android.nostr.KnownNpubStore
@@ -150,7 +152,8 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         val name = if (hex != null) {
             viewModel.geohashViewModel.displayNameForNostrPubkeyUI(hex)
         } else {
-            viewModel.privateChats.value[convKey]?.lastOrNull { it.senderPeerID == convKey }?.sender ?: "Family"
+            viewModel.privateChats.value[convKey]?.lastOrNull { it.senderPeerID == convKey }?.sender
+                ?: context.getString(R.string.simple_family_fallback)
         }
         val noiseHex = hex?.let { h ->
             FavoritesPersistenceService.shared.findNoiseKey(h)?.joinToString("") { b -> "%02x".format(b) }
@@ -225,7 +228,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
             LineTheme {
                 SimpleConversation(
                     viewModel = viewModel,
-                    title = t.subject ?: "Family group",
+                    title = t.subject ?: stringResource(R.string.simple_family_group),
                     isGroup = true,
                     peerID = t.convKey,
                     noiseHex = null,
@@ -324,7 +327,7 @@ private fun SimpleHome(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Chats",
+                    text = stringResource(R.string.simple_chats_title),
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -333,14 +336,14 @@ private fun SimpleHome(
                 IconButton(onClick = { showAddFamily = true }) {
                     Icon(
                         Icons.Filled.PersonAdd,
-                        contentDescription = "Add family",
+                        contentDescription = stringResource(R.string.simple_cd_add_family),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(
                         Icons.Filled.Settings,
-                        contentDescription = "Settings",
+                        contentDescription = stringResource(R.string.simple_cd_settings),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -365,14 +368,14 @@ private fun SimpleHome(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "No family added yet",
+                            text = stringResource(R.string.simple_empty_title),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Tap the add-person button above to add a family member, then chat privately.",
+                            text = stringResource(R.string.simple_empty_body),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -382,8 +385,8 @@ private fun SimpleHome(
             }
             items(groups, key = { "grp_" + it.key }) { entry ->
                 ChatListRow(
-                    title = entry.value.subject ?: "Family group",
-                    subtitle = "Family group",
+                    title = entry.value.subject ?: stringResource(R.string.simple_family_group),
+                    subtitle = stringResource(R.string.simple_family_group),
                     avatarInitial = null,
                     avatarColor = MaterialTheme.colorScheme.primary,
                     onClick = { onOpenGroup(entry.key) }
@@ -394,10 +397,12 @@ private fun SimpleHome(
                 items = contacts,
                 key = { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
             ) { c ->
-                val name = c.peerNickname.ifBlank { "Family" }
+                val familyFallback = stringResource(R.string.simple_family_fallback)
+                val name = c.peerNickname.ifBlank { familyFallback }
                 ChatListRow(
                     title = name,
-                    subtitle = if (c.peerNostrPublicKey != null) "Tap to chat" else "No internet contact yet",
+                    subtitle = if (c.peerNostrPublicKey != null) stringResource(R.string.simple_tap_to_chat)
+                    else stringResource(R.string.simple_no_internet_contact),
                     avatarInitial = c.peerNickname.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFF9AA3AB),
                     onClick = {
@@ -415,7 +420,7 @@ private fun SimpleHome(
                 // member they added by scanning the signed QR code (a verified mutual favorite, plain above).
                 ChatListRow(
                     title = entry.value,
-                    subtitle = "Added from a group · not verified",
+                    subtitle = stringResource(R.string.simple_added_from_group_unverified),
                     avatarInitial = entry.value.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFFC0A9B0),   // muted mauve, distinct from the verified-favorite gray
                     onClick = { onOpenContact(entry.key, entry.value, null) }
@@ -523,7 +528,7 @@ private fun SimpleConversation(
                 IconButton(onClick = onBack) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = stringResource(R.string.simple_cd_back),
                         tint = MaterialTheme.colorScheme.onSurface
                     )
                 }
@@ -541,7 +546,7 @@ private fun SimpleConversation(
                     IconButton(onClick = { showAddPeople = true }) {
                         Icon(
                             Icons.Filled.PersonAdd,
-                            contentDescription = "Start a group",
+                            contentDescription = stringResource(R.string.simple_cd_start_group),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -622,7 +627,7 @@ private fun SimpleConversation(
                     IconButton(onClick = { showRequestDialog = true }) {
                         Icon(
                             Icons.Filled.AccountBalanceWallet,
-                            contentDescription = "Request Dogecoin",
+                            contentDescription = stringResource(R.string.simple_cd_request_doge),
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
@@ -631,7 +636,7 @@ private fun SimpleConversation(
                     value = input,
                     onValueChange = { input = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") },
+                    placeholder = { Text(stringResource(R.string.simple_message_hint)) },
                     maxLines = 4,
                     shape = RoundedCornerShape(24.dp)
                 )
@@ -648,7 +653,7 @@ private fun SimpleConversation(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.simple_cd_send), tint = Color.White)
                 }
             }
         }
@@ -670,10 +675,8 @@ private fun SimpleConversation(
         // verified mutual favorite; upgrading to that still needs the signed QR). No fake Noise key.
         AlertDialog(
             onDismissRequest = { tapAddMember = null },
-            title = { Text("Add $name?") },
-            text = { Text("Add $name to your contacts so you can message them privately, one-to-one. " +
-                "This name is what the group said — it isn't verified. To be sure it's really them, add them " +
-                "by scanning their code.") },
+            title = { Text(stringResource(R.string.simple_add_contact_title, name)) },
+            text = { Text(stringResource(R.string.simple_add_contact_body, name)) },
             confirmButton = {
                 TextButton(onClick = {
                     val convKey = "nostr_${hex.take(16)}"
@@ -681,9 +684,9 @@ private fun SimpleConversation(
                     GeohashAliasRegistry.put(convKey, hex) // enable 1:1 account-DM routing (no favorite needed)
                     KnownNpubStore.put(hex, name)          // surface them in the Simple contacts list
                     tapAddMember = null
-                }) { Text("Add") }
+                }) { Text(stringResource(R.string.simple_add)) }
             },
-            dismissButton = { TextButton(onClick = { tapAddMember = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { tapAddMember = null }) { Text(stringResource(R.string.simple_cancel)) } }
         )
     }
     if (showRequestDialog) {
@@ -760,12 +763,12 @@ private fun MessageBubble(
                 // delivered one. "Not sent" (Failed) is drawn in the error colour; everything else is muted.
                 if (isMine) {
                     val statusLabel = when (message.deliveryStatus) {
-                        is DeliveryStatus.Sending -> "Sending…"
-                        is DeliveryStatus.Sent -> "Sent"
-                        is DeliveryStatus.Delivered -> "Delivered"
-                        is DeliveryStatus.Read -> "Read"
-                        is DeliveryStatus.PartiallyDelivered -> "Sent"
-                        is DeliveryStatus.Failed -> "Not sent"
+                        is DeliveryStatus.Sending -> stringResource(R.string.simple_status_sending)
+                        is DeliveryStatus.Sent -> stringResource(R.string.simple_status_sent)
+                        is DeliveryStatus.Delivered -> stringResource(R.string.simple_status_delivered)
+                        is DeliveryStatus.Read -> stringResource(R.string.simple_status_read)
+                        is DeliveryStatus.PartiallyDelivered -> stringResource(R.string.simple_status_sent)
+                        is DeliveryStatus.Failed -> stringResource(R.string.simple_status_not_sent)
                         null -> null
                     }
                     if (statusLabel != null) {
@@ -797,10 +800,11 @@ private fun AddPeopleSheet(
     onDismiss: () -> Unit,
     onCreate: (memberHexes: List<String>) -> Unit
 ) {
-    val candidates = remember {
+    val familyFallback = stringResource(R.string.simple_family_fallback)
+    val candidates = remember(familyFallback) {
         FavoritesPersistenceService.shared.getMutualFavorites().mapNotNull { fav ->
             val hex = nostrPubkeyToHex(fav.peerNostrPublicKey)
-            if (hex == null || hex == excludeHex) null else hex to fav.peerNickname.ifBlank { "Family" }
+            if (hex == null || hex == excludeHex) null else hex to fav.peerNickname.ifBlank { familyFallback }
         }
     }
     var selected by remember { mutableStateOf(setOf<String>()) }
@@ -810,19 +814,19 @@ private fun AddPeopleSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Start a group",
+                text = stringResource(R.string.simple_start_group_title),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "Add more family to this chat to make a private group. Everyone's messages stay encrypted.",
+                text = stringResource(R.string.simple_start_group_body),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (candidates.isEmpty()) {
                 Text(
-                    text = "No other family members to add yet.",
+                    text = stringResource(R.string.simple_no_other_family),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -852,7 +856,7 @@ private fun AddPeopleSheet(
                 enabled = selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Create group")
+                Text(stringResource(R.string.simple_create_group))
             }
         }
     }
@@ -910,14 +914,16 @@ private fun PaymentRequestBubble(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = if (isMine) "You requested" else "Dogecoin request",
+                            text = if (isMine) stringResource(R.string.simple_you_requested)
+                            else stringResource(R.string.simple_doge_request),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = request.amount?.let { "$it DOGE" } ?: "Any amount",
+                        text = request.amount?.let { stringResource(R.string.simple_doge_amount, it) }
+                            ?: stringResource(R.string.simple_any_amount),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -938,14 +944,15 @@ private fun PaymentRequestBubble(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "to $shortAddress",
+                        text = stringResource(R.string.simple_to_address, shortAddress),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     if (canPay) {
                         Spacer(Modifier.height(10.dp))
                         Button(onClick = onPay, modifier = Modifier.fillMaxWidth()) {
-                            Text(request.amount?.let { "Pay $it DOGE" } ?: "Pay")
+                            Text(request.amount?.let { stringResource(R.string.simple_pay_amount, it) }
+                                ?: stringResource(R.string.simple_pay))
                         }
                     }
                 }
@@ -1011,16 +1018,16 @@ private fun ConnectionTroubleBanner(
     val subtitle: String
     when (mode) {
         TroubleMode.OFFLINE -> {
-            title = "You appear to be offline"
-            subtitle = "Check your Wi-Fi or mobile data"
+            title = stringResource(R.string.simple_offline_title)
+            subtitle = stringResource(R.string.simple_offline_body)
         }
         TroubleMode.SUGGEST_TOR -> {
-            title = "Messages aren't connecting"
-            subtitle = "Try turning on a stronger connection"
+            title = stringResource(R.string.simple_suggest_tor_title)
+            subtitle = stringResource(R.string.simple_suggest_tor_body)
         }
         TroubleMode.TOR_ON -> {
-            title = "Connecting over a stronger connection…"
-            subtitle = "This can take a moment — you can turn it off if it doesn't help"
+            title = stringResource(R.string.simple_tor_on_title)
+            subtitle = stringResource(R.string.simple_tor_on_body)
         }
     }
     Surface(color = Color(0xFFFFF4E5)) {   // soft amber: attention without alarm
@@ -1044,8 +1051,8 @@ private fun ConnectionTroubleBanner(
                 )
             }
             when (mode) {
-                TroubleMode.SUGGEST_TOR -> TextButton(onClick = onTurnOnTor) { Text("Turn on") }
-                TroubleMode.TOR_ON -> TextButton(onClick = onTurnOffTor) { Text("Turn off") }
+                TroubleMode.SUGGEST_TOR -> TextButton(onClick = onTurnOnTor) { Text(stringResource(R.string.simple_turn_on)) }
+                TroubleMode.TOR_ON -> TextButton(onClick = onTurnOffTor) { Text(stringResource(R.string.simple_turn_off)) }
                 TroubleMode.OFFLINE -> {}
             }
         }
@@ -1082,6 +1089,16 @@ private fun rememberHasInternet(): State<Boolean> {
     }
 }
 
+/** Unwrap a (possibly wrapped) Context to the hosting Activity, so a locale change can recreate it. */
+private fun findActivitySimple(context: android.content.Context): android.app.Activity? {
+    var c: android.content.Context? = context
+    while (c is android.content.ContextWrapper) {
+        if (c is android.app.Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
 /** Flip the app-wide Tor mode (pref applies immediately; the slow live network reset runs in [scope]). */
 private fun applyTorMode(context: android.content.Context, scope: CoroutineScope, on: Boolean) {
     val m = if (on) TorMode.ON else TorMode.OFF
@@ -1101,17 +1118,25 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
     val torMode by TorPreferenceManager.modeFlow.collectAsState()
     var editingName by remember { mutableStateOf(false) }
     var nameInput by remember { mutableStateOf("") }
+    var showLanguageDialog by remember { mutableStateOf(false) }
+    // "" = follow the phone's language; "en"/"ja" = force that language.
+    val currentLangTag = com.bitchat.android.profile.SimpleLanguage.getTag(context)
+    val currentLangLabel = when (currentLangTag) {
+        "en" -> stringResource(R.string.simple_language_english)
+        "ja" -> stringResource(R.string.simple_language_japanese)
+        else -> stringResource(R.string.simple_language_system)
+    }
 
     if (editingName) {
         AlertDialog(
             onDismissRequest = { editingName = false },
-            title = { Text("Your name") },
+            title = { Text(stringResource(R.string.simple_your_name)) },
             text = {
                 OutlinedTextField(
                     value = nameInput,
                     onValueChange = { nameInput = it.take(32) },
                     singleLine = true,
-                    label = { Text("Name") }
+                    label = { Text(stringResource(R.string.simple_name_label)) }
                 )
             },
             confirmButton = {
@@ -1122,9 +1147,33 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
                         editingName = false
                     },
                     enabled = nameInput.trim().isNotEmpty()
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.simple_save)) }
             },
-            dismissButton = { TextButton(onClick = { editingName = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { editingName = false }) { Text(stringResource(R.string.simple_cancel)) } }
+        )
+    }
+
+    if (showLanguageDialog) {
+        // Pick the UI language. Applying it persists the choice and recreates the Activity so the new locale
+        // takes effect immediately (attachBaseContext re-wraps the context on recreation).
+        val apply: (String) -> Unit = { tag ->
+            com.bitchat.android.profile.SimpleLanguage.setTag(context, tag)
+            showLanguageDialog = false
+            onDismiss()
+            findActivitySimple(context)?.recreate()
+        }
+        AlertDialog(
+            onDismissRequest = { showLanguageDialog = false },
+            title = { Text(stringResource(R.string.simple_language)) },
+            text = {
+                Column {
+                    TextButton(onClick = { apply("") }) { Text(stringResource(R.string.simple_language_system)) }
+                    TextButton(onClick = { apply("en") }) { Text(stringResource(R.string.simple_language_english)) }
+                    TextButton(onClick = { apply("ja") }) { Text(stringResource(R.string.simple_language_japanese)) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showLanguageDialog = false }) { Text(stringResource(R.string.simple_cancel)) } }
         )
     }
 
@@ -1136,7 +1185,7 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             Text(
-                text = "Settings",
+                text = stringResource(R.string.simple_settings_title),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
@@ -1151,7 +1200,7 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Your name",
+                        text = stringResource(R.string.simple_your_name),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -1163,7 +1212,37 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
                     )
                 }
                 Text(
-                    text = "Edit",
+                    text = stringResource(R.string.simple_edit),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+            // Language (cosmetic, safe): follow the phone or force English / 日本語.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { showLanguageDialog = true },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.simple_language),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = currentLangLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.simple_edit),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
@@ -1176,13 +1255,13 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Stronger connection (Tor)",
+                        text = stringResource(R.string.simple_tor_setting_title),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Turn on only if your messages won't connect",
+                        text = stringResource(R.string.simple_tor_setting_body),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1200,13 +1279,13 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Use Dogecoin",
+                        text = stringResource(R.string.simple_use_dogecoin),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "A simple wallet to send and receive Dogecoin",
+                        text = stringResource(R.string.simple_use_dogecoin_body),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1220,7 +1299,7 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
             }
             if (walletEnabled) {
                 TextButton(onClick = { onDismiss(); onOpenWallet() }) {
-                    Text("Open wallet")
+                    Text(stringResource(R.string.simple_open_wallet))
                 }
             }
 
@@ -1235,7 +1314,7 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
                     )
                 }
             }) {
-                Text("Switch to full bitchat (advanced)")
+                Text(stringResource(R.string.simple_switch_to_power))
             }
         }
     }

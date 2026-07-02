@@ -16,8 +16,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.bitchat.android.R
 import com.bitchat.android.profile.AppProfile
 
 /**
@@ -41,26 +43,26 @@ fun ProfilePickScreen(
         verticalArrangement = Arrangement.Center
     ) {
         Text(
-            text = "How will you use bitchat?",
+            text = stringResource(R.string.simple_pick_title),
             style = MaterialTheme.typography.headlineSmall,
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "You can change this later in settings.",
+            text = stringResource(R.string.simple_pick_subtitle),
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(32.dp))
         ProfileCard(
-            title = "Simple",
-            subtitle = "A friendly, reliable messenger for keeping in touch with family. The technical settings stay out of the way.",
+            title = stringResource(R.string.simple_pick_simple_title),
+            subtitle = stringResource(R.string.simple_pick_simple_body),
             onClick = { onPicked(AppProfile.SIMPLE) }
         )
         Spacer(Modifier.height(16.dp))
         ProfileCard(
-            title = "Power user",
-            subtitle = "The full bitchat — every setting, the mesh tools, and the Dogecoin wallet, all exposed.",
+            title = stringResource(R.string.simple_pick_power_title),
+            subtitle = stringResource(R.string.simple_pick_power_body),
             onClick = { onPicked(AppProfile.POWER) }
         )
     }
