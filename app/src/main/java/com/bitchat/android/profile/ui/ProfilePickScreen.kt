@@ -23,8 +23,9 @@ import com.bitchat.android.profile.AppProfile
 /**
  * One-time setup choice shown after onboarding completes on a FRESH install: the full [AppProfile.POWER]
  * experience, or the simplified [AppProfile.SIMPLE] ("Family") one. The choice seeds the app's defaults
- * (see ProfileSetupCoordinator). Plain placeholder styling for now — the SIMPLE surface gets its
- * LINE-style reskin in a later phase; this screen only has to be clear and unmissable.
+ * (see ProfileSetupCoordinator). Styling here is deliberately plain — the SIMPLE surface itself is the
+ * LINE-style reskin (see SimpleModeScreen/LineTheme); this one-time picker only has to be clear and
+ * unmissable.
  */
 @Composable
 fun ProfilePickScreen(

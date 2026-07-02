@@ -747,7 +747,8 @@ class ChatViewModel(
             "myqr" -> {
                 val url = buildMyQRString(state.nickname.value, getCurrentNpub())
                 // Also emit a base64 form so it can be copied between phones over adb without escaping the
-                // '&' in the query string (and as a paste-friendly fallback before the QR-scan UI exists).
+                // '&' in the query string (and as the paste-friendly path for a camera-less relative; the
+                // QR-scan + paste UI is AddFamilyScreen).
                 val b64 = android.util.Base64.encodeToString(
                     url.toByteArray(Charsets.UTF_8),
                     android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING
@@ -2173,8 +2174,8 @@ class ChatViewModel(
      * Create (or re-open) an E2E "family group" conversation for [memberPubkeysHex] (account pubkey hexes)
      * and make it the active private chat so a send fans out to the whole set. The groupId is DETERMINISTIC —
      * sha256 of the sorted member set (incl. self) — so every member derives the identical thread with no
-     * setup round-trip. Returns the conversation key ("nostr_grp_<id>"). (Increment 1: console-driven only;
-     * the transitive mutual-favorite trust gate + family UI land in Increment 2.)
+     * setup round-trip. Returns the conversation key ("nostr_grp_<id>"). The transitive mutual-favorite
+     * trust gate lives in NostrDirectMessageHandler.onGiftWrap; the family group UI is in SimpleModeScreen.
      */
     fun startNostrGroup(memberPubkeysHex: List<String>, subject: String?): String {
         val myHex = com.bitchat.android.nostr.NostrIdentityBridge

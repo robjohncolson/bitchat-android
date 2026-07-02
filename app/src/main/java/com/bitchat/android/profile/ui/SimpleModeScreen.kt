@@ -72,7 +72,6 @@ import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
 import com.bitchat.android.favorites.FavoritesChangeListener
 import com.bitchat.android.favorites.FavoritesPersistenceService
 import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
-import com.bitchat.android.geohash.ChannelID
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.DeliveryStatus
 import com.bitchat.android.net.ArtiTorManager
@@ -212,7 +211,6 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                 SimpleConversation(
                     viewModel = viewModel,
                     title = t.name,
-                    isPrivate = true,
                     isGroup = false,
                     peerID = t.peerID,
                     noiseHex = t.noiseHex,
@@ -228,7 +226,6 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                 SimpleConversation(
                     viewModel = viewModel,
                     title = t.subject ?: "Family group",
-                    isPrivate = true,
                     isGroup = true,
                     peerID = t.convKey,
                     noiseHex = null,
@@ -451,7 +448,6 @@ private fun SimpleHome(
 private fun SimpleConversation(
     viewModel: ChatViewModel,
     title: String,
-    isPrivate: Boolean,
     isGroup: Boolean,
     peerID: String?,
     noiseHex: String?,
@@ -461,8 +457,6 @@ private fun SimpleConversation(
 ) {
     val nickname by viewModel.nickname.collectAsState()
     val privateChats by viewModel.privateChats.collectAsState()
-    val channelMessages by viewModel.channelMessages.collectAsState()
-    val selectedLoc by viewModel.selectedLocationChannel.collectAsState()
     val selectedPrivatePeer by viewModel.selectedPrivateChatPeer.collectAsState()
     val walletEnabled by ProfilePreferenceManager.walletEnabledFlow.collectAsState()
     val context = LocalContext.current
@@ -489,9 +483,10 @@ private fun SimpleConversation(
     // them so messages show regardless of transport, deduped by id and time-sorted. Memoized so it does NOT
     // recompute on every keystroke / unrelated recomposition.
     val messages: List<BitchatMessage> = remember(
-        privateChats, channelMessages, selectedLoc, isPrivate, peerID, noiseHex, selectedPrivatePeer
+        privateChats, peerID, noiseHex, selectedPrivatePeer
     ) {
-        if (isPrivate && peerID != null) {
+        if (peerID == null) emptyList()
+        else {
             val keys = buildList {
                 add(peerID)
                 noiseHex?.let { hx ->
@@ -506,9 +501,6 @@ private fun SimpleConversation(
             keys.flatMap { privateChats[it] ?: emptyList() }
                 .distinctBy { it.id }
                 .sortedBy { it.timestamp }
-        } else {
-            val gh = (selectedLoc as? ChannelID.Location)?.channel?.geohash
-            if (gh != null) channelMessages["geo:$gh"] ?: emptyList() else emptyList()
         }
     }
 
@@ -696,9 +688,9 @@ private fun SimpleConversation(
     }
     if (showRequestDialog) {
         // Reuse the app's request-DOGE dialog (self-contained: builds the URI from this device's locked
-        // wallet). Public confirmation only for the Family Room (a public geohash); 1:1 DMs are private.
+        // wallet). Simple conversations are always private 1:1 / E2E group DMs, so no public-address warning.
         RequestDogeDialog(
-            requiresPublicConfirmation = !isPrivate,
+            requiresPublicConfirmation = false,
             onDismiss = { showRequestDialog = false },
             onPostRequest = { uri -> viewModel.sendMessage(uri) }
         )

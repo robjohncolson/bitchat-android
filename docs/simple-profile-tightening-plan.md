@@ -201,6 +201,16 @@ class the Simple profile exists to prevent.
 27. **Auto-scroll yanks the reader to the bottom on any new message** (`SimpleModeScreen.kt:479`) —
     only auto-scroll when already at/near the bottom.
 
+> **STATUS (2026-07-01): WP6 partially done.** #28 (partial): removed the always-true `isPrivate` param from
+> `SimpleConversation` + its unreachable public-channel branch + the two dead `collectAsState` subscriptions
+> (`channelMessages`, `selectedLocationChannel`) it dragged into the memo, set `requiresPublicConfirmation =
+> false`, and dropped the now-unused `ChannelID` import; fixed the three stale phase/increment comments
+> (`startNostrGroup` KDoc, the `myqr` base64 comment, `ProfilePickScreen` reskin comment). #30 (senderNostrPubkey
+> persistence) landed with WP3. #31: PR #2 description refreshed. **Deferred:** #29 (split the 1,191-line
+> `SimpleModeScreen.kt` — large mechanical refactor, held to avoid churn during active work) and the unused-API
+> deletions (`AppProfile.isSimple/isPower`, `KnownNpubStore.get/remove`, `NostrGroupRegistry.contains` — kept as
+> harmless, tested/natural API surface; `NostrGroupRegistry.clear`/`KnownNpubStore.clear` are now used by panic).
+
 ## WP6 — Hygiene & structure
 
 28. **Dead code sweep:** the public-room machinery (item 9's non-privacy remainder), the always-true
