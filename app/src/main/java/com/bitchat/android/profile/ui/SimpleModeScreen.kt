@@ -73,6 +73,7 @@ import com.bitchat.android.favorites.FavoritesPersistenceService
 import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
 import com.bitchat.android.geohash.ChannelID
 import com.bitchat.android.model.BitchatMessage
+import com.bitchat.android.model.DeliveryStatus
 import com.bitchat.android.net.ArtiTorManager
 import com.bitchat.android.net.TorMode
 import com.bitchat.android.net.TorPreferenceManager
@@ -142,7 +143,10 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         val noiseHex = hex?.let { h ->
             FavoritesPersistenceService.shared.findNoiseKey(h)?.joinToString("") { b -> "%02x".format(b) }
         }
-        if (hex != null) viewModel.startGeohashDM(hex)
+        if (hex != null) {
+            viewModel.startGeohashDM(hex)
+            GeohashAliasRegistry.put(convKey, hex) // enable account-DM routing so the first reply isn't queued forever
+        }
         viewModel.startPrivateChat(convKey)
         target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
     }
@@ -166,8 +170,9 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     val hex = nostrPubkeyToHex(npub)
                     if (hex != null) {
                         val convKey = "nostr_${hex.take(16)}"
-                        viewModel.startGeohashDM(hex)        // register the conv-key -> pubkey mapping + subscription
-                        viewModel.startPrivateChat(convKey)  // make it the active private-chat context for sends
+                        viewModel.startGeohashDM(hex)          // register the conv-key -> pubkey mapping + subscription
+                        GeohashAliasRegistry.put(convKey, hex) // route the FIRST send as an account DM (else it queues forever)
+                        viewModel.startPrivateChat(convKey)    // make it the active private-chat context for sends
                         target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
                     }
                 },
@@ -208,6 +213,16 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         }
     }
 }
+
+/**
+ * The stable mesh peerID for a contact = first 16 hex chars of SHA-256(noise public key), matching
+ * BluetoothMeshService.myPeerID's derivation. Incoming BLE private messages are filed under this key.
+ */
+private fun meshPeerIdForNoiseHex(noiseHex: String): String? = runCatching {
+    val bytes = noiseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }.take(16)
+}.getOrNull()
 
 /** Decode a stored Nostr pubkey (npub bech32 or 64-char hex) to 64-char hex, or null if not resolvable. */
 private fun nostrPubkeyToHex(value: String?): String? {
@@ -261,22 +276,9 @@ private fun SimpleHome(
     var showWallet by remember { mutableStateOf(false) }
 
     // Smart Tor "punch-through". The banner appears only after Nostr relays have actually been unreachable
-    // for a sustained window — keyed on REAL relay connectivity, so turning Tor on can't make it vanish
-    // before messages truly connect — and its message adapts to WHY: offline (Tor can't help) vs. relays
-    // blocked (offer Tor) vs. already on Tor and still failing (offer to turn it back off).
-    val relayConnected by NostrRelayManager.shared.isConnected.collectAsState()
-    val torMode by TorPreferenceManager.modeFlow.collectAsState()
-    val hasInternet by rememberHasInternet()
-    var connectionTrouble by remember { mutableStateOf(false) }
-    LaunchedEffect(relayConnected) {
-        if (relayConnected) {
-            connectionTrouble = false
-        } else {
-            // Debounce so a normal few-second cold-start connect doesn't flash the banner.
-            delay(CONNECTION_TROUBLE_DELAY_MS)
-            connectionTrouble = true
-        }
-    }
+    // for a sustained window (see rememberConnectionTroubleMode) and its message adapts to WHY: offline (Tor
+    // can't help) vs. relays blocked (offer Tor) vs. already on Tor and still failing (offer to turn it off).
+    val troubleMode = rememberConnectionTroubleMode()
 
     if (showAddFamily) {
         BackHandler { showAddFamily = false }
@@ -321,13 +323,9 @@ private fun SimpleHome(
             }
         }
 
-        if (connectionTrouble) {
+        if (troubleMode != null) {
             ConnectionTroubleBanner(
-                mode = when {
-                    !hasInternet -> TroubleMode.OFFLINE
-                    torMode == TorMode.ON -> TroubleMode.TOR_ON
-                    else -> TroubleMode.SUGGEST_TOR
-                },
+                mode = troubleMode,
                 onTurnOnTor = { applyTorMode(context, scope, on = true) },
                 onTurnOffTor = { applyTorMode(context, scope, on = false) }
             )
@@ -438,6 +436,10 @@ private fun SimpleConversation(
     val selectedPrivatePeer by viewModel.selectedPrivateChatPeer.collectAsState()
     val walletEnabled by ProfilePreferenceManager.walletEnabledFlow.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // Surface the same connection-trouble banner inside the conversation (not just the chat list), so a
+    // message composed while relays are down carries visible context instead of looking delivered.
+    val troubleMode = rememberConnectionTroubleMode()
     // The Simple wallet is locked to ONE network. A payment request for a DIFFERENT network must not be
     // payable here: tapping Pay opens the sheet with paymentRequest, whose prefill calls switchNetwork() —
     // so an untrusted cross-network `dogecoin:` chat message could otherwise silently move a locked
@@ -462,7 +464,13 @@ private fun SimpleConversation(
         if (isPrivate && peerID != null) {
             val keys = buildList {
                 add(peerID)
-                noiseHex?.let { add(it) }
+                noiseHex?.let { hx ->
+                    add(hx)
+                    // BLE-delivered private messages file under the sender's mesh peerID (first 16 hex of
+                    // SHA-256(noise key)), which is neither the nostr_ alias nor the 64-hex noiseHex — include
+                    // it so same-house mesh messages (and our own mesh-sent copies) also show in the thread.
+                    meshPeerIdForNoiseHex(hx)?.let { add(it) }
+                }
                 selectedPrivatePeer?.let { add(it) }
             }
             keys.flatMap { privateChats[it] ?: emptyList() }
@@ -517,6 +525,14 @@ private fun SimpleConversation(
                     }
                 }
             }
+        }
+
+        if (troubleMode != null) {
+            ConnectionTroubleBanner(
+                mode = troubleMode,
+                onTurnOnTor = { applyTorMode(context, scope, on = true) },
+                onTurnOffTor = { applyTorMode(context, scope, on = false) }
+            )
         }
 
         // Messages
@@ -703,12 +719,38 @@ private fun MessageBubble(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
                 )
             }
-            Text(
-                text = remember(message.timestamp) { formatBubbleTime(message.timestamp) },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-            )
+            Row(
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = remember(message.timestamp) { formatBubbleTime(message.timestamp) },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // Delivery feedback on OWN messages, so a send that hasn't landed doesn't look identical to a
+                // delivered one. "Not sent" (Failed) is drawn in the error colour; everything else is muted.
+                if (isMine) {
+                    val statusLabel = when (message.deliveryStatus) {
+                        is DeliveryStatus.Sending -> "Sending…"
+                        is DeliveryStatus.Sent -> "Sent"
+                        is DeliveryStatus.Delivered -> "Delivered"
+                        is DeliveryStatus.Read -> "Read"
+                        is DeliveryStatus.PartiallyDelivered -> "Sent"
+                        is DeliveryStatus.Failed -> "Not sent"
+                        null -> null
+                    }
+                    if (statusLabel != null) {
+                        Text(
+                            text = " · $statusLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (message.deliveryStatus is DeliveryStatus.Failed)
+                                MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -895,6 +937,33 @@ private const val CONNECTION_TROUBLE_DELAY_MS = 8_000L
 
 /** Why the chat list is showing a connection-trouble banner — drives the banner's copy + action. */
 private enum class TroubleMode { OFFLINE, SUGGEST_TOR, TOR_ON }
+
+/**
+ * Shared connection-trouble state for the chat list AND open conversations: null when Nostr relays are
+ * healthy, otherwise the reason (OFFLINE / SUGGEST_TOR / TOR_ON). Keyed on REAL relay connectivity so
+ * turning Tor on can't make it vanish before messages truly connect, and debounced so a normal cold-start
+ * connect doesn't flash it.
+ */
+@Composable
+private fun rememberConnectionTroubleMode(): TroubleMode? {
+    val relayConnected by NostrRelayManager.shared.isConnected.collectAsState()
+    val torMode by TorPreferenceManager.modeFlow.collectAsState()
+    val hasInternet by rememberHasInternet()
+    var trouble by remember { mutableStateOf(false) }
+    LaunchedEffect(relayConnected) {
+        if (relayConnected) {
+            trouble = false
+        } else {
+            delay(CONNECTION_TROUBLE_DELAY_MS)
+            trouble = true
+        }
+    }
+    return if (!trouble) null else when {
+        !hasInternet -> TroubleMode.OFFLINE
+        torMode == TorMode.ON -> TroubleMode.TOR_ON
+        else -> TroubleMode.SUGGEST_TOR
+    }
+}
 
 /**
  * A soft, friendly attention strip shown on the chat list when Nostr relays can't be reached. It is honest

@@ -100,21 +100,53 @@ class NostrDirectMessageHandler(
                     val storedGroup = NostrGroupRegistry.get(convKey)   // STORED members, read BEFORE any put
                     val senderIsInStoredGroup =
                         storedGroup?.members?.any { it.pubkeyHex.equals(senderPubkey, ignoreCase = true) } == true
-                    if (!senderIsMutualFavorite && !senderIsInStoredGroup) {
-                        Log.d(TAG, "Dropping group msg from untrusted sender (not a mutual favorite, not a known member)")
-                        return@launch
-                    }
                     val members = parseGroupMembers(rumor)
                     // Defense-in-depth: the member set MUST hash to the claimed groupId, so membership is
                     // IMMUTABLE PER THREAD — even a trusted member cannot silently expand the roster under a
                     // fixed id (adding anyone forces a new, independently-derivable id = a visibly new thread).
-                    if (NostrGroupRegistry.computeGroupId(members.map { it.pubkeyHex }) != groupId) {
+                    val wellFormed = NostrGroupRegistry.computeGroupId(members.map { it.pubkeyHex }) == groupId
+                    if (!senderIsMutualFavorite && !senderIsInStoredGroup) {
+                        // The sender isn't trusted YET. This is often a legitimate co-member whose message
+                        // arrived BEFORE the introducing mutual-favorite's message (relays replay the 48h
+                        // backlog newest-first), so dropping it loses it permanently — in-memory dedupe means
+                        // it's only re-fetched on the next app restart. If the message is well-formed (its
+                        // member set hashes to the claimed groupId) and the sender is in that set, buffer it and
+                        // re-evaluate once a TRUSTED member stores the group. A buffered message NEVER
+                        // establishes or expands a group: acceptance still requires the sender to appear in a
+                        // group that a trusted member stored, so a cold stranger gains nothing.
+                        // Only buffer when a member we ALREADY trust (a mutual favorite) is claimed in the set:
+                        // that's the sole case where a real introduction — and thus a later drain — is plausible.
+                        // A cold stranger's fabricated group (no trusted member) is dropped outright, so it can't
+                        // consume buffer slots. (An attacker who knows a mutual favorite's pubkey could still
+                        // craft {attacker, knownFavorite}; the per-conversation cap below bounds that to
+                        // recoverable delay, and it never drains — the attacker is never in a trusted roster.)
+                        val claimsTrustedMember = members.any { m ->
+                            runCatching {
+                                val nk = fav.findNoiseKey(m.pubkeyHex)
+                                nk != null && fav.getFavoriteStatus(nk)?.isMutual == true
+                            }.getOrDefault(false)
+                        }
+                        if (wellFormed && claimsTrustedMember &&
+                            members.any { it.pubkeyHex.equals(senderPubkey, ignoreCase = true) }) {
+                            bufferPendingGroupMessage(
+                                PendingGroupMessage(convKey, senderPubkey, noisePayload, messageTimestamp, identity, giftWrap.id)
+                            )
+                            Log.d(TAG, "Deferring group msg from not-yet-trusted sender (awaiting introduction by a trusted member)")
+                        } else {
+                            Log.d(TAG, "Dropping group msg from untrusted sender (not a mutual favorite, not a known member)")
+                        }
+                        return@launch
+                    }
+                    if (!wellFormed) {
                         Log.d(TAG, "Dropping group msg: member set does not hash to the claimed groupId")
                         return@launch
                     }
                     val subject = rumor.tags.firstOrNull { it.size >= 2 && it[0] == "subject" }?.get(1)
                     NostrGroupRegistry.put(convKey, groupId, members, subject)
                     groupSenderName = members.firstOrNull { it.pubkeyHex.equals(senderPubkey, ignoreCase = true) }?.name
+                    // A trusted member just (re)stored the group — release any buffered messages from co-members
+                    // this introduction now vouches for.
+                    drainPendingGroupMessages(convKey)
                 } else {
                     convKey = "nostr_${senderPubkey.take(16)}"
                     repo.putNostrKeyMapping(convKey, senderPubkey)
@@ -141,12 +173,88 @@ class NostrDirectMessageHandler(
                 // the rumor signer); for 1:1, the existing geohash/nostr display name.
                 val senderNickname = groupSenderName ?: repo.displayNameForNostrPubkeyUI(senderPubkey)
 
-                processNoisePayload(noisePayload, convKey, senderNickname, messageTimestamp, senderPubkey, identity)
+                processNoisePayload(noisePayload, convKey, senderNickname, messageTimestamp, senderPubkey, identity, giftWrap.id)
 
             } catch (e: Exception) {
                 Log.e(TAG, "onGiftWrap error: ${e.message}")
             }
         }
+    }
+
+    // ── Out-of-order group buffering ────────────────────────────────────────────────────────────────────
+    // Holds a group message from a not-yet-trusted (but well-formed) sender until a TRUSTED member stores the
+    // group, so a co-member's message that arrives before the introducing member's isn't lost until the next
+    // app restart. Bounded FIFO; buffered messages never establish or expand a group.
+    private data class PendingGroupMessage(
+        val convKey: String,
+        val senderPubkey: String,
+        val payload: NoisePayload,
+        val timestamp: Date,
+        val identity: NostrIdentity,
+        val giftWrapId: String
+    )
+    private val pendingGroupLock = Any()
+    // convKey -> FIFO of buffered messages. Partitioned PER conversation so a flood of junk in one (bogus)
+    // conversation cannot evict another conversation's genuinely-pending messages. Bounded both per-conv and
+    // in the number of tracked conversations.
+    private val pendingGroupMessages = LinkedHashMap<String, ArrayDeque<PendingGroupMessage>>()
+    private val maxPendingPerConv = 20
+    private val maxPendingConvs = 50
+
+    private fun bufferPendingGroupMessage(msg: PendingGroupMessage) {
+        synchronized(pendingGroupLock) {
+            val q = pendingGroupMessages.getOrPut(msg.convKey) { ArrayDeque() }
+            q.removeAll { it.giftWrapId == msg.giftWrapId }
+            q.addLast(msg)
+            while (q.size > maxPendingPerConv) q.removeFirst()
+            while (pendingGroupMessages.size > maxPendingConvs) {
+                val oldest = pendingGroupMessages.keys.firstOrNull() ?: break
+                pendingGroupMessages.remove(oldest)
+            }
+        }
+    }
+
+    /** After a trusted member stores [convKey], process any buffered messages whose sender is now a member. */
+    private fun drainPendingGroupMessages(convKey: String) {
+        val group = NostrGroupRegistry.get(convKey) ?: return
+        val ready = synchronized(pendingGroupLock) {
+            val q = pendingGroupMessages.remove(convKey) ?: return
+            // Keep only senders the trusted member set vouches for; drop the rest (they claimed this groupId
+            // but aren't in the trusted roster, so they were never valid).
+            q.filter { p -> group.members.any { m -> m.pubkeyHex.equals(p.senderPubkey, ignoreCase = true) } }
+        }
+        ready.forEach { p ->
+            scope.launch(Dispatchers.Default) {
+                try {
+                    val name = group.members.firstOrNull { it.pubkeyHex.equals(p.senderPubkey, ignoreCase = true) }?.name
+                        ?: repo.displayNameForNostrPubkeyUI(p.senderPubkey)
+                    processNoisePayload(p.payload, p.convKey, name, p.timestamp, p.senderPubkey, p.identity, p.giftWrapId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "drainPendingGroupMessages error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Is the user currently viewing [convKey]'s conversation? A 1:1 send rewrites the selected peer from the
+     * nostr_<pub16> alias to the favorite's canonical Noise key (or the live mesh peer) via
+     * ConversationAliasResolver, so a plain `selected == convKey` check goes stale after the first send —
+     * leaving the open thread marked unread and read receipts unsent. Treat any representation of the same
+     * identity as "viewing". Groups are never rewritten, so the alias check suffices there.
+     */
+    private fun isViewingConversation(convKey: String, senderPubkey: String): Boolean {
+        val selected = state.getSelectedPrivateChatPeerValue() ?: return false
+        if (selected == convKey) return true
+        if (convKey.startsWith("nostr_grp_")) return false
+        val noiseKey = runCatching {
+            com.bitchat.android.favorites.FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
+        }.getOrNull() ?: return false
+        val noiseHex = noiseKey.joinToString("") { "%02x".format(it) }
+        if (selected.equals(noiseHex, ignoreCase = true)) return true
+        // The selected peer may be the live ephemeral mesh peerID for this identity.
+        val selectedNoise = runCatching { meshDelegateHandler.getPeerInfo(selected)?.noisePublicKey }.getOrNull()
+        return selectedNoise != null && selectedNoise.contentEquals(noiseKey)
     }
 
     /**
@@ -202,7 +310,8 @@ class NostrDirectMessageHandler(
         senderNickname: String,
         timestamp: Date,
         senderPubkey: String,
-        recipientIdentity: NostrIdentity
+        recipientIdentity: NostrIdentity,
+        giftWrapId: String
     ) {
         when (payload.type) {
             NoisePayloadType.PRIVATE_MESSAGE -> {
@@ -235,7 +344,7 @@ class NostrDirectMessageHandler(
                     senderNostrPubkey = if (isGroup) senderPubkey else null
                 )
 
-                val isViewing = state.getSelectedPrivateChatPeerValue() == convKey
+                val isViewing = isViewingConversation(convKey, senderPubkey)
                 val suppressUnread = seenStore.hasRead(pm.messageID)
 
                 withContext(Dispatchers.Main) {
@@ -284,6 +393,12 @@ class NostrDirectMessageHandler(
                 }
             }
             NoisePayloadType.FILE_TRANSFER -> {
+                // Dedup by gift-wrap id (persisted). The account subscription re-fetches the last 48h on every
+                // launch; unlike PRIVATE_MESSAGE (deduped by messageID vs restored history) a file mints a fresh
+                // UUID each time, so without this it re-saves the file, re-appends a bubble, and — since the
+                // notification hook was added — re-notifies on every restart for 48h.
+                val fileDedupKey = "filegw:$giftWrapId"
+                if (seenStore.hasDelivered(fileDedupKey)) return
                 // Properly handle encrypted file transfer
                 val file = BitchatFilePacket.decode(payload.data)
                 if (file != null) {
@@ -301,11 +416,12 @@ class NostrDirectMessageHandler(
                         senderPeerID = convKey
                     )
                     Log.d(TAG, "📄 Saved Nostr encrypted incoming file to $savedPath (msgId=$uniqueMsgId)")
+                    seenStore.markDelivered(fileDedupKey)
                     withContext(Dispatchers.Main) {
                         privateChatManager.handleIncomingPrivateMessage(message, suppressUnread = false)
                     }
                     // Same silent-delivery fix as PRIVATE_MESSAGE: notify unless this thread is already open.
-                    if (state.getSelectedPrivateChatPeerValue() != convKey) {
+                    if (!isViewingConversation(convKey, senderPubkey)) {
                         val groupSubject = if (convKey.startsWith("nostr_grp_")) NostrGroupRegistry.get(convKey)?.subject else null
                         meshDelegateHandler.notifyIncomingNostrMessage(
                             convKey = convKey,
