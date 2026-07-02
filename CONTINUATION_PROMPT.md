@@ -11,7 +11,33 @@ Simple/Family profile (PR open). Work autonomously, inspect the relevant files f
 focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
 **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (2026-07-01, updated)
+## ▶️ NEXT SESSION — START HERE (2026-07-02, updated)
+
+### 🌏 SLOW-OPEN FIX + JAPANESE LOCALIZATION (2026-07-02, HEAD `9bed2ef`)
+Both from user feedback this session; both build+test green + adversarially reviewed.
+- **Slow conversation open FIXED (`4bc5132`) — VERIFIED ON S24.** User: "chat history takes a while to load up." A
+  4-agent investigation OVERTURNED the disk-load guess (chat_history_v1.json is ~8KB on both phones → parse <1ms).
+  REAL cause: `ChatViewModel.startPrivateChat` looped `SeenMessageStore.markRead(id)` once PER message on the MAIN
+  thread, each = full Gson-serialize of the ~10k-id set + an AES-EncryptedSharedPreferences commit → N encrypted
+  writes to open a thread. FIX: new `SeenMessageStore.markReadBulk(ids)` (one persist, same LRU/trim) called once on
+  `Dispatchers.IO`. Deliberately did NOT do the async-load / conv-count-bound the synthesis also suggested (8KB →
+  non-problem + merge-race risk). Verified S24: Family group opens clean+fast, no jank/errors.
+- **Japanese localization + in-app language toggle (`9bed2ef`) — ON-DEVICE VERIFY PENDING (phones disconnected).**
+  ~65 Simple strings (SimpleModeScreen/AddFamilyScreen/ProfilePickScreen) → `values/strings.xml` + `values-ja`
+  (base app was already JP-localized) via `stringResource`/`getString`; auto-follows phone language. In-app
+  **Language** picker (System / English / 日本語) in Simple settings: new `profile/SimpleLanguage.kt` (pref +
+  `wrap()`), applied in `OrientationAwareActivity.attachBaseContext` (Activities are ComponentActivity, not
+  AppCompat, so AppCompatDelegate wouldn't apply), Activity `recreate()` on change; restores JVM default on
+  "System". Review clean on extraction (keys/format-args/completeness); folded a low fix (locale-restore).
+  **NEXT: on-device — set Language→日本語, confirm the Simple UI switches; also set the phone to Japanese to
+  confirm auto-follow.** Deferred (minor): `formatBubbleTime` still hardcodes 12h "h:mm a" (locale-aware time
+  format needs context threading).
+- **DECISIONS this session:** home address in history = user ACCEPTS (no rewrite); QR replay window = KEEP
+  Long.MAX_VALUE (copy-and-send-later); multi-phone group test = user chose SKIP for now.
+
+---
+
+## (earlier) NEXT SESSION — START HERE (2026-07-01)
 
 **Branch `simple-family-profile` (PR #2), HEAD `0c67507`, in sync with origin. Dogecoin wallet already MERGED to
 `main` (PR #1) — HISTORICAL below.** Full running detail is in memory `simple-family-profile-plan.md` — READ IT FIRST.
