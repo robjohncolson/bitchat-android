@@ -67,6 +67,26 @@ class the Simple profile exists to prevent.
    branch — re-fires a system notification each time; persisted history now accumulates the duplicates.
    **Fix:** dedup by gift-wrap id via `seenStore.hasDelivered(giftWrap.id)`.
 
+> **STATUS (2026-07-01): WP2 partially done.** Shipped: #7 (panic wipe — `AppStateStore.wipePersisted()`
+> deletes `chat_history_v1.json`, wired into `panicClearAllData` alongside new `NostrGroupRegistry.clear()` +
+> `KnownNpubStore.clear()` so panic also erases family group/contact state); #9-code (removed the home-address
+> KDoc + `WAKEFIELD_FAMILY_ROOM` constant + dead `pinRoom()` + the unused `roomGeohash`/`roomLevel` params from
+> `ProfileSetupCoordinator`; kept the tested `isValidGeohash` util); #10 (tap-added contacts now labelled
+> "Added from a group · not verified" with a distinct avatar tint + an "isn't verified" note in the Add
+> dialog); #11 (`isMine` is now structural — `senderPeerID == myPeerID`, name only as fallback); #12b
+> (`parseGroupMembers` drops non-64-hex members, making the groupId preimage injective).
+> Adversarial review (2-lens + verify) then caught a real race **introduced by the panic fix itself**: the
+> wipe raced an in-flight debounced `persistNow()` that could recreate the deleted file with pre-panic
+> plaintext (cooperative cancellation is a no-op once the write started; the snapshot is taken before the
+> lock). Fixed: a `persistGeneration` counter bumped under `writeLock` in `wipePersisted()` and re-checked
+> inside `persistNow()`'s write block (aborts a stale write), plus the panic wipe was moved to run AFTER the
+> mesh + Nostr receive pipelines are torn down so no concurrent inbound can re-persist. Remaining LOW
+> (accepted): `isMine`'s name-equality fallback when `senderPeerID` is null — unreachable for real chat
+> messages (all carry a peerID).
+> **DEFERRED — needs a user decision (see "Three decisions" at the bottom):** #8 (encrypt chat history at rest
+> vs. make persistence opt-in), #9-history (rewrite pushed git history to purge the address, or accept it),
+> #12a (bound the provisioning QR replay window vs. keep `Long.MAX_VALUE` for the copy-and-send-later flow).
+
 ## WP2 — Privacy & trust hardening
 
 7. **[HIGH] Disk persistence defeats panic clear — for ALL profiles.** `AppStateStore.kt:323`.

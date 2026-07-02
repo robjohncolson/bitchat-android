@@ -2005,7 +2005,7 @@ class ChatViewModel(
         try {
             com.bitchat.android.services.SeenMessageStore.getInstance(getApplication()).clear()
         } catch (_: Exception) { }
-        
+
         // Clear all mesh service data
         clearAllMeshServiceData()
         
@@ -2035,6 +2035,15 @@ class ChatViewModel(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to reset Nostr/geohash: ${e.message}")
         }
+
+        // Wipe persisted history + Simple/Family group + tap-added-contact state LAST — after the mesh
+        // (clearAllMeshServiceData) and Nostr (geohashViewModel.panicReset) receive pipelines are torn down —
+        // so no concurrent inbound event can re-persist wiped state, and before the fresh mesh service is
+        // recreated. Without wipePersisted(), this branch's on-disk history (chat_history_v1.json) would
+        // silently reappear on the next launch, defeating the emergency wipe.
+        try { com.bitchat.android.services.AppStateStore.wipePersisted() } catch (_: Exception) { }
+        try { com.bitchat.android.nostr.NostrGroupRegistry.clear() } catch (_: Exception) { }
+        try { com.bitchat.android.nostr.KnownNpubStore.clear() } catch (_: Exception) { }
 
         // Reset nickname
         val newNickname = "anon${Random.nextInt(1000, 9999)}"

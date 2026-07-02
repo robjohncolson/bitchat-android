@@ -44,4 +44,10 @@ object KnownNpubStore {
         map.remove(hex)
         prefs?.edit()?.remove(hex)?.apply()
     }
+
+    /** Drop all known-npub contacts (used by panic / emergency clear). */
+    fun clear() {
+        map.clear()
+        prefs?.edit()?.clear()?.apply()
+    }
 }

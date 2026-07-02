@@ -386,11 +386,14 @@ private fun SimpleHome(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
             items(known, key = { "npub_" + it.key }) { entry ->
+                // Tap-added-from-a-group contacts are NOT verified favorites — their display name is whatever a
+                // group message asserted. Flag that so a non-technical user can tell them apart from a family
+                // member they added by scanning the signed QR code (a verified mutual favorite, plain above).
                 ChatListRow(
                     title = entry.value,
-                    subtitle = "Tap to chat",
+                    subtitle = "Added from a group · not verified",
                     avatarInitial = entry.value.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                    avatarColor = Color(0xFF9AA3AB),
+                    avatarColor = Color(0xFFC0A9B0),   // muted mauve, distinct from the verified-favorite gray
                     onClick = { onOpenContact(entry.key, entry.value, null) }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -545,7 +548,11 @@ private fun SimpleConversation(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             items(items = messages, key = { it.id }) { m ->
-                val isMine = m.sender == nickname
+                // Ownership is structural, not by display name: every locally-sent message is filed with
+                // senderPeerID == our own mesh peerID, while incoming messages carry the sender's peerID or the
+                // conversation key. A name-equality check would misattribute a same-named group member's message
+                // as ours (and flip it after a rename). Fall back to the name only when there is no peerID.
+                val isMine = m.senderPeerID?.let { it == viewModel.myPeerID } ?: (m.sender == nickname)
                 // A message that is wholly a `dogecoin:` URI is a payment request — render it as a tappable
                 // card (Pay → opens the locked wallet prefilled) instead of a raw link. Parsing only; the
                 // money path stays entirely inside the wallet sheet's existing gates.
@@ -645,7 +652,9 @@ private fun SimpleConversation(
         AlertDialog(
             onDismissRequest = { tapAddMember = null },
             title = { Text("Add $name?") },
-            text = { Text("Add $name to your contacts so you can message them privately, one-to-one.") },
+            text = { Text("Add $name to your contacts so you can message them privately, one-to-one. " +
+                "This name is what the group said — it isn't verified. To be sure it's really them, add them " +
+                "by scanning their code.") },
             confirmButton = {
                 TextButton(onClick = {
                     val convKey = "nostr_${hex.take(16)}"

@@ -51,6 +51,11 @@ object AppStateStore {
     private val persistScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var persistJob: Job? = null
     private val writeLock = Any()
+    // Bumped by wipePersisted(). persistNow() snapshots this before encoding and re-checks it under writeLock,
+    // so an in-flight write that began before a panic wipe cannot resurrect the deleted plaintext file
+    // (coroutine cancellation is cooperative and persistNow has no suspension points, so cancel() alone is
+    // not enough once the debounced job has passed delay()).
+    @Volatile private var persistGeneration = 0
     private val gson = Gson()
     private const val HISTORY_FILE = "chat_history_v1.json"
     private const val MAX_PER_CONVERSATION = 1000
@@ -176,6 +181,7 @@ object AppStateStore {
     // corrupt the live history file. The previous good file stays intact until the rename completes.
     private fun persistNow() {
         val ctx = appContext ?: return
+        val genAtStart = persistGeneration
         val json = runCatching {
             gson.toJson(
                 StoredHistory(
@@ -185,6 +191,9 @@ object AppStateStore {
             )
         }.getOrNull() ?: return
         synchronized(writeLock) {
+            // A panic wipe may have run after we snapshotted the maps above. Re-check under the same lock the
+            // wipe holds, and abort rather than recreate the file with pre-wipe plaintext.
+            if (persistGeneration != genAtStart) return
             runCatching {
                 val dir = ctx.filesDir
                 val tmp = File(dir, "$HISTORY_FILE.tmp")
@@ -332,6 +341,34 @@ object AppStateStore {
             _publicMessages.value = emptyList()
             _privateMessages.value = emptyMap()
             _channelMessages.value = emptyMap()
+        }
+    }
+
+    /**
+     * Panic wipe: drop in-memory history AND delete the on-disk history file WITHOUT flushing first.
+     * Unlike [clear] (a clean exit that persists then keeps the file), this is the emergency "destroy
+     * everything" path — before this branch added persistence, panic + process exit genuinely erased chat
+     * history; this restores that guarantee. Called from ChatViewModel.panicClearAllData.
+     */
+    fun wipePersisted() {
+        persistJob?.cancel()
+        synchronized(this) {
+            seenMessageIds.clear()
+            seenPublicMessageKeys.clear()
+            _publicMessages.value = emptyList()
+            _privateMessages.value = emptyMap()
+            _channelMessages.value = emptyMap()
+        }
+        synchronized(writeLock) {
+            // Bump the generation FIRST, under the same lock persistNow writes under: an in-flight persist that
+            // snapshotted pre-wipe data will see the change and abort instead of recreating the file. A later
+            // legitimate message re-snapshots at the new generation and persists normally.
+            persistGeneration++
+            val ctx = appContext ?: return
+            runCatching {
+                File(ctx.filesDir, HISTORY_FILE).delete()
+                File(ctx.filesDir, "$HISTORY_FILE.tmp").delete()
+            }
         }
     }
 

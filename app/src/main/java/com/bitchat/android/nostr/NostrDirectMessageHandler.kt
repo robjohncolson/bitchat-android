@@ -270,6 +270,10 @@ class NostrDirectMessageHandler(
                 "bgm", "p" -> tag[1].lowercase()
                 else -> return@forEach
             }
+            // A member must be a valid 32-byte account pubkey (64 hex chars). Rejecting anything else keeps the
+            // computeGroupId preimage injective over member SETS — a value containing the "," join separator
+            // could otherwise make two different sets hash equal, weakening the per-thread membership integrity.
+            if (hex.length != 64 || !hex.all { it in '0'..'9' || it in 'a'..'f' }) return@forEach
             val name = if (tag[0] == "bgm" && tag.size >= 3) tag[2].takeIf { it.isNotBlank() } else null
             byHex[hex] = NostrGroupRegistry.GroupMember(hex, name ?: byHex[hex]?.name)
         }
