@@ -127,6 +127,17 @@ class the Simple profile exists to prevent.
     `parseGroupMembers` accepts non-64-hex member fields, making the groupId preimage non-injective
     (comma ambiguity) — drop malformed members before hashing (`NostrDirectMessageHandler.kt:162`).
 
+> **STATUS (2026-07-01): WP3 done.** #13 (Simple nav now survives Activity recreation — the open conversation
+> key is held in `rememberSaveable` and `target` is rebuilt from it via a restore effect; a shared
+> `closeConversation()` clears both on back so a config change no longer strands the ViewModel "viewing" a
+> thread the UI has left, which had caused false read receipts + suppressed notifications). #14 (corrupt-file
+> quarantine) landed with WP4. #15 (profile pick now persists the chosen profile SYNCHRONOUSLY before marking
+> the pick complete, so an Activity death in the window can't strand a SIMPLE pick in the POWER UI). #16
+> (notification intent ignores a Recents re-launch via `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`, and the
+> private-chat branch now drives ONLY the active profile's path — SIMPLE gets `requestOpenConversation`, POWER
+> gets the sheet — instead of always poking dead Power-sheet state). Also #30 (WP6): `senderNostrPubkey` is now
+> persisted in `StoredMsg`, so group tap-to-add survives a relaunch.
+
 ## WP3 — Lifecycle robustness
 
 13. **[MED] Simple nav state is plain `remember`** (`SimpleModeScreen.kt:120`): Activity recreation

@@ -120,7 +120,10 @@ object AppStateStore {
         val mentions: List<String>?,
         val originalSender: String?,
         val isRelay: Boolean,
-        val status: StoredStatus?
+        val status: StoredStatus?,
+        // Group sender's account pubkey — drives the Simple "tap a name to add" affordance. Without persisting
+        // it, restored group bubbles decode with null and the feature silently dies for existing messages.
+        val senderNostrPubkey: String? = null
     )
 
     private data class StoredStatus(
@@ -143,7 +146,7 @@ object AppStateStore {
         id = m.id, sender = m.sender, content = m.content, type = m.type.name, ts = m.timestamp.time,
         isPrivate = m.isPrivate, senderPeerID = m.senderPeerID, recipientNickname = m.recipientNickname,
         channel = m.channel, mentions = m.mentions, originalSender = m.originalSender, isRelay = m.isRelay,
-        status = encodeStatus(m.deliveryStatus)
+        status = encodeStatus(m.deliveryStatus), senderNostrPubkey = m.senderNostrPubkey
     )
 
     private fun decode(s: StoredMsg): BitchatMessage? = runCatching {
@@ -152,7 +155,8 @@ object AppStateStore {
             type = runCatching { BitchatMessageType.valueOf(s.type) }.getOrDefault(BitchatMessageType.Message),
             timestamp = Date(s.ts), isRelay = s.isRelay, originalSender = s.originalSender,
             isPrivate = s.isPrivate, recipientNickname = s.recipientNickname, senderPeerID = s.senderPeerID,
-            mentions = s.mentions, channel = s.channel, deliveryStatus = decodeStatus(s.status)
+            mentions = s.mentions, channel = s.channel, deliveryStatus = decodeStatus(s.status),
+            senderNostrPubkey = s.senderNostrPubkey
         )
     }.getOrNull()
 

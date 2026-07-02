@@ -57,6 +57,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -119,12 +120,24 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         }
     }
     var target by remember { mutableStateOf<SimpleTarget?>(null) }
+    // The open conversation's key, kept in a Saveable so it survives Activity recreation (dark-mode / locale /
+    // font-size / split-screen change). `target` is not Saveable, so after recreation it resets to null while
+    // the ViewModel still thinks the thread is open — which would suppress that thread's notifications and fire
+    // false read receipts. We restore `target` from this key below.
+    var savedConvKey by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Close the open conversation: end the private-chat context AND clear the durable key, so a later
+    // recreation doesn't reopen a thread the user explicitly backed out of.
+    val closeConversation: () -> Unit = {
+        viewModel.endPrivateChat(); target = null; savedConvKey = null
+    }
 
     // Open (or re-open) a group thread by conv-key: make it the active private-chat context for sends and
     // resolve its subject + members from the registry.
     val openGroup: (String) -> Unit = { convKey ->
         val g = NostrGroupRegistry.get(convKey)
         viewModel.startPrivateChat(convKey)
+        savedConvKey = convKey
         target = SimpleTarget.Group(convKey, g?.subject, g?.members ?: emptyList())
     }
 
@@ -148,6 +161,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
             GeohashAliasRegistry.put(convKey, hex) // enable account-DM routing so the first reply isn't queued forever
         }
         viewModel.startPrivateChat(convKey)
+        savedConvKey = convKey
         target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
     }
 
@@ -158,6 +172,18 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
             if (convKey != null) {
                 if (convKey.startsWith("nostr_grp_")) openGroup(convKey) else openContactByConvKey(convKey)
                 viewModel.consumePendingOpenConversation()
+            }
+        }
+    }
+
+    // Restore the open conversation after Activity recreation: `target` reset to null but savedConvKey
+    // (Saveable) survived, so rebuild the thread from it instead of leaving the ViewModel "viewing" a thread
+    // the UI has left. Runs only when nothing is open and the user hadn't explicitly backed out (savedConvKey
+    // is cleared by closeConversation).
+    LaunchedEffect(Unit) {
+        if (target == null) {
+            savedConvKey?.let { key ->
+                if (key.startsWith("nostr_grp_")) openGroup(key) else openContactByConvKey(key)
             }
         }
     }
@@ -173,6 +199,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                         viewModel.startGeohashDM(hex)          // register the conv-key -> pubkey mapping + subscription
                         GeohashAliasRegistry.put(convKey, hex) // route the FIRST send as an account DM (else it queues forever)
                         viewModel.startPrivateChat(convKey)    // make it the active private-chat context for sends
+                        savedConvKey = convKey
                         target = SimpleTarget.Contact(convKey, name, noiseHex, hex)
                     }
                 },
@@ -180,7 +207,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
             )
         }
         is SimpleTarget.Contact -> {
-            BackHandler { viewModel.endPrivateChat(); target = null }
+            BackHandler { closeConversation() }
             LineTheme {
                 SimpleConversation(
                     viewModel = viewModel,
@@ -190,13 +217,13 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     peerID = t.peerID,
                     noiseHex = t.noiseHex,
                     contactPubkeyHex = t.pubkeyHex,
-                    onBack = { viewModel.endPrivateChat(); target = null },
+                    onBack = closeConversation,
                     onOpenGroup = openGroup
                 )
             }
         }
         is SimpleTarget.Group -> {
-            BackHandler { viewModel.endPrivateChat(); target = null }
+            BackHandler { closeConversation() }
             LineTheme {
                 SimpleConversation(
                     viewModel = viewModel,
@@ -206,7 +233,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
                     peerID = t.convKey,
                     noiseHex = null,
                     contactPubkeyHex = null,
-                    onBack = { viewModel.endPrivateChat(); target = null },
+                    onBack = closeConversation,
                     onOpenGroup = openGroup
                 )
             }
