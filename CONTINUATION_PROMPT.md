@@ -11,14 +11,55 @@ Simple/Family profile (PR open). Work autonomously, inspect the relevant files f
 focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
 **Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (2026-06-30, updated)
+## ▶️ NEXT SESSION — START HERE (2026-07-01, updated)
 
-**Branch `simple-family-profile` (PR #2). Latest COMMITTED = the Nostr-notification fix (new HEAD this session; see
-`git log` for the hash), on top of Increment 2 (`3b13d5b`), in sync with origin. Dogecoin wallet is already MERGED
-to `main` (PR #1) — HISTORICAL below.** This session pushed the Simple/Family profile a long way past its first
-"feature-complete" state; the headline new thing is a **real E2E "family group"** that REPLACES the old public
-geohash "Family Room". Full running detail (every file:line) is in memory `simple-family-profile-plan.md` — READ IT
-FIRST.
+**Branch `simple-family-profile` (PR #2), HEAD `0c67507`, in sync with origin. Dogecoin wallet already MERGED to
+`main` (PR #1) — HISTORICAL below.** Full running detail is in memory `simple-family-profile-plan.md` — READ IT FIRST.
+
+### 🧰 TIGHTENING PASS COMPLETE (2026-07-01) — plan `docs/simple-profile-tightening-plan.md`
+A full-branch multi-lens audit (34-agent workflow, 26 confirmed findings) drove six hardening slices, EACH
+adversarially reviewed before commit (real defects were caught + fixed in review — e.g. a panic wipe/persist race
+I'd introduced). All build+tests green; money-path canaries pass every commit. Shipped commits:
+- **WP1 `d5a6dc7` — message-loss correctness (4 HIGH + 2 MED):** seed `GeohashAliasRegistry` on contact open (first
+  send no longer queues forever); mesh peerID added to the Simple thread union (BLE messages show); out-of-order
+  group messages BUFFERED past the trust gate then drained after a trusted member stores the group (per-conv capped,
+  admission-gated on a claimed mutual favorite); delivery-status caption + in-conversation connection banner;
+  `isViewing` computed against the conversation key set; Nostr FILE_TRANSFER deduped by gift-wrap id. **Verified
+  on-device (tablet): own bubble shows "· Sent", group renders.**
+- **WP2 `4362297` — privacy & trust:** panic-clear now truly erases on-disk history via `AppStateStore.wipePersisted()`
+  (+ `NostrGroupRegistry.clear()`/`KnownNpubStore.clear()`), run AFTER pipelines torn down, with a `persistGeneration`
+  guard so an in-flight debounced write can't resurrect the file (the race review caught); **home address removed**
+  from `ProfileSetupCoordinator` KDoc + dead room machinery deleted (STILL in earlier history — see DECISIONS);
+  `isMine` is structural (`senderPeerID==myPeerID`); tap-added contacts marked "not verified"; `parseGroupMembers`
+  64-hex validation. **Verified on-device: `isMine` correct after the change.**
+- **WP4 `c5d2f79` — tests + WP3 #14:** `NostrGroupRegistryTest` (pinned computeGroupId vector + invariance),
+  `KnownNpubStoreTest`, `AppStateStorePersistenceTest` (corrupt-file quarantine + round-trip + cap) — 14 new tests;
+  plus the corrupt-history **quarantine** fix in `load()`.
+- **WP3 `f3dedc4` — lifecycle:** Simple nav survives Activity recreation (`rememberSaveable` convKey + restore
+  effect + shared `closeConversation()`); profile pick persists SYNCHRONOUSLY; notification intent ignores Recents
+  relaunch (`FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`) + drives only the active profile; `senderNostrPubkey` persisted
+  (tap-to-add survives relaunch). **Verified on-device: forced font-scale recreation kept the thread open.**
+- **WP6 `0c67507` — hygiene:** removed the dead always-true `isPrivate` branch + 2 dead `collectAsState` in
+  `SimpleConversation`; refreshed 3 stale phase/increment comments. PR #2 description refreshed.
+
+**⭐ DECISIONS DEFERRED (asked; user was away — proceed on these when they answer):**
+1. **Chat history at rest is plaintext** on disk (`allowBackup=false` already closes the ADB vector). Encrypt at rest
+   (keystore, like SeenMessageStore) vs. make persistence opt-in per profile? NOT built — genuine architecture fork.
+2. **Home address in git history:** removed going forward; purging earlier commits (`60dfe08`) needs a branch
+   history rewrite + force-push (destructive — did NOT do unattended).
+3. **Provisioning QR replay window** (`maxAgeSeconds=Long.MAX_VALUE`): bound it vs. keep for copy-and-send-later.
+
+**⭐ HELD (larger, not started) — WP5 UX + a few WP4/WP6 items:** Japanese **localization** sweep (~60 hardcoded
+strings → `strings.xml` + `values-ja`; also 12h→locale time format); home chat-list **unread/preview/timestamp/
+activity-ordering**; **confirm dialog** on "Switch to full bitchat"; QR-scan **error feedback** (invalid code =
+silent); MessageRouter branch-order test + `provisionFamilyContact` test (need DI seams); split the 1,191-line
+`SimpleModeScreen.kt`. All scoped in the plan doc.
+
+**REMAINING VERIFY (needs S24 + Pixel 3 plugged in):** the interactive 2–3-phone group test + the two notification
+fixes on a receiving phone (see below). Tablet is on `0c67507`.
+
+### (Pre-tightening) The Simple/Family profile — feature-complete
+This session's earlier work: a **real E2E "family group"** that REPLACES the old public geohash "Family Room".
 
 ### 🔔 Nostr messages now raise notifications (fix on top of Increment 2)
 On-device finding: incoming messages "don't always come up as a notification — no way to know unless you open the
@@ -102,17 +143,24 @@ also fixes replying to any received non-favorite Nostr 1:1.
 - Simple is now **people-first** (favorites + tap-added contacts + private groups), no public channel at all.
 
 ### REMAINING after 2c
-1. **On-device 2–3-phone group test** (tablet + 2 phones): switch to Simple, provision family (Add-family QR), create a
-   group (1:1 → PersonAdd → pick members), send both ways, tap an unknown member's name → Add. Console drivers:
-   `nostr-id`, `group-send <hex1,hex2,…> <msg>`, `group-show`.
-2. Verify the DM-history persistence + the union display fix on-device (send DMs → force-stop → relaunch → history there).
+1. **On-device 2–3-phone group test** — PARTIALLY EVIDENCED (2026-07-01 session): the tablet's `nostr_grp_0419e835c7d1c05f`
+   holds real traffic from all THREE devices (blueberry ×3, pineapple ×1, googlepad/tablet ×1), so 3-member fan-out +
+   receive + sender-name bubbles are proven on the tablet side. STILL NEEDED (blocked on plugging in the S24 + Pixel 3):
+   the full interactive pass — create a group via UI (1:1 → PersonAdd → pick members), send both ways observed on EACH
+   device, tap an unknown member's name → Add, and the notification-raise + tap-to-open-thread on a receiving phone.
+   Console drivers: `nostr-id`, `group-send <hex1,hex2,…> <msg>`, `group-show`.
+2. ~~Verify the DM-history persistence + union display~~ ✅ **DONE (2026-07-01, tablet, build `bf3d253`):** reinstall
+   (process kill) → relaunch → `chat_history_v1.json` (group + 1:1 alias + mesh-peerID buckets) reloaded; `group-show`
+   returned all 5 messages and the Simple UI rendered the full Family-group thread (sender names + own green bubble).
 3. Deferred/optional: per-member group DELIVERED/READ receipts (2a suppresses them for group keys); group subject/naming
    UX; the address-search idea (geocode→geohash — superseded by the private group but still capturable).
 
 ### Operational state
 - **Devices (all arm64, debug app `com.bitchat.droid.debug`, PIN 5555):** Pixel 3 `89VX0HPX1`, Galaxy S24
-  `RFCX81GNBRE`, **Pixel Tablet `47251HFH807FLS`** (added this session). **Pixel Tablet + S24 both have the latest
-  build `3b13d5b` installed (ready for the 2-phone group test); Pixel 3 was not connected — install it when plugged in.**
+  `RFCX81GNBRE`, **Pixel Tablet `47251HFH807FLS`**. **Tablet is on HEAD `bf3d253` (verified reinstall 2026-07-01),
+  in SIMPLE profile (tor=OFF pow=false channel=Mesh), all 4 Nostr relays UP over clearnet; S24 + Pixel 3 were NOT
+  connected — install `bf3d253` on them when plugged in (last known: S24 on `3b13d5b` from 06-30, i.e. WITHOUT the
+  two notification fixes; Pixel 3 older still).**
   Install: `adb -s <serial> install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` then
   `adb -s <serial> shell monkey -p com.bitchat.droid.debug -c android.intent.category.LAUNCHER 1`.
 - **Simple UI access:** app relaunch → onboarding may show the Power/Simple picker on a fresh install; or Power→Simple
