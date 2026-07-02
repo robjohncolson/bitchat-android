@@ -1188,16 +1188,19 @@ class ChatViewModel(
             // Clear notifications for this sender since user is now viewing the chat
             clearNotificationsForSender(peerID)
 
-            // Persistently mark all messages in this conversation as read so Nostr fetches
-            // after app restarts won't re-mark them as unread.
-            try {
-                val seen = com.bitchat.android.services.SeenMessageStore.getInstance(getApplication())
-                val chats = state.getPrivateChatsValue()
-                val messages = chats[peerID] ?: emptyList()
-                messages.forEach { msg ->
-                    try { seen.markRead(msg.id) } catch (_: Exception) { }
+            // Persistently mark all messages in this conversation as read so Nostr fetches after app restarts
+            // won't re-mark them as unread. Do it in ONE batched write, OFF the main thread — the previous
+            // per-message markRead() ran a full serialize + AES-encrypted SharedPreferences write for EACH
+            // message on the UI thread, which is the dominant "chat is slow to open" cost.
+            val messageIds = (state.getPrivateChatsValue()[peerID] ?: emptyList()).map { it.id }
+            if (messageIds.isNotEmpty()) {
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        com.bitchat.android.services.SeenMessageStore.getInstance(getApplication())
+                            .markReadBulk(messageIds)
+                    } catch (_: Exception) { }
                 }
-            } catch (_: Exception) { }
+            }
         }
     }
     
