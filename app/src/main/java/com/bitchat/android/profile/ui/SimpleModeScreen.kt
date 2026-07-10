@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -725,7 +726,14 @@ private fun SimpleConversation(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            items(items = messages, key = { it.id }) { m ->
+            itemsIndexed(items = messages, key = { _, m -> m.id }) { index, m ->
+                // Anchor the thread in time: bubbles show only a time-of-day, so without a marker at each
+                // day boundary, multi-day history reads as one shuffled afternoon. Rendered inside the
+                // item (not as its own list item) so item keys stay message ids.
+                val previous = if (index > 0) messages[index - 1] else null
+                if (previous == null || dayKey(previous.timestamp) != dayKey(m.timestamp)) {
+                    DaySeparator(m.timestamp)
+                }
                 // Ownership is structural, not by display name: every locally-sent message is filed with
                 // senderPeerID == our own mesh peerID, while incoming messages carry the sender's peerID or the
                 // conversation key. A name-equality check would misattribute a same-named group member's message
@@ -963,8 +971,52 @@ private fun MessageBubble(
     }
 }
 
+// Locale-aware short time (follows the in-app language: 10:35 PM in English, 22:35 in Japanese).
 private fun formatBubbleTime(date: java.util.Date): String =
-    java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(date)
+    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT, java.util.Locale.getDefault()).format(date)
+
+// Calendar-day identity in the device's local time zone (year * 1000 + day-of-year).
+private fun dayKey(date: java.util.Date): Long {
+    val cal = java.util.Calendar.getInstance()
+    cal.time = date
+    return cal.get(java.util.Calendar.YEAR) * 1000L + cal.get(java.util.Calendar.DAY_OF_YEAR)
+}
+
+@Composable
+private fun DaySeparator(date: java.util.Date) {
+    val now = java.util.Date()
+    val label = when (dayKey(date)) {
+        dayKey(now) -> stringResource(R.string.simple_today)
+        dayKey(java.util.Date(now.time - 86_400_000L)) -> stringResource(R.string.simple_yesterday)
+        else -> remember(dayKey(date)) {
+            val locale = java.util.Locale.getDefault()
+            val sameYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR) ==
+                java.util.Calendar.getInstance().apply { time = date }.get(java.util.Calendar.YEAR)
+            val pattern = android.text.format.DateFormat.getBestDateTimePattern(
+                locale, if (sameYear) "EEEMMMd" else "yMMMd"
+            )
+            java.text.SimpleDateFormat(pattern, locale).format(date)
+        }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+            )
+        }
+    }
+}
 
 /**
  * Pick family members (mutual favorites reachable over Nostr) to form a private E2E group with the current

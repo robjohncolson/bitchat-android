@@ -783,6 +783,8 @@
     <string name="simple_cd_back">Back</string>
     <string name="simple_cd_start_group">Start a group</string>
     <string name="simple_message_hint">Message</string>
+    <string name="simple_today">Today</string>
+    <string name="simple_yesterday">Yesterday</string>
     <string name="simple_cd_send">Send</string>
     <string name="simple_cd_request_doge">Request Dogecoin</string>
     <string name="simple_status_sending">Sending…</string>

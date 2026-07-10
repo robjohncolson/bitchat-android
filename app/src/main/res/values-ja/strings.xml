@@ -415,6 +415,8 @@
   <string name="simple_cd_back">戻る</string>
   <string name="simple_cd_start_group">グループを作成</string>
   <string name="simple_message_hint">メッセージ</string>
+  <string name="simple_today">今日</string>
+  <string name="simple_yesterday">昨日</string>
   <string name="simple_cd_send">送信</string>
   <string name="simple_cd_request_doge">Dogecoin をリクエスト</string>
   <string name="simple_status_sending">送信中…</string>

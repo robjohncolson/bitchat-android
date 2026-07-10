@@ -28,7 +28,12 @@ class NostrDirectMessageHandler(
     private val repo: GeohashRepository,
     private val dataManager: com.bitchat.android.ui.DataManager
 ) {
-    companion object { private const val TAG = "NostrDirectMessageHandler" }
+    companion object {
+        private const val TAG = "NostrDirectMessageHandler"
+        // Tolerance for peer clock drift before a sender-claimed rumor timestamp is treated as bogus
+        // and replaced with arrival time (see onGiftWrap).
+        private const val MAX_FUTURE_CLOCK_SKEW_MS = 15 * 60 * 1000L
+    }
 
     private val seenStore by lazy { SeenMessageStore.getInstance(application) }
 
@@ -77,7 +82,16 @@ class NostrDirectMessageHandler(
                 if (packet.type != com.bitchat.android.protocol.MessageType.NOISE_ENCRYPTED.value) return@launch
 
                 val noisePayload = NoisePayload.decode(packet.payload) ?: return@launch
-                val messageTimestamp = Date(giftWrap.createdAt * 1000L)
+                // NIP-59 privacy: the OUTER gift wrap's created_at is deliberately randomized up to 48h in
+                // the past (randomizeTimestampUpToPast), so it must never become the message timestamp —
+                // sorting by it shuffles fresh messages into the middle of the thread. The sealed rumor
+                // carries the sender's real send time. (The 48h age gate above stays on the wrap: it bounds
+                // the relay backlog window, where the randomized time is the only one relays ever see.)
+                // Clamp a future-claimed time to arrival so a peer's bad clock can't pin its messages to the
+                // bottom of the conversation.
+                val nowMs = System.currentTimeMillis()
+                val claimedMs = rumor.createdAt * 1000L
+                val messageTimestamp = Date(if (claimedMs > nowMs + MAX_FUTURE_CLOCK_SKEW_MS) nowMs else claimedMs)
 
                 // E2E "family group": a rumor carrying a sealed `bg` group tag threads under ONE shared group
                 // key for all members, instead of the per-sender 1:1 alias. A rumor with NO `bg` tag is the
