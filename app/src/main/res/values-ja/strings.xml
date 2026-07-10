@@ -411,6 +411,11 @@
   <string name="simple_tap_to_chat">タップしてチャット</string>
   <string name="simple_no_internet_contact">まだインターネット連絡先がありません</string>
   <string name="simple_added_from_group_unverified">グループから追加 ・ 未確認</string>
+  <string name="dogecoin_node_assist_offer">ホームノードが設定済みです — ライトクライアントの同期が終わるまで、ノードに切り替えられます。</string>
+  <string name="dogecoin_node_assist_use">ホームノードを使う</string>
+  <string name="dogecoin_node_assist_active">ホームノード使用中 · ライトクライアント同期中（残り %1$d）</string>
+  <string name="dogecoin_node_assist_not_over_tor">Tor 経由ではありません</string>
+  <string name="dogecoin_node_assist_stop">停止</string>
   <string name="simple_family_fallback">家族</string>
   <string name="simple_cd_back">戻る</string>
   <string name="simple_cd_start_group">グループを作成</string>

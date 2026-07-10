@@ -200,7 +200,17 @@ fun DogecoinWalletSheet(
     // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
     // Default to "Built-in" (SPV) when no node is configured and SPV is practical, so a no-node user sees
     // their balance without digging into settings; an explicit selector choice persists and wins.
-    var dogecoinBackend by remember(selectedNetwork) { mutableStateOf(repository.resolveBackend(selectedNetwork)) }
+    var persistedBackend by remember(selectedNetwork) { mutableStateOf(repository.resolveBackend(selectedNetwork)) }
+    // Home-node assist (spec R-C3/R-C4a): while the built-in light client is still syncing, reads and
+    // broadcast can ride the already-configured node for THIS session only. Session-only by construction:
+    // nothing here calls saveBackend (only the Connection selector does), so kill+relaunch resolves the
+    // persisted backend exactly as before. The SPV lifecycle keys on persistedBackend, so the light client
+    // KEEPS syncing in the background while assist is active. Mainnet is excluded in v1 — mainnet reads
+    // from a node require the explicit pin flow (spec R-C2) — and the RPC path re-runs its full gate
+    // ladder (chain match, relay ready, testmempoolaccept, txid-vs-bytes) exactly as a normal node send.
+    var nodeAssist by remember(selectedNetwork) { mutableStateOf(false) }
+    val dogecoinBackend =
+        if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
@@ -1361,9 +1371,11 @@ fun DogecoinWalletSheet(
 
     // Phase 2 SPV lifecycle: start the built-in light client when selected (and supported), stop otherwise.
     // Sync-on-demand — also stopped when the sheet leaves composition.
-    LaunchedEffect(dogecoinBackend, selectedNetwork) {
-        if (dogecoinBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
-            walletBalance = null  // show "syncing" until the light client reads a balance
+    // Keyed on persistedBackend (NOT the assist-effective backend): home-node assist must leave the light
+    // client syncing in the background, so enabling assist never stops SPV here.
+    LaunchedEffect(persistedBackend, selectedNetwork) {
+        if (persistedBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
+            if (!nodeAssist) walletBalance = null  // show "syncing" until the light client reads a balance
             // start() opens the mmap block store + loads checkpoints + builds the chain — keep it off Main.
             withContext(Dispatchers.IO) { spvService.start(selectedNetwork) }
         } else {
@@ -1371,6 +1383,17 @@ fun DogecoinWalletSheet(
         }
     }
     DisposableEffect(Unit) { onDispose { spvService.stop() } }
+
+    // Home-node assist toggles: clear the displayed balance BEFORE the re-read so a stale value from the
+    // other source is never shown under the new source's label (an SPV balance captioned "My node" would
+    // claim node provenance the node can't back — and vice versa). This effect's block comes from the
+    // post-flip composition, so refreshWalletBalance() reads through the assist-effective backend.
+    LaunchedEffect(nodeAssist) {
+        walletBalance = null
+        walletBalanceError = null
+        if (nodeAssist) refreshWalletBalance()
+        // On revert the SPV reactive-balance effect repopulates (it restarts on the backend flip).
+    }
 
     // Reactively pull the SPV balance/UTXOs as the light client syncs (chainHeight climbs as it finds our
     // funding txs). RPC/explorer balances are driven by refreshWalletBalance() instead.
@@ -1734,6 +1757,27 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                // Home-node assist (R-C3): offered while the light client is behind and a node URL is
+                // already configured; testnet/regtest only (mainnet reads require the explicit pin flow).
+                run {
+                    val offerVisible = persistedBackend == DogecoinBackend.SPV && !spvStatus.synced &&
+                        selectedNetwork != DogecoinNetwork.MAINNET && rpcUrlValid
+                    if (nodeAssist || offerVisible) {
+                        item(key = "node_assist") {
+                            NodeAssistCard(
+                                active = nodeAssist,
+                                blocksBehind = spvStatus.blocksBehind,
+                                notOverTor = torIntentOn,
+                                // The balance refresh runs in the LaunchedEffect(nodeAssist) below the state
+                                // declarations — a refresh called HERE would capture this composition's
+                                // pre-flip backend and read from the wrong source.
+                                onUse = { nodeAssist = true },
+                                onStop = { nodeAssist = false }
+                            )
+                        }
+                    }
+                }
+
                 // In-flight payments (sent or received) each with their own 0->target fill, right under the
                 // balance so confirmation progress is visible without opening anything.
                 if (pendingTxRows.isNotEmpty()) {
@@ -1895,9 +1939,11 @@ fun DogecoinWalletSheet(
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             backendOptions.forEachIndexed { index, option ->
                                 SegmentedButton(
-                                    selected = dogecoinBackend == option.first,
+                                    selected = persistedBackend == option.first,
                                     onClick = {
-                                        dogecoinBackend = option.first
+                                        persistedBackend = option.first
+                                        // An explicit selector choice supersedes any session-only assist.
+                                        nodeAssist = false
                                         repository.saveBackend(selectedNetwork, option.first)
                                         // SPV is driven by its own lifecycle/sync effects; for a node backend
                                         // re-pull the balance immediately on switch.
@@ -4335,6 +4381,53 @@ private fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
             content = content
         )
+    }
+}
+
+/**
+ * Home-node assist surface (spec R-C3). Offer state: the light client is behind but a node is already
+ * configured — one tap rides reads+broadcast on the node for THIS session while SPV keeps syncing.
+ * Active state: the R-C3 banner with blocks-behind, an explicit not-over-Tor disclosure when Tor is on
+ * (the RPC path never routes over Tor), and a one-tap revert. Presentation-only: callers own the state,
+ * and nothing here persists a backend choice (R-C4a).
+ */
+@Composable
+private fun NodeAssistCard(
+    active: Boolean,
+    blocksBehind: Int,
+    notOverTor: Boolean,
+    onUse: () -> Unit,
+    onStop: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = if (active) {
+                    stringResource(R.string.dogecoin_node_assist_active, blocksBehind) +
+                        if (notOverTor) " · " + stringResource(R.string.dogecoin_node_assist_not_over_tor) else ""
+                } else {
+                    stringResource(R.string.dogecoin_node_assist_offer)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = if (active) onStop else onUse) {
+                Text(
+                    text = stringResource(
+                        if (active) R.string.dogecoin_node_assist_stop else R.string.dogecoin_node_assist_use
+                    )
+                )
+            }
+        }
     }
 }
 

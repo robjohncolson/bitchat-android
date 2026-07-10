@@ -256,6 +256,11 @@
   <string name="dogecoin_message_label">Message</string>
   <string name="dogecoin_invalid_request">Enter at least 0.01 DOGE with up to 8 decimal places.</string>
   <string name="dogecoin_advanced_settings_title">Node &amp; developer settings</string>
+  <string name="dogecoin_node_assist_offer">Your home node is set up — it can take over while the light client catches up.</string>
+  <string name="dogecoin_node_assist_use">Use home node</string>
+  <string name="dogecoin_node_assist_active">Using home node · light client still syncing (%1$d behind)</string>
+  <string name="dogecoin_node_assist_not_over_tor">not over Tor</string>
+  <string name="dogecoin_node_assist_stop">Stop</string>
   <string name="dogecoin_node_title">Node connection</string>
   <string name="dogecoin_rpc_url_label">Node address</string>
   <string name="dogecoin_rpc_url_placeholder">http://192.168.1.44:%1$d</string>
