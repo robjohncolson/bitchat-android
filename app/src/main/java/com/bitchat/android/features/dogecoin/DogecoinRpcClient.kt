@@ -125,16 +125,30 @@ data class DogecoinMempoolAcceptance(
 }
 
 class DogecoinRpcClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+    httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .writeTimeout(5, TimeUnit.SECONDS)
         .build(),
-    private val gson: Gson = Gson()
+    private val gson: Gson = Gson(),
+    private val beforeRequest: () -> Unit = {}
 ) {
-    private val rescanHttpClient = httpClient.newBuilder()
+    // Hardened unconditionally (even for an injected client): redirects are never followed, so RPC Basic
+    // credentials can never be forwarded to a changed origin.
+    private val httpClient: OkHttpClient = hardenedDogecoinRpcHttpClient(httpClient)
+    private val rescanHttpClient = this.httpClient.newBuilder()
         .readTimeout(30, TimeUnit.MINUTES)
         .build()
+
+    /**
+     * Return a client sharing this client's connection pool/timeouts but bound to a revocable caller
+     * lease. [beforeRequest] runs at the central chokepoint before every RPC in a multi-call workflow.
+     */
+    internal fun guardedBy(requestGuard: () -> Unit): DogecoinRpcClient =
+        DogecoinRpcClient(httpClient, gson) {
+            beforeRequest()
+            requestGuard()
+        }
 
     suspend fun getBlockchainStatus(
         config: DogecoinRpcConfig,
@@ -1174,6 +1188,13 @@ class DogecoinRpcClient(
         params: JsonArray = JsonArray(),
         longRunning: Boolean = false
     ): JsonElement {
+        // Route-policy chokepoint: no request object is even built for an untrusted endpoint, so every
+        // caller (wallet UI, broadcast helper, debug console) inherits the same trust classification.
+        requireTrustedDogecoinRpcRoute(config)
+        // A wallet workflow may carry a generation-specific lease. Saving/switching/stopping the route
+        // revokes it synchronously, preventing a multi-call method from issuing its next HTTP request.
+        beforeRequest()
+
         val requestJson = JsonObject().apply {
             addProperty("jsonrpc", "1.0")
             addProperty("id", "bitchat-dogecoin")
@@ -1191,7 +1212,12 @@ class DogecoinRpcClient(
 
         val client = if (longRunning) rescanHttpClient else httpClient
         client.newCall(requestBuilder.build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
+            // A redirect is a transport-policy failure regardless of attacker-controlled JSON content.
+            // Check it before reading/parsing so every 3xx has the same explicit non-following result.
+            if (response.code in 300..399) {
+                throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
+            }
+            val body = readBoundedRpcBody(response, method)
             // Dogecoin Core returns JSON-RPC errors with HTTP 500 and the structured error in the
             // body, so the body must be inspected before the HTTP status. Otherwise every node-level
             // error (insufficient fee, missing inputs, already-imported watch address, unknown method)
@@ -1209,8 +1235,25 @@ class DogecoinRpcClient(
         }
     }
 
+    /**
+     * Read the response body with a hard size cap. A node/gateway response larger than
+     * [DOGECOIN_RPC_MAX_RESPONSE_BYTES] aborts the call instead of buffering unbounded data — the cap
+     * comfortably fits every RPC this client issues (listunspent/activity for one address included).
+     */
+    private fun readBoundedRpcBody(response: okhttp3.Response, method: String): String {
+        val source = response.body?.source() ?: return ""
+        if (source.request(DOGECOIN_RPC_MAX_RESPONSE_BYTES + 1)) {
+            throw IllegalStateException(
+                "Dogecoin RPC $method response exceeded ${DOGECOIN_RPC_MAX_RESPONSE_BYTES / (1024 * 1024)} MB and was refused."
+            )
+        }
+        return source.readUtf8()
+    }
+
     private fun httpRpcErrorMessage(method: String, code: Int, message: String): String {
         return when (code) {
+            in 300..399 -> "Dogecoin RPC $method was redirected (HTTP $code). Redirects are never followed, so RPC " +
+                "credentials are not forwarded; point the app directly at the node's real address."
             401 -> "Dogecoin RPC authentication failed for $method. Check the RPC username and password. " +
                 "If Dogecoin Core is using cookie auth for dogecoin-cli, configure rpcuser/rpcpassword or rpcauth " +
                 "for this node and enter those credentials in the app."
@@ -1380,9 +1423,9 @@ class DogecoinRpcClient(
                 )
     }
 
-    private companion object {
-        val txidRegex = Regex("^[0-9a-f]{64}$")
-        val walletRpcMethods = setOf(
+    companion object {
+        private val txidRegex = Regex("^[0-9a-f]{64}$")
+        private val walletRpcMethods = setOf(
             "getwalletinfo",
             "importaddress",
             "listunspent",
@@ -1390,6 +1433,9 @@ class DogecoinRpcClient(
             "rescanblockchain",
             "validateaddress"
         )
+
+        /** Hard cap on any single RPC response body; larger responses abort the call. */
+        internal const val DOGECOIN_RPC_MAX_RESPONSE_BYTES = 5L * 1024L * 1024L
     }
 
     private data class WalletInfoStatus(
@@ -1436,3 +1482,14 @@ class DogecoinRpcClient(
         }
     }
 }
+
+/**
+ * Apply the non-negotiable transport hardening for Dogecoin RPC: redirects (plain and cross-scheme) are
+ * never followed, so Basic credentials can never be replayed to a redirect target. Applied to every
+ * client — including injected ones — by [DogecoinRpcClient]'s constructor.
+ */
+internal fun hardenedDogecoinRpcHttpClient(base: OkHttpClient): OkHttpClient =
+    base.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()

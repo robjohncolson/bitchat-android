@@ -165,6 +165,108 @@ class DogecoinWalletRepositoryTest {
     }
 
     @Test
+    fun `resolveDogecoinBackend routes untrusted endpoints to SPV and treats malformed choices as unset`() {
+        // Guardrail: a saved RPC choice pointing at an UNTRUSTED endpoint resolves to Built-in SPV — the
+        // untrusted node is never probed or used.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = true
+            )
+        )
+        // Fail closed even without a recent SPV checkpoint: an untrusted RPC route never remains resolved.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = false
+            )
+        )
+        // Trusted endpoint + explicit RPC choice: respected.
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Explicit SPV choice always stands.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "SPV",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Malformed saved value: falls through to the soft default instead of silently meaning RPC.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "garbage",
+                nodeConfigured = false,
+                nodeEndpointTrusted = false,
+                spvAvailable = true
+            )
+        )
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = "garbage",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Soft default: a configured-but-untrusted node always resolves away from RPC.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = null,
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = false
+            )
+        )
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = null,
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+    }
+
+    @Test
+    fun `resolveBackend never selects a saved RPC node with an untrusted endpoint for probing`() {
+        val repository = DogecoinWalletRepository(context)
+        // Saved node URL is unverified public HTTPS. Resolution fails closed to SPV even when this unit-test
+        // context has no checkpoint asset; the route may never remain selected merely because SPV is slower.
+        repository.saveRpcConfig(DogecoinNetwork.TESTNET, DogecoinRpcConfig(url = "https://rpc.example.com"))
+        repository.saveHelperEnabled(DogecoinNetwork.TESTNET, true)
+        assertFalse(
+            classifyDogecoinRpcEndpoint(
+                repository.loadRpcConfig(DogecoinNetwork.TESTNET).url
+            ).isTrustedRpcRoute
+        )
+        assertEquals(DogecoinBackend.SPV, repository.resolveBackend(DogecoinNetwork.TESTNET))
+        assertFalse(repository.loadHelperEnabled(DogecoinNetwork.TESTNET))
+
+        repository.saveRpcConfig(DogecoinNetwork.TESTNET, DogecoinRpcConfig(url = "http://127.0.0.1:44555"))
+        assertTrue(repository.loadHelperEnabled(DogecoinNetwork.TESTNET))
+    }
+
+    @Test
     fun `spv birthdate is generation time for a generated key and the conservative floor for an import`() {
         val conservativeFloorMillis = 1609459200000L // 2021-01-01 UTC, the import default
         val repository = DogecoinWalletRepository(context)

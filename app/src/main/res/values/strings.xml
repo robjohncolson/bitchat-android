@@ -294,6 +294,14 @@
   <string name="dogecoin_node_recheck_required">Check node status after editing RPC settings before refreshing balance or sending.</string>
   <string name="dogecoin_node_auto_rechecking">Auto-checking saved RPC settings...</string>
   <string name="dogecoin_node_revalidating">Rechecking edited RPC settings...</string>
+  <string name="dogecoin_node_draft_unsaved">Node settings edited — nothing is saved or contacted until you tap Save.</string>
+  <string name="dogecoin_node_test_connection">Test connection</string>
+  <string name="dogecoin_node_save_settings">Save node settings</string>
+  <string name="dogecoin_node_testing">Testing the node address…</string>
+  <string name="dogecoin_node_draft_test_note">Test result (draft — not saved):</string>
+  <string name="dogecoin_rpc_endpoint_public_https_blocked">This is an unverified public HTTPS address, so bitchat won\'t send RPC credentials to it. Use your own node on a private network, or its exact Tailscale address (https://&lt;machine&gt;.&lt;tailnet&gt;.ts.net).</string>
+  <string name="dogecoin_rpc_endpoint_onion_blocked">Direct .onion node addresses aren\'t supported — contacting one outside Tor would leak the onion name. Publish the node privately instead (e.g. Tailscale Serve).</string>
+  <string name="dogecoin_rpc_endpoint_invalid_blocked">This isn\'t a usable Dogecoin node address. Use http(s) to a local or private host, or an exact Tailscale HTTPS address.</string>
   <string name="dogecoin_wallet_controls_title">Wallet controls</string>
   <string name="dogecoin_wallet_controls_body">This wallet stores one encrypted private key per Dogecoin network on this device. Mainnet DOGE has real value; keep a WIF backup before funding this wallet.</string>
   <string name="dogecoin_import_wif_label">Import WIF for selected network</string>
