@@ -85,6 +85,7 @@ import com.bitchat.android.nostr.KnownNpubStore
 import com.bitchat.android.nostr.NostrGroupRegistry
 import com.bitchat.android.nostr.NostrRelayManager
 import com.bitchat.android.profile.AppProfile
+import com.bitchat.android.profile.ContactDisplayName
 import com.bitchat.android.profile.ProfilePreferenceManager
 import com.bitchat.android.profile.ProfileSetupCoordinator
 import com.bitchat.android.ui.ChatViewModel
@@ -93,6 +94,9 @@ import com.bitchat.android.ui.RequestDogeDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.runtime.mutableIntStateOf
 
 /**
  * LINE-style surface for the SIMPLE ("Family") profile: a clean chat list AND a clean conversation, both
@@ -100,12 +104,40 @@ import kotlinx.coroutines.launch
  * untouched; this is presentation only.
  */
 private sealed interface SimpleTarget {
+    /**
+     * 1:1 contact. [name] is not the source of truth for the title — [resolvedContactTitle] re-derives
+     * from favorites/KnownNpub each composition so rename + activity recreation never show "anon".
+     */
     data class Contact(
         val peerID: String, val name: String, val noiseHex: String?, val pubkeyHex: String?
     ) : SimpleTarget
     data class Group(
         val convKey: String, val subject: String?, val members: List<NostrGroupRegistry.GroupMember>
     ) : SimpleTarget
+}
+
+/** Display-time title for a Simple 1:1 contact (spec R-A1 / R-A3). */
+@Composable
+private fun resolvedContactTitle(
+    convKey: String,
+    noiseHex: String?,
+    pubkeyHex: String?,
+    messageSenderFallback: String?,
+    nameEpoch: Int // recompose when favorites/known labels change
+): String {
+    val familyFallback = stringResource(R.string.simple_family_fallback)
+    // nameEpoch read so Compose tracks renames
+    @Suppress("UNUSED_EXPRESSION")
+    nameEpoch
+    return ContactDisplayName.resolveLive(
+        identity = ContactDisplayName.Identity(
+            convKey = convKey,
+            noiseKeyHex = noiseHex,
+            nostrPubkeyHex = pubkeyHex
+        ),
+        messageSenderFallback = messageSenderFallback,
+        familyFallback = familyFallback
+    ).display
 }
 
 @Composable
@@ -121,11 +153,23 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         }
     }
     var target by remember { mutableStateOf<SimpleTarget?>(null) }
+    // Bumps when a favorite/KnownNpub label changes so open titles re-resolve without leaving the thread.
+    var nameEpoch by remember { mutableIntStateOf(0) }
     // The open conversation's key, kept in a Saveable so it survives Activity recreation (dark-mode / locale /
     // font-size / split-screen change). `target` is not Saveable, so after recreation it resets to null while
     // the ViewModel still thinks the thread is open — which would suppress that thread's notifications and fire
     // false read receipts. We restore `target` from this key below.
     var savedConvKey by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Live rename recompose for any open conversation (favorites listener is also on SimpleHome).
+    DisposableEffect(Unit) {
+        val listener = object : FavoritesChangeListener {
+            override fun onFavoriteChanged(noiseKeyHex: String) { nameEpoch++ }
+            override fun onAllCleared() { nameEpoch++ }
+        }
+        runCatching { FavoritesPersistenceService.shared.addListener(listener) }
+        onDispose { runCatching { FavoritesPersistenceService.shared.removeListener(listener) } }
+    }
 
     // Close the open conversation: end the private-chat context AND clear the durable key, so a later
     // recreation doesn't reopen a thread the user explicitly backed out of.
@@ -149,15 +193,22 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
     // name and still open the thread — its history persists under the convKey.
     val openContactByConvKey: (String) -> Unit = { convKey ->
         val hex = GeohashAliasRegistry.get(convKey)
-        val name = if (hex != null) {
-            viewModel.geohashViewModel.displayNameForNostrPubkeyUI(hex)
-        } else {
-            viewModel.privateChats.value[convKey]?.lastOrNull { it.senderPeerID == convKey }?.sender
-                ?: context.getString(R.string.simple_family_fallback)
-        }
+        // Prefer favorites Noise key even when alias hex is missing (cold start).
         val noiseHex = hex?.let { h ->
             FavoritesPersistenceService.shared.findNoiseKey(h)?.joinToString("") { b -> "%02x".format(b) }
         }
+        val fallbackSender = viewModel.privateChats.value[convKey]
+            ?.lastOrNull { it.senderPeerID == convKey || (!it.senderPeerID.isNullOrBlank() && it.senderPeerID != viewModel.myPeerID) }
+            ?.sender
+        val name = ContactDisplayName.resolveLive(
+            identity = ContactDisplayName.Identity(
+                convKey = convKey,
+                noiseKeyHex = noiseHex,
+                nostrPubkeyHex = hex
+            ),
+            messageSenderFallback = fallbackSender,
+            familyFallback = context.getString(R.string.simple_family_fallback)
+        ).display
         if (hex != null) {
             viewModel.startGeohashDM(hex)
             GeohashAliasRegistry.put(convKey, hex) // enable account-DM routing so the first reply isn't queued forever
@@ -194,6 +245,7 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         null -> LineTheme {
             SimpleHome(
                 viewModel = viewModel,
+                onNameChanged = { nameEpoch++ },
                 onOpenContact = { npub, name, noiseHex ->
                     val hex = nostrPubkeyToHex(npub)
                     if (hex != null) {
@@ -211,9 +263,16 @@ fun SimpleModeScreen(viewModel: ChatViewModel) {
         is SimpleTarget.Contact -> {
             BackHandler { closeConversation() }
             LineTheme {
+                val liveTitle = resolvedContactTitle(
+                    convKey = t.peerID,
+                    noiseHex = t.noiseHex,
+                    pubkeyHex = t.pubkeyHex,
+                    messageSenderFallback = t.name,
+                    nameEpoch = nameEpoch
+                )
                 SimpleConversation(
                     viewModel = viewModel,
-                    title = t.name,
+                    title = liveTitle,
                     isGroup = false,
                     peerID = t.peerID,
                     noiseHex = t.noiseHex,
@@ -262,15 +321,27 @@ private fun nostrPubkeyToHex(value: String?): String? {
     }
 }
 
+/** Target for the rename dialog (favorite Noise key and/or KnownNpub hex). */
+private data class RenameTarget(
+    val noiseKey: ByteArray?,
+    val nostrHex: String?,
+    val currentName: String
+)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SimpleHome(
     viewModel: ChatViewModel,
+    onNameChanged: () -> Unit = {},
     onOpenContact: (npub: String?, name: String, noiseHex: String?) -> Unit,
     onOpenGroup: (convKey: String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
+    var renameTarget by remember { mutableStateOf<RenameTarget?>(null) }
+    var renameInput by remember { mutableStateOf("") }
+    var renameError by remember { mutableStateOf(false) }
 
     // Keep the family list in sync with the favorites store. A relative favoriting us BACK (e.g. over
     // Nostr) flips a relationship to mutual asynchronously, so observe the change listener and recompute
@@ -398,18 +469,35 @@ private fun SimpleHome(
                 key = { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
             ) { c ->
                 val familyFallback = stringResource(R.string.simple_family_fallback)
-                val name = c.peerNickname.ifBlank { familyFallback }
+                val noiseHex = c.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
+                val name = ContactDisplayName.resolveLive(
+                    identity = ContactDisplayName.Identity(
+                        noiseKeyHex = noiseHex,
+                        npub = c.peerNostrPublicKey,
+                        nostrPubkeyHex = nostrPubkeyToHex(c.peerNostrPublicKey)
+                    ),
+                    messageSenderFallback = c.peerNickname,
+                    familyFallback = familyFallback
+                ).display
                 ChatListRow(
                     title = name,
                     subtitle = if (c.peerNostrPublicKey != null) stringResource(R.string.simple_tap_to_chat)
                     else stringResource(R.string.simple_no_internet_contact),
-                    avatarInitial = c.peerNickname.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                    avatarInitial = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFF9AA3AB),
                     onClick = {
                         if (c.peerNostrPublicKey != null) {
-                            val noiseHex = c.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
                             onOpenContact(c.peerNostrPublicKey, name, noiseHex)
                         }
+                    },
+                    onLongClick = {
+                        renameInput = name
+                        renameError = false
+                        renameTarget = RenameTarget(
+                            noiseKey = c.peerNoisePublicKey,
+                            nostrHex = nostrPubkeyToHex(c.peerNostrPublicKey),
+                            currentName = name
+                        )
                     }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -418,16 +506,82 @@ private fun SimpleHome(
                 // Tap-added-from-a-group contacts are NOT verified favorites — their display name is whatever a
                 // group message asserted. Flag that so a non-technical user can tell them apart from a family
                 // member they added by scanning the signed QR code (a verified mutual favorite, plain above).
+                val display = entry.value.ifBlank { stringResource(R.string.simple_family_fallback) }
                 ChatListRow(
-                    title = entry.value,
+                    title = display,
                     subtitle = stringResource(R.string.simple_added_from_group_unverified),
-                    avatarInitial = entry.value.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                    avatarInitial = display.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                     avatarColor = Color(0xFFC0A9B0),   // muted mauve, distinct from the verified-favorite gray
-                    onClick = { onOpenContact(entry.key, entry.value, null) }
+                    onClick = { onOpenContact(entry.key, display, null) },
+                    onLongClick = {
+                        renameInput = display
+                        renameError = false
+                        renameTarget = RenameTarget(
+                            noiseKey = null,
+                            nostrHex = entry.key,
+                            currentName = display
+                        )
+                    }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
         }
+    }
+
+    renameTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text(stringResource(R.string.simple_rename_title)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.simple_rename_body))
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = renameInput,
+                        onValueChange = {
+                            renameInput = it.take(ContactDisplayName.MAX_PET_NAME_LEN)
+                            renameError = false
+                        },
+                        singleLine = true,
+                        isError = renameError,
+                        label = { Text(stringResource(R.string.simple_name_label)) }
+                    )
+                    if (renameError) {
+                        Text(
+                            stringResource(R.string.simple_rename_invalid),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cleaned = ContactDisplayName.sanitizePetNameInput(renameInput)
+                    if (cleaned == null) {
+                        renameError = true
+                        return@TextButton
+                    }
+                    target.noiseKey?.let { key ->
+                        FavoritesPersistenceService.shared.renameFavoriteNickname(key, cleaned)
+                    }
+                    target.nostrHex?.let { hex ->
+                        // Keep KnownNpub label in sync when present (npub-only or dual)
+                        if (KnownNpubStore.contains(hex) || target.noiseKey == null) {
+                            KnownNpubStore.put(hex, cleaned)
+                        }
+                    }
+                    refreshKey++
+                    onNameChanged() // recompose open-thread title if any
+                    renameTarget = null
+                }) { Text(stringResource(R.string.simple_save)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) {
+                    Text(stringResource(R.string.simple_cancel))
+                }
+            }
+        )
     }
 
     if (showSettings) {
@@ -583,29 +737,37 @@ private fun SimpleConversation(
                 val payReq = remember(m.content) {
                     DogecoinUri.wholeMessagePaymentUri(m.content)?.let { DogecoinPaymentRequest.parse(it) }
                 }
+                val memberHex = m.senderNostrPubkey
+                val displaySender = if (isGroup && !isMine) {
+                    ContactDisplayName.resolveLive(
+                        identity = ContactDisplayName.Identity(nostrPubkeyHex = memberHex),
+                        messageSenderFallback = m.sender,
+                        familyFallback = stringResource(R.string.simple_family_fallback)
+                    ).display
+                } else m.sender
                 if (payReq != null) {
                     PaymentRequestBubble(
                         request = payReq,
                         isMine = isMine,
-                        senderName = m.sender,
+                        senderName = displaySender,
                         showSender = isGroup,
                         canPay = walletEnabled && !isMine && payReq.network == walletNetwork,
                         timestamp = m.timestamp,
                         onPay = { payRequest = payReq }
                     )
                 } else {
-                    val memberHex = m.senderNostrPubkey
                     MessageBubble(
                         message = m,
                         isMine = isMine,
                         showSender = isGroup,
+                        displaySender = displaySender,
                         // Offer "Add" only for a group member you don't already have (favorite or tap-added).
                         onSenderClick = if (
                             isGroup && !isMine && memberHex != null &&
                             FavoritesPersistenceService.shared.findNoiseKey(memberHex) == null &&
                             !KnownNpubStore.contains(memberHex)
                         ) {
-                            { tapAddMember = memberHex to m.sender }
+                            { tapAddMember = memberHex to displaySender }
                         } else null
                     )
                 }
@@ -673,16 +835,30 @@ private fun SimpleConversation(
     tapAddMember?.let { (hex, name) ->
         // Discovery: add a group member you don't already have as a 1:1 Nostr contact (from their npub — NOT a
         // verified mutual favorite; upgrading to that still needs the signed QR). No fake Noise key.
+        // Show sanitized remote name + ≥16-hex identity so the trust decision is not name-only (spec R-A1).
+        val safeName = ContactDisplayName.sanitizeRemote(name)
+            ?: stringResource(R.string.simple_family_fallback)
+        val idPreview = hex.take(16)
         AlertDialog(
             onDismissRequest = { tapAddMember = null },
-            title = { Text(stringResource(R.string.simple_add_contact_title, name)) },
-            text = { Text(stringResource(R.string.simple_add_contact_body, name)) },
+            title = { Text(stringResource(R.string.simple_add_contact_title, safeName)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.simple_add_contact_body, safeName))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        stringResource(R.string.simple_add_contact_id, idPreview),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     val convKey = "nostr_${hex.take(16)}"
                     viewModel.startGeohashDM(hex)          // register the alias -> pubkey mapping + subscription
                     GeohashAliasRegistry.put(convKey, hex) // enable 1:1 account-DM routing (no favorite needed)
-                    KnownNpubStore.put(hex, name)          // surface them in the Simple contacts list
+                    KnownNpubStore.put(hex, safeName)     // surface them in the Simple contacts list
                     tapAddMember = null
                 }) { Text(stringResource(R.string.simple_add)) }
             },
@@ -715,6 +891,7 @@ private fun MessageBubble(
     message: BitchatMessage,
     isMine: Boolean,
     showSender: Boolean,
+    displaySender: String = message.sender,
     onSenderClick: (() -> Unit)? = null
 ) {
     Row(
@@ -727,9 +904,9 @@ private fun MessageBubble(
         ) {
             if (showSender && !isMine) {
                 // In a group, an unknown sender's name is tappable → "Add" them as a contact (onSenderClick),
-                // shown in the accent colour as an affordance.
+                // shown in the accent colour as an affordance. Display-time resolve (never raw "anon").
                 Text(
-                    text = message.sender,
+                    text = displaySender,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (onSenderClick != null) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1320,18 +1497,26 @@ private fun SimpleSettingsSheet(viewModel: ChatViewModel, onDismiss: () -> Unit,
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatListRow(
     title: String,
     subtitle: String,
     avatarInitial: String?,
     avatarColor: Color,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    Modifier.clickable { onClick() }
+                }
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

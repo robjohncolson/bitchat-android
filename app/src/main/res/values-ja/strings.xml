@@ -474,6 +474,10 @@
   <string name="simple_allow_camera">カメラを許可</string>
   <string name="simple_paste_code_label">またはコードを貼り付け</string>
   <string name="simple_added_toast">%1$s を追加しました</string>
+  <string name="simple_rename_title">連絡先の名前を変更</string>
+  <string name="simple_rename_body">この名前はこの端末だけに表示され、家族には見えません。</string>
+  <string name="simple_rename_invalid">短い名前を入力してください（空や「anon」は不可）。</string>
+  <string name="simple_add_contact_id">識別子: %1$s…</string>
   <string name="simple_pick_title">bitchat をどのように使いますか？</string>
   <string name="simple_pick_subtitle">後で設定から変更できます。</string>
   <string name="simple_pick_simple_title">シンプル</string>

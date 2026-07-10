@@ -2186,27 +2186,18 @@ class ChatViewModel(
         val hexes = (memberPubkeysHex.map { it.lowercase() } + listOfNotNull(myHex)).distinct().sorted()
         val groupId = com.bitchat.android.nostr.NostrGroupRegistry.computeGroupId(hexes)
         val convKey = "nostr_grp_$groupId"
+        // bgm tags must NOT carry local pet-names (favorites.peerNickname after rename) — that would
+        // leak private labels to every group member. Self uses our announced nickname; others omit name
+        // (hex-only bgm) so receivers resolve display-time via ContactDisplayName / their own favorites.
         val members = hexes.map { hex ->
             com.bitchat.android.nostr.NostrGroupRegistry.GroupMember(
                 hex,
-                if (hex == myHex) state.getNicknameValue() else resolveMemberName(hex)
+                if (hex == myHex) state.getNicknameValue() else null
             )
         }
         com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
         startPrivateChat(convKey)
         return convKey
-    }
-
-    /** Best-effort display name for a group member's account pubkey: favorites' nickname first, else geohash name. */
-    private fun resolveMemberName(pubkeyHex: String): String? {
-        runCatching {
-            val svc = com.bitchat.android.favorites.FavoritesPersistenceService.shared
-            svc.findNoiseKey(pubkeyHex)?.let { svc.getFavoriteStatus(it)?.peerNickname }
-        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { return it }
-        return runCatching {
-            geohashViewModel.displayNameForNostrPubkeyUI(pubkeyHex).substringBefore("#")
-                .takeIf { it != "anon" && it.isNotBlank() }
-        }.getOrNull()
     }
 
     fun startGeohashDMByNickname(nickname: String) {

@@ -842,6 +842,10 @@
     <string name="simple_allow_camera">Allow camera</string>
     <string name="simple_paste_code_label">Or paste their code</string>
     <string name="simple_added_toast">Added %1$s</string>
+    <string name="simple_rename_title">Rename contact</string>
+    <string name="simple_rename_body">This name is only on your device — family members won\'t see it.</string>
+    <string name="simple_rename_invalid">Enter a short name (not empty, not “anon”).</string>
+    <string name="simple_add_contact_id">Identity: %1$s…</string>
     <string name="simple_pick_title">How will you use bitchat?</string>
     <string name="simple_pick_subtitle">You can change this later in settings.</string>
     <string name="simple_pick_simple_title">Simple</string>

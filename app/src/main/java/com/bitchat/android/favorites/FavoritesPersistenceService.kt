@@ -274,12 +274,34 @@ class FavoritesPersistenceService private constructor(private val context: Conte
         notifyAllCleared()
     }
 
-    /** Find Noise key by Nostr pubkey */
+    /**
+     * Find Noise key by Nostr pubkey. Deterministic when multiple favorites share a pubkey:
+     * lowest Noise-key hex wins (stable across restarts; multi-device same npub merges into one thread).
+     */
     fun findNoiseKey(forNostrPubkey: String): ByteArray? {
         val targetHex = normalizeNostrKeyToHex(forNostrPubkey) ?: return null
-        return favorites.values.firstOrNull { rel ->
-            rel.peerNostrPublicKey?.let { stored -> normalizeNostrKeyToHex(stored) } == targetHex
-        }?.peerNoisePublicKey
+        return favorites.values
+            .filter { rel ->
+                rel.peerNostrPublicKey?.let { stored -> normalizeNostrKeyToHex(stored) } == targetHex
+            }
+            .minByOrNull { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
+            ?.peerNoisePublicKey
+    }
+
+    /**
+     * Rename a favorite's local pet-name without changing favorite flags.
+     * @return false if no relationship exists or [nickname] is blank after the caller's sanitize.
+     */
+    fun renameFavoriteNickname(noisePublicKey: ByteArray, nickname: String): Boolean {
+        val trimmed = nickname.trim()
+        if (trimmed.isEmpty()) return false
+        val keyHex = noisePublicKey.joinToString("") { "%02x".format(it) }
+        val existing = favorites[keyHex] ?: return false
+        favorites[keyHex] = existing.copy(peerNickname = trimmed, lastUpdated = Date())
+        saveFavorites()
+        notifyChanged(keyHex)
+        Log.d(TAG, "Renamed favorite ${keyHex.take(16)}… → $trimmed")
+        return true
     }
 
     /** Find Nostr pubkey by Noise key */
