@@ -44,7 +44,10 @@ data class DogecoinSpvStatus(
     val synced: Boolean = false,
     /** True when the PeerGroup was built to route every peer connection through the embedded Arti SOCKS proxy
      *  (i.e. Tor was ON at [start] time). Reflects the ACTUAL transport, so the UI/console can show it. */
-    val overTor: Boolean = false
+    val overTor: Boolean = false,
+    /** Diagnostic only: connected and behind, but the live chain height has not advanced within the bounded
+     *  progress window. Never participates in read or broadcast readiness. */
+    val stalled: Boolean = false
 ) {
     val blocksBehind: Int get() = (bestPeerHeight - chainHeight).coerceAtLeast(0L).toInt()
 }
@@ -94,8 +97,14 @@ class DogecoinSpvService private constructor(
      *  observer never tears the PeerGroup down mid-broadcast (the tx is already reserved + handed to peers). */
     @Volatile private var broadcasting = false
     private val torScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    /** Periodic near-tip catch-up nudge (re-requests headers from the highest peer while not synced). */
+    /** Periodic live-chain progress check and bounded managed-download-peer recovery. */
     private var catchUpJob: Job? = null
+    private val headerProgressWatchdog = DogecoinSpvHeaderProgressWatchdog(
+        stallTimeoutMillis = HEADER_STALL_TIMEOUT_MS,
+        recoveryCooldownMillis = HEADER_STALL_RECOVERY_COOLDOWN_MS,
+        maxRecoveryAttempts = MAX_HEADER_STALL_RECOVERIES,
+        caughtUpWithinBlocks = SYNCED_WITHIN_BLOCKS
+    )
 
     private val _status = MutableStateFlow(DogecoinSpvStatus(network = DogecoinNetwork.TESTNET))
     val status: StateFlow<DogecoinSpvStatus> = _status.asStateFlow()
@@ -202,26 +211,72 @@ class DogecoinSpvService private constructor(
             })
             Log.i(TAG, "SPV started for $network (birthdate=${Date(birthdateSecs * 1000L)})")
 
-            // Near-tip catch-up: bitcoinj's header download can stop a few blocks short of the real tip (the
-            // download peer is fixed early; newer higher peers connect later but aren't re-selected), so on a
-            // thin mainnet peer set the chain can hang "N behind" indefinitely — and since `synced` requires
-            // ≤SYNCED_WITHIN_BLOCKS, SPV would never go ready and sends would be blocked. While running but not
-            // synced, periodically re-request headers DIRECTLY from the highest-height connected peer to chase
-            // the tip; once synced it idles (re-engaging if a later block pushes us behind again).
+            // bitcoinj keeps one managed download peer. Directly calling startBlockChainDownload() on a later,
+            // higher peer bypasses that ownership/filter/listener setup and duplicate-suppresses retries at an
+            // unchanged head. Instead, sample the LIVE chain (also repairing stale status), then after a generous
+            // no-progress window close only the managed download peer. PeerGroup's normal death path selects the
+            // highest remaining peer and reapplies the same connection manager, bloom filter, and listener.
             catchUpJob?.cancel()
             catchUpJob = torScope.launch {
                 while (true) {
                     delay(SYNC_CATCHUP_INTERVAL_MS)
                     synchronized(lock) {
                         val livePg = peerGroup ?: return@launch          // stopped → end the coroutine
+                        val liveChain = blockChain ?: return@launch
                         if (activeNetwork != network) return@launch       // switched network → end
-                        // Idle only when genuinely AT the tip; with the sticky `synced` (hysteresis) the flag can
-                        // be true while a few blocks behind, so keep poking the highest peer until truly caught up.
+
+                        // DownloadProgressTracker follows PeerGroup.downloadPeer only. Read the chain directly so
+                        // status cannot remain frozen if another bitcoinj callback advanced the shared chain.
+                        publishStatus(network, liveChain, livePg)
                         val st = _status.value
-                        if (st.synced && st.blocksBehind <= SYNCED_WITHIN_BLOCKS) return@synchronized
-                        org.bitcoinj.core.Context.propagate(bitcoinjContext)
-                        runCatching {
-                            livePg.connectedPeers.maxByOrNull { it.bestHeight }?.startBlockChainDownload()
+
+                        val nowMillis = android.os.SystemClock.elapsedRealtime()
+                        val recovery = headerProgressWatchdog.observe(
+                            nowMillis = nowMillis,
+                            running = st.running,
+                            peerCount = st.peerCount,
+                            chainHeight = st.chainHeight,
+                            bestPeerHeight = st.bestPeerHeight
+                        )
+                        if (st.stalled != headerProgressWatchdog.stalled) {
+                            publishStatus(network, liveChain, livePg)
+                        }
+
+                        // Continue status/progress maintenance during a broadcast, but never rotate its peers.
+                        if (recovery == DogecoinSpvHeaderRecovery.ROTATE_DOWNLOAD_PEER && !broadcasting) {
+                            val stuckPeer = livePg.downloadPeer
+                            if (stuckPeer == null) {
+                                Log.w(TAG, "SPV header sync stalled but PeerGroup has no managed download peer")
+                                headerProgressWatchdog.deferRecovery(nowMillis)
+                            } else if (!hasHigherDogecoinSpvDownloadPeerReplacement(
+                                    downloadPeerHeight = stuckPeer.bestHeight,
+                                    bestPeerHeight = st.bestPeerHeight
+                                )
+                            ) {
+                                // Never lower bestPeerHeight through our own recovery: doing so could make the
+                                // unchanged synced/broadcast gate see a false zero-behind state. With no strictly
+                                // higher live replacement, fail closed and leave the explicit stalled flag set.
+                                Log.w(
+                                    TAG,
+                                    "SPV header sync stalled at ${st.chainHeight}/${st.bestPeerHeight}; " +
+                                        "no higher managed-peer replacement, leaving peer connected"
+                                )
+                                headerProgressWatchdog.deferRecovery(nowMillis)
+                            } else {
+                                val attempt = headerProgressWatchdog.recoveryAttempts + 1
+                                Log.w(
+                                    TAG,
+                                    "SPV header sync stalled at ${st.chainHeight}/${st.bestPeerHeight}; " +
+                                        "rotating managed download peer attempt " +
+                                        "$attempt/$MAX_HEADER_STALL_RECOVERIES"
+                                )
+                                runCatching { stuckPeer.close() }
+                                    .onSuccess { headerProgressWatchdog.recordRecoveryAttempt(nowMillis) }
+                                    .onFailure {
+                                        headerProgressWatchdog.deferRecovery(nowMillis)
+                                        Log.w(TAG, "Failed to rotate stalled SPV download peer", it)
+                                    }
+                            }
                         }
                     }
                 }
@@ -235,6 +290,7 @@ class DogecoinSpvService private constructor(
     private fun stopLocked() {
         catchUpJob?.cancel()
         catchUpJob = null
+        headerProgressWatchdog.reset()
         // Final flush + stop the autosave thread so the latest UTXO set is persisted before teardown.
         wallet?.let { w -> runCatching { w.shutdownAutosaveAndWait() } }
         peerGroup?.let { pg ->
@@ -452,7 +508,8 @@ class DogecoinSpvService private constructor(
             bestPeerHeight = bestPeerHeight,
             syncedToDateMillis = headTimeSecs * 1000L,
             synced = synced,
-            overTor = builtSocksAddress != null
+            overTor = builtSocksAddress != null,
+            stalled = headerProgressWatchdog.stalled
         )
     }
 
@@ -620,7 +677,10 @@ class DogecoinSpvService private constructor(
         fun minPeersFor(network: DogecoinNetwork): Int =
             if (network == DogecoinNetwork.MAINNET) MIN_PEERS else MIN_PEERS_TESTNET
         const val BROADCAST_TIMEOUT_SECS = 25L // best-effort re-announce wait; timeout != failure (Claimed)
-        const val SYNC_CATCHUP_INTERVAL_MS = 10_000L // re-poke the highest peer for headers while not synced
+        const val SYNC_CATCHUP_INTERVAL_MS = 10_000L // live-chain progress/status sampling interval
+        const val HEADER_STALL_TIMEOUT_MS = 90_000L
+        const val HEADER_STALL_RECOVERY_COOLDOWN_MS = 90_000L
+        const val MAX_HEADER_STALL_RECOVERIES = 2
         const val TOR_CONNECT_TIMEOUT_MILLIS = 60_000 // Tor circuit + peer handshake is slow; BlockingClientManager defaults to 1s
 
         /**
