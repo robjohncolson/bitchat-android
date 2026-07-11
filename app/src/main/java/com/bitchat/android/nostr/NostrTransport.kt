@@ -516,11 +516,7 @@ class NostrTransport(
                 // Sealed-inside-the-rumor group metadata: groupId + (optional) subject + per-member identity
                 // ("bgm" = bitchat-group-member: account-pubkey hex + display name) for discovery. createPrivateMessage
                 // still prepends the per-recipient ["p", recipientHex] NIP-17 routing tag.
-                val groupTags = listOf(listOf("bg", groupId)) +
-                    (subject?.takeIf { it.isNotBlank() }?.let { listOf(listOf("subject", it)) } ?: emptyList()) +
-                    memberList.map { m ->
-                        if (m.name.isNullOrBlank()) listOf("bgm", m.pubkeyHex) else listOf("bgm", m.pubkeyHex, m.name)
-                    }
+                val groupTags = NostrGroupRegistry.buildGroupTags(groupId, subject, memberList)
                 memberList.forEach { m ->
                     NostrProtocol.createPrivateMessage(embedded, m.pubkeyHex, identity, groupTags).forEach { event ->
                         NostrRelayManager.registerPendingGiftWrap(event.id)

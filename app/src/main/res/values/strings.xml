@@ -299,6 +299,10 @@
   <string name="dogecoin_node_save_settings">Save node settings</string>
   <string name="dogecoin_node_testing">Testing the node address…</string>
   <string name="dogecoin_node_draft_test_note">Test result (draft — not saved):</string>
+  <string name="dogecoin_node_test_hint">Test checks the address above without saving it. Tap Save to actually use it.</string>
+  <string name="dogecoin_node_status_reflects_saved">Node status below reflects your saved settings, not the edits above.</string>
+  <string name="dogecoin_node_reported_provenance">Node-reported — not independently verified.</string>
+  <string name="dogecoin_node_empty_watch">Your node reports no coins for this address yet. It may still be catching up on this address.</string>
   <string name="dogecoin_rpc_endpoint_public_https_blocked">This is an unverified public HTTPS address, so bitchat won\'t send RPC credentials to it. Use your own node on a private network, or its exact Tailscale address (https://&lt;machine&gt;.&lt;tailnet&gt;.ts.net).</string>
   <string name="dogecoin_rpc_endpoint_onion_blocked">Direct .onion node addresses aren\'t supported — contacting one outside Tor would leak the onion name. Publish the node privately instead (e.g. Tailscale Serve).</string>
   <string name="dogecoin_rpc_endpoint_invalid_blocked">This isn\'t a usable Dogecoin node address. Use http(s) to a local or private host, or an exact Tailscale HTTPS address.</string>
@@ -786,6 +790,7 @@
     <string name="simple_chats_title">Chats</string>
     <string name="simple_cd_add_family">Add family</string>
     <string name="simple_cd_settings">Settings</string>
+    <string name="simple_cd_wallet">Wallet</string>
     <string name="simple_empty_title">No family added yet</string>
     <string name="simple_empty_body">Tap the add-person button above to add a family member, then chat privately.</string>
     <string name="simple_family_group">Family group</string>
@@ -798,6 +803,7 @@
     <string name="simple_message_hint">Message</string>
     <string name="simple_today">Today</string>
     <string name="simple_yesterday">Yesterday</string>
+    <string name="simple_preview_payment">Payment request</string>
     <string name="simple_cd_send">Send</string>
     <string name="simple_cd_request_doge">Request Dogecoin</string>
     <string name="simple_status_sending">Sending…</string>
@@ -867,4 +873,21 @@
     <string name="simple_pick_simple_body">A friendly, reliable messenger for keeping in touch with family. The technical settings stay out of the way.</string>
     <string name="simple_pick_power_title">Power user</string>
     <string name="simple_pick_power_body">The full bitchat — every setting, the mesh tools, and the Dogecoin wallet, all exposed.</string>
+    <string name="dogepaid_receipt_title">Payment reported</string>
+    <string name="dogepaid_receipt_duplicate_title">Duplicate payment report</string>
+    <string name="dogepaid_receipt_reported_amount">Reported amount: %1$s DOGE</string>
+    <string name="dogepaid_receipt_txid">Transaction %1$s</string>
+    <string name="dogepaid_receipt_claimed">Payment reported — not yet seen by your wallet.</string>
+    <string name="dogepaid_receipt_corroborated">Your wallet saw %1$s DOGE · %2$d confirmations</string>
+    <string name="dogepaid_receipt_duplicate_body">This report is already shown once in this conversation.</string>
+    <string name="dogepaid_receipt_outgoing_claimed">Receipt sent as a claim. The recipient must verify it with their wallet.</string>
+    <string name="dogepaid_receipt_tap_status">Tap to check with your wallet</string>
+    <string name="dogepaid_receipt_status_title">Payment report status</string>
+    <string name="dogepaid_receipt_checking">Checking your wallet…</string>
+    <string name="dogepaid_receipt_confirmation_description">%1$d of %2$d confirmations</string>
+    <string name="dogepaid_receipt_close">Close</string>
+    <string name="dogepaid_receipt_cross_network">This report is for %1$s; your wallet is on %2$s.</string>
+    <string name="dogepaid_receipt_retry">Retry receipt</string>
+    <string name="dogepaid_receipt_share_queued">Receipt is already sent or queued for this transaction.</string>
+    <string name="dogepaid_receipt_rpc_not_over_tor">This personal-node check is not routed over Tor.</string>
 </resources>

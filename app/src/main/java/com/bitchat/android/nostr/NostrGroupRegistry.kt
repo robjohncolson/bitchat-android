@@ -77,6 +77,22 @@ object NostrGroupRegistry {
         prefs?.edit()?.putString(convKey, gson.toJson(group))?.apply()
     }
 
+    /**
+     * Build the sealed-rumor group metadata tags for an outbound group message: `["bg", groupId]`, an
+     * optional `["subject", …]`, and one `bgm` (bitchat-group-member) tag per member.
+     *
+     * Privacy invariant (spec Workstream A / R-A0): a member name is emitted ONLY when [GroupMember.name]
+     * is non-blank. Group construction sets a name for the SELF member only (the sender's self-asserted
+     * announced nickname) and null for everyone else, so a local pet-name (a renamed favorite nickname)
+     * can never ride out in `bgm`. This is a pure function so that invariant is unit-testable.
+     */
+    fun buildGroupTags(groupId: String, subject: String?, members: List<GroupMember>): List<List<String>> =
+        listOf(listOf("bg", groupId)) +
+            (subject?.takeIf { it.isNotBlank() }?.let { listOf(listOf("subject", it)) } ?: emptyList()) +
+            members.map { m ->
+                if (m.name.isNullOrBlank()) listOf("bgm", m.pubkeyHex) else listOf("bgm", m.pubkeyHex, m.name)
+            }
+
     fun get(convKey: String): Group? = map[convKey]
 
     fun contains(convKey: String): Boolean = map.containsKey(convKey)

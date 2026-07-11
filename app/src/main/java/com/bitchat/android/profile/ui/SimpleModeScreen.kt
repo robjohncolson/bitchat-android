@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -73,6 +74,10 @@ import androidx.compose.ui.unit.dp
 import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
 import com.bitchat.android.favorites.FavoritesChangeListener
 import com.bitchat.android.favorites.FavoritesPersistenceService
+import com.bitchat.android.features.dogecoin.DogepaidPaymentContext
+import com.bitchat.android.features.dogecoin.DogepaidReceipt
+import com.bitchat.android.features.dogecoin.DogepaidReceiptCheckResult
+import com.bitchat.android.features.dogecoin.DogecoinNetwork
 import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.DeliveryStatus
@@ -89,9 +94,13 @@ import com.bitchat.android.profile.AppProfile
 import com.bitchat.android.profile.ContactDisplayName
 import com.bitchat.android.profile.ProfilePreferenceManager
 import com.bitchat.android.profile.ProfileSetupCoordinator
+import com.bitchat.android.profile.SimpleChatActivity
 import com.bitchat.android.ui.ChatViewModel
+import com.bitchat.android.ui.DeliveryStatusIcon
+import com.bitchat.android.ui.StatefulDogepaidReceiptCard
 import com.bitchat.android.ui.DogecoinUri
 import com.bitchat.android.ui.RequestDogeDialog
+import com.bitchat.android.ui.canonicalDogepaidReceiptMessageIds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -322,6 +331,18 @@ private fun nostrPubkeyToHex(value: String?): String? {
     }
 }
 
+/** One Simple-home list entry (group / contact / npub-only), unified so the list can sort by activity. */
+private class SimpleHomeRow(
+    val stableKey: String,
+    val title: String,
+    val avatarInitial: String?,
+    val avatarColor: Color,
+    val fallbackSubtitle: String,
+    val activity: SimpleChatActivity.Activity,
+    val onClick: () -> Unit,
+    val onLongClick: (() -> Unit)?
+)
+
 /** Target for the rename dialog (favorite Noise key and/or KnownNpub hex). */
 private data class RenameTarget(
     val noiseKey: ByteArray?,
@@ -359,6 +380,11 @@ private fun SimpleHome(
 
     val contacts = remember(refreshKey) { FavoritesPersistenceService.shared.getMutualFavorites() }
     val privateChats by viewModel.privateChats.collectAsState()
+    // For unread counting: the local nickname (own messages are never unread) + the in-memory read check.
+    // SeenMessageStore.hasRead is a synchronized Set.contains (no I/O), so per-message counting here does
+    // NOT reintroduce the main-thread markRead storm the P0 fix removed — nothing is ever marked read here.
+    val myNick by viewModel.nickname.collectAsState()
+    val seenStore = remember { com.bitchat.android.services.SeenMessageStore.getInstance(context) }
     // The user's E2E family groups, surfaced from the registry. Keyed on privateChats so a freshly-received
     // group appears once its first message lands (the receive path registers it AND appends to privateChats).
     val groups = remember(refreshKey, privateChats) {
@@ -373,6 +399,9 @@ private fun SimpleHome(
     var showSettings by remember { mutableStateOf(false) }
     var showAddFamily by remember { mutableStateOf(false) }
     var showWallet by remember { mutableStateOf(false) }
+    // Opt-in family wallet: a direct home entry point appears ONLY once the user has enabled the wallet in
+    // Settings, so the default curated path never surfaces money/node setup to someone who didn't ask for it.
+    val walletEnabled by ProfilePreferenceManager.walletEnabledFlow.collectAsState()
 
     // Smart Tor "punch-through". The banner appears only after Nostr relays have actually been unreachable
     // for a sustained window (see rememberConnectionTroubleMode) and its message adapts to WHY: offline (Tor
@@ -405,6 +434,17 @@ private fun SimpleHome(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.weight(1f))
+                // Direct wallet entry: one tap from home to the (locked) Dogecoin wallet, shown only when the
+                // opt-in wallet is enabled. The Settings → Open wallet path still works too.
+                if (walletEnabled) {
+                    IconButton(onClick = { showWallet = true }) {
+                        Icon(
+                            Icons.Filled.AccountBalanceWallet,
+                            contentDescription = stringResource(R.string.simple_cd_wallet),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 IconButton(onClick = { showAddFamily = true }) {
                     Icon(
                         Icons.Filled.PersonAdd,
@@ -430,8 +470,102 @@ private fun SimpleHome(
             )
         }
 
+        // Strings/colors needed while BUILDING the row model must be read in composable scope, not inside
+        // the remember below.
+        val familyFallback = stringResource(R.string.simple_family_fallback)
+        val groupFallback = stringResource(R.string.simple_family_group)
+        val tapToChat = stringResource(R.string.simple_tap_to_chat)
+        val noInternetContact = stringResource(R.string.simple_no_internet_contact)
+        val unverifiedContact = stringResource(R.string.simple_added_from_group_unverified)
+        val groupColor = MaterialTheme.colorScheme.primary
+
+        // One unified, activity-ordered list model (groups + verified contacts + npub-only), derived purely
+        // from already-collected state. Recomputes when messages arrive (privateChats), a favorite/known
+        // label changes (refreshKey), or the nickname changes — never on unrelated recomposition.
+        val homeRows = remember(refreshKey, privateChats, contacts, groups, known, myNick) {
+            val rows = ArrayList<SimpleHomeRow>(groups.size + contacts.size + known.size)
+            groups.forEach { entry ->
+                val keys = setOf(entry.key)
+                rows.add(
+                    SimpleHomeRow(
+                        stableKey = "grp_" + entry.key,
+                        title = entry.value.subject ?: groupFallback,
+                        avatarInitial = null,
+                        avatarColor = groupColor,
+                        fallbackSubtitle = groupFallback,
+                        activity = SimpleChatActivity.compute(keys, privateChats, myNick, seenStore::hasRead),
+                        onClick = { onOpenGroup(entry.key) },
+                        onLongClick = null
+                    )
+                )
+            }
+            contacts.forEach { c ->
+                val noiseHex = c.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
+                val pubHex = nostrPubkeyToHex(c.peerNostrPublicKey)
+                val name = ContactDisplayName.resolveLive(
+                    identity = ContactDisplayName.Identity(
+                        noiseKeyHex = noiseHex,
+                        npub = c.peerNostrPublicKey,
+                        nostrPubkeyHex = pubHex
+                    ),
+                    messageSenderFallback = c.peerNickname,
+                    familyFallback = familyFallback
+                ).display
+                // Union of every key this contact's messages can be filed under (mirrors SimpleConversation).
+                val keys = setOfNotNull(
+                    noiseHex,
+                    meshPeerIdForNoiseHex(noiseHex),
+                    pubHex?.let { "nostr_${it.take(16)}" }
+                )
+                rows.add(
+                    SimpleHomeRow(
+                        stableKey = noiseHex,
+                        title = name,
+                        avatarInitial = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                        avatarColor = Color(0xFF9AA3AB),
+                        fallbackSubtitle = if (c.peerNostrPublicKey != null) tapToChat else noInternetContact,
+                        activity = SimpleChatActivity.compute(keys, privateChats, myNick, seenStore::hasRead),
+                        onClick = { if (c.peerNostrPublicKey != null) onOpenContact(c.peerNostrPublicKey, name, noiseHex) },
+                        onLongClick = {
+                            renameInput = name
+                            renameError = false
+                            renameTarget = RenameTarget(
+                                noiseKey = c.peerNoisePublicKey,
+                                nostrHex = pubHex,
+                                currentName = name
+                            )
+                        }
+                    )
+                )
+            }
+            known.forEach { entry ->
+                // Tap-added-from-a-group contacts are NOT verified favorites — their display name is whatever a
+                // group message asserted. The subtitle flags that so a non-technical user can tell them apart
+                // from a family member added by scanning the signed QR (a verified mutual favorite).
+                val display = entry.value.ifBlank { familyFallback }
+                val keys = setOf("nostr_${entry.key.take(16)}")
+                rows.add(
+                    SimpleHomeRow(
+                        stableKey = "npub_" + entry.key,
+                        title = display,
+                        avatarInitial = display.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                        avatarColor = Color(0xFFC0A9B0),   // muted mauve, distinct from the verified-favorite gray
+                        fallbackSubtitle = unverifiedContact,
+                        activity = SimpleChatActivity.compute(keys, privateChats, myNick, seenStore::hasRead),
+                        onClick = { onOpenContact(entry.key, display, null) },
+                        onLongClick = {
+                            renameInput = display
+                            renameError = false
+                            renameTarget = RenameTarget(noiseKey = null, nostrHex = entry.key, currentName = display)
+                        }
+                    )
+                )
+            }
+            SimpleChatActivity.sortByRecency(rows) { it.activity.lastActivityMs }
+        }
+
         LazyColumn(Modifier.fillMaxSize()) {
-            if (contacts.isEmpty() && groups.isEmpty() && known.isEmpty()) {
+            if (homeRows.isEmpty()) {
                 item(key = "empty") {
                     Column(
                         Modifier
@@ -455,74 +589,19 @@ private fun SimpleHome(
                     }
                 }
             }
-            items(groups, key = { "grp_" + it.key }) { entry ->
+            items(homeRows, key = { it.stableKey }) { row ->
+                val lastMessage = row.activity.lastMessage
+                val preview = lastMessage?.let { simpleChatPreview(it, context) }
+                val timeText = lastMessage?.let { simpleChatListTime(it.timestamp, context) }
                 ChatListRow(
-                    title = entry.value.subject ?: stringResource(R.string.simple_family_group),
-                    subtitle = stringResource(R.string.simple_family_group),
-                    avatarInitial = null,
-                    avatarColor = MaterialTheme.colorScheme.primary,
-                    onClick = { onOpenGroup(entry.key) }
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            }
-            items(
-                items = contacts,
-                key = { it.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) } }
-            ) { c ->
-                val familyFallback = stringResource(R.string.simple_family_fallback)
-                val noiseHex = c.peerNoisePublicKey.joinToString("") { b -> "%02x".format(b) }
-                val name = ContactDisplayName.resolveLive(
-                    identity = ContactDisplayName.Identity(
-                        noiseKeyHex = noiseHex,
-                        npub = c.peerNostrPublicKey,
-                        nostrPubkeyHex = nostrPubkeyToHex(c.peerNostrPublicKey)
-                    ),
-                    messageSenderFallback = c.peerNickname,
-                    familyFallback = familyFallback
-                ).display
-                ChatListRow(
-                    title = name,
-                    subtitle = if (c.peerNostrPublicKey != null) stringResource(R.string.simple_tap_to_chat)
-                    else stringResource(R.string.simple_no_internet_contact),
-                    avatarInitial = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                    avatarColor = Color(0xFF9AA3AB),
-                    onClick = {
-                        if (c.peerNostrPublicKey != null) {
-                            onOpenContact(c.peerNostrPublicKey, name, noiseHex)
-                        }
-                    },
-                    onLongClick = {
-                        renameInput = name
-                        renameError = false
-                        renameTarget = RenameTarget(
-                            noiseKey = c.peerNoisePublicKey,
-                            nostrHex = nostrPubkeyToHex(c.peerNostrPublicKey),
-                            currentName = name
-                        )
-                    }
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            }
-            items(known, key = { "npub_" + it.key }) { entry ->
-                // Tap-added-from-a-group contacts are NOT verified favorites — their display name is whatever a
-                // group message asserted. Flag that so a non-technical user can tell them apart from a family
-                // member they added by scanning the signed QR code (a verified mutual favorite, plain above).
-                val display = entry.value.ifBlank { stringResource(R.string.simple_family_fallback) }
-                ChatListRow(
-                    title = display,
-                    subtitle = stringResource(R.string.simple_added_from_group_unverified),
-                    avatarInitial = display.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                    avatarColor = Color(0xFFC0A9B0),   // muted mauve, distinct from the verified-favorite gray
-                    onClick = { onOpenContact(entry.key, display, null) },
-                    onLongClick = {
-                        renameInput = display
-                        renameError = false
-                        renameTarget = RenameTarget(
-                            noiseKey = null,
-                            nostrHex = entry.key,
-                            currentName = display
-                        )
-                    }
+                    title = row.title,
+                    subtitle = preview ?: row.fallbackSubtitle,
+                    avatarInitial = row.avatarInitial,
+                    avatarColor = row.avatarColor,
+                    onClick = row.onClick,
+                    onLongClick = row.onLongClick,
+                    timeText = timeText,
+                    unreadCount = row.activity.unreadCount
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             }
@@ -633,6 +712,7 @@ private fun SimpleConversation(
     }
     var showRequestDialog by remember { mutableStateOf(false) }
     var payRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+    var payReceiptContext by remember { mutableStateOf<DogepaidPaymentContext?>(null) }
     var showAddPeople by remember { mutableStateOf(false) }
     var tapAddMember by remember { mutableStateOf<Pair<String, String>?>(null) }  // (accountPubkeyHex, name)
 
@@ -662,6 +742,9 @@ private fun SimpleConversation(
                 .distinctBy { it.id }
                 .sortedBy { it.timestamp }
         }
+    }
+    val canonicalDogepaidReceiptIds = remember(messages) {
+        canonicalDogepaidReceiptMessageIds(messages)
     }
 
     var input by remember { mutableStateOf("") }
@@ -745,6 +828,7 @@ private fun SimpleConversation(
                 val payReq = remember(m.content) {
                     DogecoinUri.wholeMessagePaymentUri(m.content)?.let { DogecoinPaymentRequest.parse(it) }
                 }
+                val paidReceipt = remember(m.content) { DogepaidReceipt.parse(m.content) }
                 val memberHex = m.senderNostrPubkey
                 val displaySender = if (isGroup && !isMine) {
                     ContactDisplayName.resolveLive(
@@ -753,7 +837,22 @@ private fun SimpleConversation(
                         familyFallback = stringResource(R.string.simple_family_fallback)
                     ).display
                 } else m.sender
-                if (payReq != null) {
+                if (paidReceipt != null) {
+                    SimplePaymentSentBubble(
+                        receipt = paidReceipt,
+                        isMine = isMine,
+                        senderName = displaySender,
+                        showSender = isGroup,
+                        duplicate = m.id !in canonicalDogepaidReceiptIds,
+                        timestamp = m.timestamp,
+                        deliveryStatus = m.deliveryStatus,
+                        walletNetwork = walletNetwork,
+                        onCheckStatus = viewModel::checkDogepaidReceipt,
+                        onRetry = peerID?.let { conversationKey ->
+                            { viewModel.retryDogepaidReceipt(m, conversationKey) }
+                        }
+                    )
+                } else if (payReq != null) {
                     PaymentRequestBubble(
                         request = payReq,
                         isMine = isMine,
@@ -761,7 +860,17 @@ private fun SimpleConversation(
                         showSender = isGroup,
                         canPay = walletEnabled && !isMine && payReq.network == walletNetwork,
                         timestamp = m.timestamp,
-                        onPay = { payRequest = payReq }
+                        onPay = {
+                            // Capture the immutable receipt destination NOW. The broadcast may finish after
+                            // this screen has navigated to another conversation. Group receipts deliberately
+                            // become a 1:1 DM to the structural sender, never a group-wide disclosure.
+                            payReceiptContext = if (isGroup) {
+                                DogepaidPaymentContext.forGroupRequester(payReq, m.senderNostrPubkey)
+                            } else {
+                                peerID?.let { DogepaidPaymentContext.forPrivateConversation(payReq, it) }
+                            }
+                            payRequest = payReq
+                        }
                     )
                 } else {
                     MessageBubble(
@@ -886,9 +995,14 @@ private fun SimpleConversation(
         // The locked family wallet, opened prefilled with the tapped request (money-path gates intact).
         com.bitchat.android.features.dogecoin.DogecoinWalletSheet(
             isPresented = true,
-            onDismiss = { payRequest = null },
+            onDismiss = {
+                payRequest = null
+                payReceiptContext = null
+            },
             onShareToChat = { viewModel.sendMessage(it) },
+            onPaymentReceiptClaimed = viewModel::postDogepaidReceipt,
             paymentRequest = req,
+            paymentReceiptContext = payReceiptContext,
             isSimpleProfile = true
         )
     }
@@ -1092,6 +1206,63 @@ private fun AddPeopleSheet(
 }
 
 private val DogeGold = Color(0xFFC2A633)
+
+/** Structured payment report. It stays a claim until a trusted local observation is supplied. */
+@Composable
+private fun SimplePaymentSentBubble(
+    receipt: DogepaidReceipt,
+    isMine: Boolean,
+    senderName: String,
+    showSender: Boolean,
+    duplicate: Boolean,
+    timestamp: java.util.Date,
+    deliveryStatus: DeliveryStatus?,
+    walletNetwork: DogecoinNetwork,
+    onCheckStatus: (DogepaidReceipt, (DogepaidReceiptCheckResult) -> Unit) -> Unit,
+    onRetry: (() -> Unit)?
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start
+    ) {
+        Column(
+            horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
+            modifier = Modifier.widthIn(max = 290.dp)
+        ) {
+            if (showSender && !isMine) {
+                Text(
+                    text = senderName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 12.dp, bottom = 2.dp)
+                )
+            }
+            StatefulDogepaidReceiptCard(
+                receipt = receipt,
+                duplicate = duplicate,
+                outgoing = isMine,
+                walletNetwork = walletNetwork,
+                onCheckStatus = onCheckStatus,
+                retryEnabled = isMine && deliveryStatus is DeliveryStatus.Failed && onRetry != null,
+                onRetry = onRetry
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = formatBubbleTime(timestamp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (isMine && deliveryStatus != null) {
+                    DeliveryStatusIcon(status = deliveryStatus)
+                }
+            }
+        }
+    }
+}
 
 /**
  * A chat bubble for a Dogecoin payment request (a message that is wholly a `dogecoin:` URI). Shows the
@@ -1557,8 +1728,11 @@ private fun ChatListRow(
     avatarInitial: String?,
     avatarColor: Color,
     onClick: () -> Unit,
-    onLongClick: (() -> Unit)? = null
+    onLongClick: (() -> Unit)? = null,
+    timeText: String? = null,
+    unreadCount: Int = 0
 ) {
+    val unread = unreadCount > 0
     Row(
         Modifier
             .fillMaxWidth()
@@ -1587,7 +1761,7 @@ private fun ChatListRow(
             Text(
                 title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = MaterialTheme.colorScheme.onSurface
@@ -1595,10 +1769,69 @@ private fun ChatListRow(
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                // An unread conversation's preview reads as primary text, not muted.
+                color = if (unread) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = if (unread) FontWeight.Medium else FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
+        // Trailing meta: last-activity time over an unread badge, right-aligned.
+        if (timeText != null || unread) {
+            Spacer(Modifier.width(8.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                if (timeText != null) {
+                    Text(
+                        timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (unread) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                }
+                if (unread) {
+                    Spacer(Modifier.height(4.dp))
+                    Box(
+                        Modifier
+                            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                            .padding(horizontal = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (unreadCount > 99) "99+" else unreadCount.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One-line preview for a message on the Simple home list; a dogecoin: invoice reads as a friendly label. */
+private fun simpleChatPreview(message: BitchatMessage, context: android.content.Context): String {
+    val raw = message.content.trim()
+    if (raw.startsWith("dogecoin:", ignoreCase = true)) {
+        return context.getString(R.string.simple_preview_payment)
+    }
+    // Collapse newlines/whitespace so the preview stays a single tidy line.
+    return raw.replace(Regex("\\s+"), " ").take(120)
+}
+
+/** Compact list timestamp: today -> clock time, yesterday -> "Yesterday", else a short date. */
+private fun simpleChatListTime(date: java.util.Date, context: android.content.Context): String {
+    val now = java.util.Date()
+    return when (dayKey(date)) {
+        dayKey(now) -> formatBubbleTime(date)
+        dayKey(java.util.Date(now.time - 86_400_000L)) -> context.getString(R.string.simple_yesterday)
+        else -> java.text.DateFormat
+            .getDateInstance(java.text.DateFormat.SHORT, java.util.Locale.getDefault())
+            .format(date)
     }
 }
