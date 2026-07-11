@@ -7,6 +7,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.bitchat.android.favorites.FavoritesPersistenceService
 import com.bitchat.android.features.dogecoin.DogecoinAddress
+import com.bitchat.android.features.dogecoin.DogepaidBroadcastClaim
+import com.bitchat.android.features.dogecoin.DogepaidPaymentContext
+import com.bitchat.android.features.dogecoin.DogepaidReceiptDeliveryPlanner
+import com.bitchat.android.features.dogecoin.DogepaidReceipt
+import com.bitchat.android.features.dogecoin.DogepaidReceiptCheckResult
+import com.bitchat.android.features.dogecoin.DogepaidReceiptObservationSource
 import com.bitchat.android.features.dogecoin.DogecoinNetwork
 import com.bitchat.android.features.dogecoin.DogecoinProtocol
 import com.bitchat.android.features.dogecoin.DogecoinWalletRepository
@@ -418,7 +424,7 @@ class ChatViewModel(
             "doge-spv-status" -> {
                 val s = dogecoinSpv().status.value
                 "spv net=${s.network.id} running=${s.running} synced=${s.synced} overTor=${s.overTor} height=${s.chainHeight} " +
-                    "peers=${s.peerCount} bestPeer=${s.bestPeerHeight} behind=${s.blocksBehind}"
+                    "peers=${s.peerCount} bestPeer=${s.bestPeerHeight} behind=${s.blocksBehind} stalled=${s.stalled}"
             }
             "doge-spv-balance" -> {
                 val net = currentDogecoinNetwork()
@@ -1282,6 +1288,174 @@ class ChatViewModel(
 
     
     // MARK: - Message Sending
+
+    /**
+     * Posts a structured payment claim to the immutable private destination captured at Pay tap.
+     *
+     * This deliberately bypasses [sendMessage], whose destination is mutable UI state. The durable
+     * reservation is committed before the chat message is inserted/sent, giving automatic and manual
+     * receipt actions one shared at-most-once boundary per network/txid.
+     */
+    fun postDogepaidReceipt(
+        paymentContext: DogepaidPaymentContext,
+        claim: DogepaidBroadcastClaim
+    ) {
+        viewModelScope.launch {
+            val plan = DogepaidReceiptDeliveryPlanner.plan(
+                paymentContext = paymentContext,
+                claim = claim,
+                myPeerId = mesh.myPeerID,
+                myNostrPubkeyHex = NostrIdentityBridge
+                    .getCurrentNostrIdentity(getApplication())
+                    ?.publicKeyHex
+            ) ?: return@launch
+            val receiptText = plan.receipt.encode()
+            if (privateChatManager.isPeerBlocked(plan.conversationKey)) return@launch
+
+            val reserved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                dogecoinWalletRepository.reserveOutgoingPaymentReceipt(claim.network, claim.txid)
+            }
+            if (!reserved) return@launch
+
+            val conversationKey = plan.conversationKey
+            val requesterPubkey = plan.requesterNostrPubkeyHex
+            if (requesterPubkey != null) {
+                // This is an account-DM alias derived from the signed group message's structural sender key;
+                // it creates no favorite/Noise identity and never consults a display name.
+                GeohashAliasRegistry.put(conversationKey, requesterPubkey)
+            }
+
+            privateChatManager.sendPrivateMessage(
+                content = receiptText,
+                peerID = conversationKey,
+                recipientNickname = nicknameForPeer(conversationKey),
+                senderNickname = state.getNicknameValue(),
+                myPeerID = mesh.myPeerID
+            ) { messageContent, peerID, recipientNickname, messageId ->
+                com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
+                    .sendPrivate(messageContent, peerID, recipientNickname, messageId)
+            }
+        }
+    }
+
+    /**
+     * Explicit receipt-status check against this device's selected local wallet view. No explorer is
+     * consulted and cross-network receipts return before any SPV/RPC read. SPV is observed only if its
+     * existing singleton is already active; this surface never starts a second client or changes backend.
+     */
+    fun checkDogepaidReceipt(
+        receipt: DogepaidReceipt,
+        onResult: (DogepaidReceiptCheckResult) -> Unit
+    ) {
+        viewModelScope.launch {
+            val walletNetwork = dogecoinWalletRepository.loadSelectedNetwork()
+            val snapshot = dogecoinWalletRepository.loadWalletIfPresent(walletNetwork)
+            val walletAddress = snapshot?.key?.address.orEmpty()
+            if (receipt.network != walletNetwork || snapshot == null) {
+                onResult(
+                    DogepaidReceiptCheckResult(
+                        state = com.bitchat.android.features.dogecoin.DogepaidReceiptStateResolver.resolve(
+                            receipt,
+                            walletNetwork,
+                            walletAddress,
+                            emptyList()
+                        ),
+                        source = DogepaidReceiptObservationSource.NONE
+                    )
+                )
+                return@launch
+            }
+
+            val backend = dogecoinWalletRepository.resolveBackend(walletNetwork)
+            val observations = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    when (backend) {
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.SPV ->
+                            dogecoinSpv().snapshotTransactions(walletNetwork).orEmpty().map { tx ->
+                                com.bitchat.android.features.dogecoin.DogepaidLocalObservation(
+                                    network = walletNetwork,
+                                    txid = tx.txid,
+                                    walletAddress = walletAddress,
+                                    incoming = tx.incoming,
+                                    amountKoinu = tx.amountKoinu,
+                                    confirmations = tx.confirmations
+                                )
+                            }
+
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC -> {
+                            val config = dogecoinWalletRepository.loadRpcConfig(walletNetwork)
+                            com.bitchat.android.features.dogecoin.DogecoinRpcClient()
+                                .getWalletActivity(config, walletAddress, walletNetwork, count = 100)
+                                .map { tx ->
+                                    com.bitchat.android.features.dogecoin.DogepaidLocalObservation(
+                                        network = walletNetwork,
+                                        txid = tx.txid,
+                                        walletAddress = walletAddress,
+                                        incoming = tx.category.equals("receive", ignoreCase = true),
+                                        amountKoinu = tx.amountKoinu,
+                                        confirmations = tx.confirmations
+                                    )
+                                }
+                        }
+
+                        // Public explorer status would leak txid/address interest; never use it here.
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.EXPLORER -> emptyList()
+                    }
+                }.getOrDefault(emptyList())
+            }
+
+            onResult(
+                DogepaidReceiptCheckResult(
+                    state = com.bitchat.android.features.dogecoin.DogepaidReceiptStateResolver.resolve(
+                        receipt,
+                        walletNetwork,
+                        walletAddress,
+                        observations
+                    ),
+                    source = when (backend) {
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.SPV ->
+                            DogepaidReceiptObservationSource.SPV
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC ->
+                            DogepaidReceiptObservationSource.RPC
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.EXPLORER ->
+                            DogepaidReceiptObservationSource.NONE
+                    },
+                    rpcNotOverTorDisclosure = backend ==
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC &&
+                        com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value.mode !=
+                        com.bitchat.android.net.TorMode.OFF
+                )
+            )
+        }
+    }
+
+    /** Re-send the same failed outgoing receipt artifact (same message id), never mint a second receipt. */
+    fun retryDogepaidReceipt(message: BitchatMessage, conversationKey: String) {
+        if (message.deliveryStatus !is com.bitchat.android.model.DeliveryStatus.Failed) return
+        if (com.bitchat.android.features.dogecoin.DogepaidReceipt.parse(message.content) == null) return
+        if (!com.bitchat.android.features.dogecoin.isEligibleDogepaidPrivateConversationKey(conversationKey)) return
+        val stored = state.getPrivateChatsValue()[conversationKey]
+            ?.firstOrNull { it.id == message.id && it.content == message.content }
+            ?: return
+        if (stored.senderPeerID != mesh.myPeerID) return
+
+        messageManager.updateMessageDeliveryStatus(message.id, com.bitchat.android.model.DeliveryStatus.Sending)
+        runCatching {
+            com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh).sendPrivate(
+                message.content,
+                conversationKey,
+                nicknameForPeer(conversationKey).orEmpty(),
+                message.id
+            )
+        }.onSuccess {
+            messageManager.updateMessageDeliveryStatus(message.id, com.bitchat.android.model.DeliveryStatus.Sent)
+        }.onFailure { error ->
+            messageManager.updateMessageDeliveryStatus(
+                message.id,
+                com.bitchat.android.model.DeliveryStatus.Failed(error.message ?: "send failed")
+            )
+        }
+    }
     
     fun sendMessage(content: String) {
         if (content.isEmpty()) return
@@ -1794,7 +1968,10 @@ class ChatViewModel(
      * Sender side: relay a locally-signed transaction to opt-in helper peers when the local node
      * cannot broadcast. Drives [peerBroadcastState] (Pending -> Confirmed/Claimed/Failed) for the wallet UI.
      */
-    fun requestPeerBroadcast(signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction) {
+    fun requestPeerBroadcast(
+        signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction,
+        paymentReceiptContext: DogepaidPaymentContext? = null
+    ) {
         _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Pending
         viewModelScope.launch {
             val network = currentDogecoinNetwork()
@@ -1812,13 +1989,37 @@ class ChatViewModel(
             } catch (e: Exception) {
                 com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed(e.message ?: "Broadcast failed.")
             }
-            _peerBroadcastState.value = when (outcome) {
+            val terminalState = when (outcome) {
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Confirmed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(outcome.txid)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Claimed ->
                     resolveClaimedPeerBroadcast(outcome.txid, network)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed(outcome.reason)
+            }
+            _peerBroadcastState.value = terminalState
+
+            val claimedTxid = when (terminalState) {
+                is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed -> terminalState.txid
+                is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed -> terminalState.txid
+                else -> null
+            }
+            if (
+                paymentReceiptContext != null &&
+                network == signedTransaction.network &&
+                claimedTxid == signedTransaction.txid
+            ) {
+                // App-scope emission survives closing/switching the wallet sheet. This remains a static claim;
+                // helper corroboration never becomes settlement authority for the receiving chat bubble.
+                postDogepaidReceipt(
+                    paymentReceiptContext,
+                    DogepaidBroadcastClaim(
+                        network = signedTransaction.network,
+                        txid = signedTransaction.txid,
+                        amountKoinu = signedTransaction.sendAmountKoinu,
+                        recipientAddress = signedTransaction.recipientAddress
+                    )
+                )
             }
         }
     }

@@ -11,6 +11,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class DogecoinWalletRepositoryTest {
@@ -335,6 +338,73 @@ class DogecoinWalletRepositoryTest {
         // Advertising is enabled but no mainnet key exists: must return null without generating one.
         assertNull(DogecoinIdentityAnnouncement.currentReceiveAddress(context))
         assertNull(repository.loadWalletIfPresent(DogecoinNetwork.MAINNET))
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation accepts first canonical txid and rejects repeats and invalid txids`() {
+        val repository = DogecoinWalletRepository(context)
+        val txid = "a".repeat(64)
+
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, ""))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, "a".repeat(63)))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, "g".repeat(64)))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid.uppercase()))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, " $txid "))
+
+        // The invalid variants above must not normalize to, or reserve, the canonical lowercase txid.
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation persists across repository instances`() {
+        val txid = "b".repeat(64)
+
+        assertTrue(
+            DogecoinWalletRepository(context)
+                .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+        )
+        assertFalse(
+            DogecoinWalletRepository(context)
+                .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+        )
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation is scoped by network`() {
+        val repository = DogecoinWalletRepository(context)
+        val txid = "c".repeat(64)
+
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.MAINNET, txid))
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.MAINNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+    }
+
+    @Test
+    fun `concurrent outgoing payment receipt reservation has exactly one winner across repository instances`() {
+        val repositories = List(8) { DogecoinWalletRepository(context) }
+        // Initialize encrypted preference wrappers serially so the race under test is only the reservation.
+        repositories.forEach { it.loadAdvertiseAddressEnabled() }
+        val txid = "d".repeat(64)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(repositories.size)
+
+        try {
+            val attempts = List(32) { index ->
+                executor.submit<Boolean> {
+                    start.await()
+                    repositories[index % repositories.size]
+                        .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+                }
+            }
+            start.countDown()
+
+            val winners = attempts.count { it.get(10, TimeUnit.SECONDS) }
+            assertEquals(1, winners)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     private fun clearDogecoinPrefs() {

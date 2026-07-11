@@ -421,6 +421,33 @@ class DogecoinWalletRepository(context: Context) {
         return updatedAddresses
     }
 
+    /**
+     * Atomically reserves [txid] for one outgoing structured payment receipt on [network]. Callers may
+     * send the receipt only when this returns true. The synchronous commit deliberately happens before
+     * that send, so a process death cannot reopen the same txid for a duplicate receipt.
+     *
+     * The lock is process-wide (rather than repository-instance-local) because wallet sheets and the chat
+     * ViewModel may hold different repository instances. Invalid/non-canonical txids and storage failures
+     * fail closed without authorizing a send.
+     */
+    fun reserveOutgoingPaymentReceipt(network: DogecoinNetwork, txid: String): Boolean {
+        if (!OUTGOING_PAYMENT_RECEIPT_TXID_REGEX.matches(txid)) return false
+
+        return synchronized(OUTGOING_PAYMENT_RECEIPT_RESERVATION_LOCK) {
+            runCatching {
+                val key = outgoingPaymentReceiptTxidsKey(network)
+                val reserved = prefs.getStringSet(key, emptySet()).orEmpty().toSet()
+                if (txid in reserved) {
+                    false
+                } else {
+                    prefs.edit()
+                        .putStringSet(key, reserved + txid)
+                        .commit()
+                }
+            }.getOrDefault(false)
+        }
+    }
+
     fun resetWallet(network: DogecoinNetwork): DogecoinWalletSnapshot {
         val editor = prefs.edit()
             .remove(privateKeyKey(network))
@@ -536,6 +563,9 @@ class DogecoinWalletRepository(context: Context) {
     }
 
     private companion object {
+        val OUTGOING_PAYMENT_RECEIPT_RESERVATION_LOCK = Any()
+        val OUTGOING_PAYMENT_RECEIPT_TXID_REGEX = Regex("^[0-9a-f]{64}$")
+
         const val PREFS_NAME = "dogecoin_wallet"
         const val LEGACY_PREFS_NAME = "dogecoin_testnet_wallet"
         const val KEY_LEGACY_PREFS_MIGRATED = "legacy_testnet_prefs_migrated"
@@ -567,6 +597,8 @@ class DogecoinWalletRepository(context: Context) {
         fun wifCopyAddressKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_address"
         fun wifCopyAtKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_at"
         fun addressBookKey(network: DogecoinNetwork): String = "${network.id}_address_book"
+        fun outgoingPaymentReceiptTxidsKey(network: DogecoinNetwork): String =
+            "${network.id}_outgoing_payment_receipt_txids"
         fun onChainCorroborationKey(network: DogecoinNetwork): String = "${network.id}_onchain_corroboration_enabled"
         fun explorerUrlKey(network: DogecoinNetwork): String = "${network.id}_explorer_url_template"
     }
