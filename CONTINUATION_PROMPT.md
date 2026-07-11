@@ -11,6 +11,226 @@ Simple/Family profile (PR open). Work autonomously, inspect the relevant files f
 focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
 **Money path + signed mesh protocol — review carefully.**
 
+## ▶️ NEXT SESSION — START HERE (2026-07-10): portable trusted node + RPC guardrails
+
+**This section is authoritative for Dogecoin node work and supersedes older LAN/RPC/Tor directions below.**
+Historical material is retained for context, but do not copy its broad `rpcbind`, `rpcallowip`, public-RPC,
+or Arti assumptions into new work.
+
+### Current product decision
+
+The user's actual goal is now concrete:
+
+- Android keeps the Dogecoin WIF/private key and remains the only signer.
+- A personally controlled laptop runs a fully validating Dogecoin Core node and watches only the phone's
+  public address for app funds.
+- When travelling together, the laptop can use the phone's mobile hotspot. The phone can query the already-synced
+  laptop for balance/UTXOs, locally sign, and ask the laptop to preflight/broadcast even when phone SPV is behind.
+- When the laptop is elsewhere, the first remote-access experiment is **Tailscale Serve over an exact HTTPS
+  `*.ts.net` hostname**, not public RPC and not the custom Tor gateway.
+- SPV stays the normal/default wallet backend. Node use remains explicit/session-only.
+
+**Approved next work:** the existing RPC guardrails, followed by a portable **testnet** laptop/Tailscale/hotspot
+proof.
+
+**Not approved for implementation:** the custom Rust gateway, OpenAPI service, Tor onion publication, or the
+12-item Arti rebuild/hardening program. Keep those as deferred reference architecture only.
+
+**Not built yet:** a mainnet `TRUSTED_PERSONAL_NODE` mode that is allowed to supply spend inputs while SPV is
+behind. That is a separate, explicit trust decision after the testnet proof.
+
+### Why the direction changed
+
+`docs/dogecoin-remote-node-access-spec.md` was independently reviewed. Its audit of the current code was accurate,
+including these confirmed defects:
+
+1. The one-tap Core help snippet emits `rpcbind=0.0.0.0` plus every RFC1918 range.
+2. RPC URL, username, password, and wallet name persist on every keystroke.
+3. The wallet auto-probes a valid saved URL after open/edit (650 ms debounce), sending Basic credentials and then
+   the wallet address even when SPV is selected.
+4. `DogecoinRpcClient` follows redirects and reads responses without an explicit size cap.
+5. `https://<v3>.onion` passes URL validation but would be attempted directly, potentially leaking the onion name.
+6. Helper and debug paths construct their own RPC clients, so UI-only trust checks are bypassable.
+
+The spec's Tor gateway prescription is disproportionate today. On mainnet it requires fully synced SPV before
+signing; at that point SPV can already broadcast. Unique value is mostly early node-reported reads/history, Core
+policy diagnostics, disagreement detection, and an optional redundant relay sink. Current Arti onion support is
+also not reproducibly buildable/proven across the four shipped ABIs.
+
+Two review corrections are locked in:
+
+- A failed Tor/remote assist must disable only the assist, never the wallet. SPV remains persisted and keeps
+  running.
+- Do **not** classify `100.64.0.0/10` as trusted cleartext. It is RFC 6598 shared carrier-NAT space, not proof that
+  Tailscale owns the active route. Use the exact Tailscale HTTPS hostname instead.
+
+### Worktree/doc state at this handoff
+
+- `docs/dogecoin-remote-node-access-spec.md` is untracked and remains a **proposed/deferred security reference**.
+- `docs/family-wallet-ux-learnings-spec.md` has an unstaged cross-reference to it.
+- Before committing the remote spec, amend it with: the mainnet-value honesty sentence; the BIP37-vs-home-operator
+  privacy tradeoff; explicit removal of legacy raw-RPC mainnet; the atomic resolver/offer gate; B0 payment-status
+  deltas; and a single-owner Tor lifecycle contract.
+- Unrelated existing modifications in the checkpoint asset/test and `tools/spv-spike/gradlew.bat` belong to the
+  user/background work. Preserve them.
+- Do not commit or stage anything unless the user explicitly asks.
+
+### Immediate code work: one atomic RPC-guardrail slice
+
+Do this before Tailscale or another node test. The resolver and trust/offer changes **must ship together**; applying
+only the soft-default fix makes an unverified public HTTPS URL eligible for the assist card.
+
+1. Replace the generated `dogecoin.conf` snippet. Never emit `rpcbind=0.0.0.0` or broad RFC1918 allowlists. Default
+   to loopback and explain exact-interface/firewall configuration only as an expert local/testnet path.
+2. Treat URL/user/password/wallet edits as an in-memory draft. Persist only from an explicit Save/Confirm action.
+3. Remove all automatic authenticated probes on wallet open and field edits. Add explicit `Test connection` /
+   `Use node` actions; displaying or editing a configuration performs zero I/O.
+4. Harden every RPC client: `followRedirects(false)`, `followSslRedirects(false)`, bounded response reads, bounded
+   errors, existing timeouts, and no credential forwarding to a changed origin.
+5. Add one central endpoint/trust classifier. At minimum distinguish:
+   - allowed explicit local testnet/regtest LAN,
+   - exact provisioned Tailscale HTTPS,
+   - unverified public HTTPS,
+   - direct `.onion` (invalid for this client),
+   - invalid/unknown.
+   URL syntax (`rpcUrlValid`) is never a trust decision.
+6. Change `resolveBackend`, malformed saved-backend handling, assist `offerVisible`, assist activation, and probe
+   suppression in the same PR. An unverified public URL resolves to SPV, never appears assist-ready, and is never
+   probed. An active assist is stopped before another request if an edit makes the endpoint ineligible.
+7. Enforce the same classifier/client factory in wallet reads/sends, `BroadcastHelperService`, helper
+   announcements, payment-status reads, and all production debug/console RPC paths. Direct construction must not
+   bypass route policy.
+8. Add focused tests for all networks and saved-backend states: local HTTP, arbitrary HTTPS, exact Tailscale host,
+   `.onion`, malformed state, redirects, oversized bodies, zero-I/O editing/open, offer visibility, and activation.
+
+Also amend `docs/payment-request-status-spec.md` when that B0 work proceeds:
+
+- mainnet + legacy/raw RPC => `CANNOT_CHECK` with zero I/O;
+- first-class `SOURCE_DISPUTED` (the source, not the payment, is disputed);
+- every RPC-derived result says `node-reported, not independently verified` until SPV corroborates it;
+- explorer, unknown/malformed, unverified public, and future unsupported backends => `CANNOT_CHECK`.
+
+### Portable testnet node: correct security model
+
+"Watch-only" describes the Core wallet's relationship to the Android address; the full node still validates the
+entire chain. The current app already calls `importaddress` and signs with `DogecoinTransactionBuilder` on Android.
+Never send/import the Android WIF to Core.
+
+First verify the currently active phone address:
+
+```text
+dogecoin-cli -testnet validateaddress "<phone-testnet-address>"
+```
+
+Desired result:
+
+```text
+ismine: false
+iswatchonly: true
+```
+
+- If so, the node is already watch-only for that address; do not wipe/resync it merely to rename the architecture.
+- If `ismine: true`, Core has the private key. For the real pattern, use a separate app-only Core data directory
+  and import only the public address. The historical testnet setup deliberately copied a node WIF into a phone, so
+  do not assume today's address/node pairing is clean; verify it.
+- Dogecoin Core 1.14.9 lacks modern Bitcoin Core's `createwallet(..., disable_private_keys=true)` facility. A
+  separate legacy Core wallet may contain unrelated generated keys, but it must contain no valuable keys/funds and
+  must never receive the Android WIF. Strong isolation means a separate Core instance/data directory from any
+  custodial desktop wallet.
+- Complete the watch-address historical rescan before travel. The current app requires an unpruned node for that
+  path. Keep Core caught up; a stale laptop cannot rescue a quick spend merely because it has old chain data.
+
+If RPC is currently port-forwarded/WAN-reachable, close it immediately. Core P2P may be public; Core RPC may not.
+
+### Tailscale setup target (ops spike, no custom gateway)
+
+Tailscale is trusted as an encrypted private transport, not as the only money-safety boundary:
+
+- enable MFA, device approval, and Tailnet Lock;
+- use at least two Tailnet Lock signing devices and store disablement secrets offline;
+- replace default-allow policy with a narrow grant: named phone(s) -> tagged Dogecoin laptop -> TCP 443 only;
+- use a unique `rpcauth` credential per phone so one lost phone can be revoked;
+- keep a separate Core instance with no app/private spending keys;
+- use **Serve**, never Funnel; verify the service is unreachable outside the tailnet;
+- Tailscale sees device/connection metadata and is not an anonymity service.
+
+Reference host shape (placeholders only; never commit a real RPC secret):
+
+```ini
+testnet=1
+server=1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=44555
+rpcauth=<unique-user:salt$hash>
+```
+
+Then publish the loopback service privately with the installed Tailscale version's documented syntax, currently:
+
+```text
+tailscale serve --bg http://127.0.0.1:44555
+```
+
+Configure Android with the exact resulting `https://<node>.<tailnet>.ts.net` origin. Platform TLS + the tailnet's
+device identity provide the pragmatic trust boundary; this is not app-managed SPKI pinning. Do not accept a raw
+`http://100.64.x.x` substitute, sibling `.ts.net` host, redirect, alternate port, query, fragment, or automatic
+fallback.
+
+No Tailscale SDK is required for the first experiment. After the guardrails, the existing semantic RPC calls can
+use the HTTPS origin. An optional later UX may show `Open Tailscale`, but it is not a prerequisite.
+
+### Laptop + phone-hotspot behavior
+
+The portable geometry is valid:
+
+```text
+Android signer/key
+  -> Tailscale HTTPS (normally a direct WireGuard path over the hotspot)
+  -> laptop Tailscale Serve
+  -> loopback Dogecoin Core watch view
+  -> Dogecoin P2P through the phone's internet connection
+```
+
+Both devices being on the same phone hotspot does not require public reachability. Direct private-LAN RPC can be a
+testnet-only expert fallback, but Tailscale HTTPS avoids rebinding Core whenever the laptop's hotspot address changes
+and authenticates/encrypts the path. Some Android/OEM hotspots isolate the phone from tethered clients or interact
+oddly with VPNs; prove the actual phone/laptop pair instead of assuming.
+
+Test in this order with tiny testnet funds:
+
+1. Node reports correct testnet chain, `initialblockdownload=false`, acceptable peer count, and completed rescan.
+2. Exact watch state is `ismine=false`, `iswatchonly=true` for the active Android address.
+3. Balance/activity/UTXOs work through Tailscale Serve on home Wi-Fi.
+4. Repeat on cellular with the laptop elsewhere.
+5. Repeat with the laptop joined to the phone hotspot; verify whether the path is direct and whether reconnects work.
+6. Build/sign on Android, run Core policy preflight, broadcast through the laptop, then corroborate the tx via SPV.
+7. Exercise Tailscale down, Core down/syncing, 401, TLS failure, laptop sleep/reboot, lost-phone revocation, and
+   hotspot reconnect. Each failure ends the node attempt without credential leakage; SPV remains usable.
+8. External/LAN scans prove RPC 44555 is not reachable except via the loopback Serve target.
+
+### Mainnet fast-spend follow-up (explicitly deferred until testnet passes)
+
+The current remote-node spec intentionally requires fully synced SPV before mainnet signing. That does **not** meet
+the user's portable-laptop requirement. If the testnet proof succeeds, amend the design and build a separate
+`TRUSTED_PERSONAL_NODE` profile where the user explicitly elects to trust the exact personal laptop as the UTXO
+oracle while SPV is behind.
+
+Required gates for that future mode:
+
+- exact provisioned Tailscale HTTPS origin and explicit user confirmation;
+- correct mainnet chain, Core fully synced/not IBD, sufficient node peers, watch import/rescan complete;
+- Android remains the only signer; Core never receives the WIF;
+- fresh node snapshot, exact input ownership/script/amount validation, and immediate selected-input recheck;
+- hard absolute and relative fee caps with no acknowledgement override;
+- locally recomputed txid, Core `testmempoolaccept`, idempotent/user-triggered broadcast, and Claimed-until-observed
+  receipt semantics;
+- prominent `Trusted personal node — not yet verified by Built-in` provenance;
+- node compromise is an accepted risk: watch-only prevents key theft, but does not stop a compromised laptop from
+  lying about chain/UTXO data or censoring a transaction.
+
+Do not silently relax the SPV gate in the ordinary RPC path. This must be a named profile/state, reviewed as a
+money-path change, and proven on testnet before any user-authorized mainnet use.
+
 ## ▶️ NEXT SESSION — START HERE (2026-07-02, updated)
 
 ### 🌏 SLOW-OPEN FIX + JAPANESE LOCALIZATION (2026-07-02, HEAD `9bed2ef`)
@@ -743,6 +963,11 @@ reannounce`. **Mainnet money-path commands HARD-REFUSE; WIF/keys never logged.**
 sync/balance + SPV-vs-node cross-check commands here as the soak surface.)
 
 ## Local Dogecoin Node (testnet)
+
+> **SUPERSEDED FOR NEW WORK:** The 2026-07-10 section at the top is authoritative. Do not reuse the broad LAN
+> `rpcbind`/`rpcallowip` example below. Prefer loopback Core behind Tailscale Serve, or an exact-interface,
+> firewall-restricted, explicit testnet-only local setup after the RPC guardrails land.
+
 ```text
 "C:\Program Files\Dogecoin\dogecoin-qt.exe" -testnet            # RPC 127.0.0.1:44555 (P2P 44556)
 "C:\Program Files\Dogecoin\daemon\dogecoin-cli.exe" -testnet <cmd>

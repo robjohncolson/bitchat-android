@@ -1,5 +1,7 @@
 # Spec: Family Chat Identity + Payment Receipts + Home-Node Assist
 
+> **Remote-node follow-on:** [`dogecoin-remote-node-access-spec.md`](./dogecoin-remote-node-access-spec.md) defines the hardened off-LAN design and supersedes Workstream C where transport, pairing, legacy-mainnet, or mainnet-send requirements conflict. The non-persistent assist, SPV cross-check, disputed-node, and claim-until-corroborated rules here remain in force.
+
 **Status:** proposed — **v2 after design review** (approve-with-changes folded in)  
 **Branch context:** `simple-family-profile` + merged Dogecoin wallet (SPV/RPC/mesh helper)  
 **Audience:** implementers  
