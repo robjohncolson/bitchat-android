@@ -87,17 +87,23 @@ SPV-NETWORK-REBIND    DONE — network switch rebinds SPV chain
 ### Wave 4 (ACTIVE) — mainnet trusted personal node
 
 Full design: **`docs/dogecoin-trusted-personal-node-mainnet-design.md`**  
-Decisions: **`docs/des1-human-decisions.md`** — **DECIDED 2026-07-12**
+Decisions: **`docs/des1-human-decisions.md`** — **DECIDED 2026-07-12**  
+Plan: **`docs/des1-implementation-plan.md`**
 
 ```text
-DES-1-DECISIONS   DONE — human locked defaults (+ prev-tx preference, shareable profile)
+DES-1-DECISIONS   DONE
 DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
-DES-1-IMPL        Phased TRUSTED_PERSONAL_NODE after guardrail
-WALLET-SESSION    State hoist for full sheet section split (after money-path calm)
+DES-1-A           NEXT — TPN profile + ceremony (no spend) (Codex)
+DES-1-B           Activation + readiness + read-only display
+DES-1-C           Proof-backed UTXO / prev-tx
+DES-1-D           Send coordinator (first TPN spend unlock)
+DES-1-E           Settlement + dispute + SPV-6
+DES-1-F           Ops runbook + shareable profile export
+WALLET-SESSION    State hoist (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 ```
 
-**Order:** DES-1-GUARDRAIL first, then phased DES-1-IMPL. No mega-PR.
+**Order:** A → B → C → D → E → F. No mega-PR. Do not unlock spend before D.
 
 ---
 
@@ -277,6 +283,18 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Done means:** unit tests for “mainnet + generic RPC → cannot spend”; suite green; describe surfaces.  
 **Out of scope:** full TPN bind/session UI (DES-1-IMPL); share/export QR.
 **Status:** DONE (`DogecoinSpendRoutePolicy` + RPC/helper chokepoints).
+
+---
+
+### DES-1-A — TPN profile + trust ceremony (no spend)
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-implementation-plan.md` § DES-1-A + design §§6–7  
+**Problem:** Guardrail blocks generic mainnet RPC spend, but there is no durable exact-origin trust profile or ceremony for TRUSTED_PERSONAL_NODE.  
+**Goal:** Profile model, exact-origin validation, encrypted credential storage separate from trust record, PROVISIONING one-shot test, AUTHORIZED_INACTIVE persistence, session dies on process death. No TPN spend unlock; SPV remains default. EN+JA.  
+**Must not:** enable mainnet RPC spend; importaddress/rescan from app; bake URLs into APK; DES-1-B–D scope creep.  
+**Done means:** origin/state unit tests; suite green; describe UI surfaces.  
+**Out of scope:** activation reads (B), proofs (C), send (D).
 
 ---
 
