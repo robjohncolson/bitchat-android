@@ -5,9 +5,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Sheet-scoped coordinator for lifecycle/read I/O. The mutex prevents SPV startup, node status, and
- * balance/activity snapshots from piling onto the same wallet resources, while [generation] prevents a
+ * Sheet-scoped coordinator for **sheet read** I/O (node status/balance/activity, SPV snapshots, conf polls).
+ * The mutex prevents those reads from stampeding the same resources, while [generation] prevents a
  * completion from publishing after the sheet has left composition.
+ *
+ * **SPV process start/stop must NOT use this mutex** — it lives on a separate process lifecycle lock so
+ * home-node RPC (the fast path when SPV is behind) is never blocked behind bitcoinj startup.
  *
  * Long-lived confirmation polling acquires this only for each individual observation, never for its whole
  * polling budget, so RPC confirmation progress remains responsive.
