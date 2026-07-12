@@ -157,14 +157,14 @@ internal fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
 /**
  * Home-node assist surface (spec R-C3). Offer state: the light client is behind but a node is already
  * configured — one tap rides reads+broadcast on the node for THIS session while SPV keeps syncing.
- * Active state: the R-C3 banner with blocks-behind, an explicit not-over-Tor disclosure when Tor is on
+ * Active state: the R-C3 banner with honest SPV progress, an explicit not-over-Tor disclosure when Tor is on
  * (the RPC path never routes over Tor), and a one-tap revert. Presentation-only: callers own the state,
  * and nothing here persists a backend choice (R-C4a).
  */
 @Composable
 internal fun NodeAssistCard(
     active: Boolean,
-    blocksBehind: Int,
+    spvProgress: String,
     notOverTor: Boolean,
     onUse: () -> Unit,
     onStop: () -> Unit
@@ -181,7 +181,7 @@ internal fun NodeAssistCard(
         ) {
             Text(
                 text = if (active) {
-                    stringResource(R.string.dogecoin_node_assist_active, blocksBehind) +
+                    stringResource(R.string.dogecoin_node_assist_active, spvProgress) +
                         if (notOverTor) " · " + stringResource(R.string.dogecoin_node_assist_not_over_tor) else ""
                 } else {
                     stringResource(R.string.dogecoin_node_assist_offer)

@@ -83,4 +83,26 @@ class DogecoinWalletLifecycleTest {
         assertFalse(session.isCurrent(firstGeneration))
         assertTrue(session.isCurrent(session.captureGeneration()))
     }
+
+    @Test
+    fun `SPV status publication rejects callbacks from replaced and stopped owners`() {
+        val gate = DogecoinSpvStatusPublicationGate()
+        val testnetOwner = Any()
+        val mainnetOwner = Any()
+        val published = mutableListOf<String>()
+
+        gate.activate(testnetOwner)
+        assertTrue(gate.isCurrent(testnetOwner))
+        assertTrue(gate.publishIfCurrent(testnetOwner) { published += "testnet" })
+
+        gate.activate(mainnetOwner)
+        assertFalse(gate.isCurrent(testnetOwner))
+        assertFalse(gate.publishIfCurrent(testnetOwner) { published += "stale-testnet" })
+        assertTrue(gate.publishIfCurrent(mainnetOwner) { published += "mainnet" })
+
+        gate.deactivate { published += "stopped" }
+        assertFalse(gate.isCurrent(mainnetOwner))
+        assertFalse(gate.publishIfCurrent(mainnetOwner) { published += "resurrected-mainnet" })
+        assertEquals(listOf("testnet", "mainnet", "stopped"), published)
+    }
 }

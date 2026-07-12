@@ -249,6 +249,69 @@ internal fun shouldShowDogecoinConfirmingRing(
     }
 }
 
+/** Presentation-only sync distance. Unknown peer height must never masquerade as a real zero-behind tip. */
+internal sealed interface DogecoinSpvBehindLabel {
+    data object Starting : DogecoinSpvBehindLabel
+    data object FindingPeers : DogecoinSpvBehindLabel
+    data class Behind(val blocks: Int) : DogecoinSpvBehindLabel
+}
+
+internal fun dogecoinSpvBehindLabel(
+    bestPeerHeight: Long,
+    chainHeight: Int,
+    running: Boolean
+): DogecoinSpvBehindLabel = when {
+    !running -> DogecoinSpvBehindLabel.Starting
+    bestPeerHeight <= 0L -> DogecoinSpvBehindLabel.FindingPeers
+    else -> DogecoinSpvBehindLabel.Behind(
+        (bestPeerHeight - chainHeight.toLong())
+            .coerceIn(0L, Int.MAX_VALUE.toLong())
+            .toInt()
+    )
+}
+
+/** Sync-ring progress only. Unknown peer height stays visibly at the beginning, never a false 97%. */
+internal fun dogecoinSpvSyncProgress(label: DogecoinSpvBehindLabel): Float = when (label) {
+    DogecoinSpvBehindLabel.Starting,
+    DogecoinSpvBehindLabel.FindingPeers -> 0.04f
+    is DogecoinSpvBehindLabel.Behind -> {
+        val behind = label.blocks.coerceAtLeast(0).toFloat()
+        (1f - behind / (behind + 1500f)).coerceIn(0.04f, 0.97f)
+    }
+}
+
+/** Presentation polling only; this never participates in SPV read/send readiness. */
+internal fun shouldPollDogecoinSpvBalance(
+    effectiveBackend: DogecoinBackend,
+    running: Boolean,
+    synced: Boolean,
+    balanceKnown: Boolean
+): Boolean = effectiveBackend == DogecoinBackend.SPV &&
+    running &&
+    (!balanceKnown || !synced)
+
+/** Process SPV ownership follows the persisted backend, not session-only home-node assist. */
+internal fun dogecoinSpvTargetNetwork(
+    persistedBackend: DogecoinBackend,
+    selectedNetwork: DogecoinNetwork,
+    supported: Boolean
+): DogecoinNetwork? = selectedNetwork.takeIf {
+    persistedBackend == DogecoinBackend.SPV && supported
+}
+
+/**
+ * Fail-closed sheet projection: a fully-synced status for another chain is idle for this sheet. This is
+ * presentation/readiness state only; service snapshots and broadcast independently require activeNetwork match.
+ */
+internal fun dogecoinSpvStatusForSelectedNetwork(
+    processStatus: DogecoinSpvStatus,
+    selectedNetwork: DogecoinNetwork
+): DogecoinSpvStatus = if (processStatus.network == selectedNetwork) {
+    processStatus
+} else {
+    DogecoinSpvStatus(network = selectedNetwork)
+}
+
 internal enum class DogecoinFeePreset(val labelResId: Int) {
     SLOW(R.string.dogecoin_send_fee_preset_slow),
     NORMAL(R.string.dogecoin_send_fee_preset_normal),
@@ -310,6 +373,7 @@ internal const val DOGECOIN_SEND_ITEM_INDEX = 6
 internal const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
 internal const val DOGECOIN_SPV_CORROBORATION_POLLS = 40
 internal const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
+internal const val DOGECOIN_SPV_BALANCE_REFRESH_INTERVAL_MS = 12_000L
 // Focal-ring confirmation fill (presentation-only): how many confirmations the ring shows as "done" (a full
 // gold ring), and the poll budget before a never-confirming tx reverts the ring to the idle balance.
 internal const val DOGECOIN_SPV_CONFIRM_TARGET = 6

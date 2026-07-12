@@ -130,6 +130,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -162,6 +163,16 @@ private data class DogecoinConfirmationObservation(
     val depth: Int
 )
 
+@Composable
+private fun dogecoinSpvBehindText(label: DogecoinSpvBehindLabel): String = when (label) {
+    DogecoinSpvBehindLabel.Starting -> stringResource(R.string.dogecoin_spv_status_starting)
+    DogecoinSpvBehindLabel.FindingPeers -> stringResource(R.string.dogecoin_spv_finding_peers)
+    is DogecoinSpvBehindLabel.Behind -> stringResource(
+        R.string.dogecoin_spv_blocks_behind,
+        label.blocks
+    )
+}
+
 private data class DogecoinWalletBootstrapData(
     val snapshot: DogecoinWalletSnapshot,
     val persistedBackend: DogecoinBackend,
@@ -188,6 +199,10 @@ private val dogecoinWalletBootstrapMutex = Mutex()
 // Sheet-scoped mutexes disappear on dismiss. This process mutex keeps rapid reopen attempts from queuing
 // blocking DogecoinSpvService.start/stop monitor acquisitions on many Dispatchers.IO workers at once.
 private val dogecoinSpvLifecycleMutex = Mutex()
+
+// Process-wide single-flight lane for SPV balance snapshots. A canceled sheet waiting here disappears without
+// queuing another IO worker on bitcoinj's non-cancellable Java monitor; home-node RPC uses a different lane.
+private val dogecoinSpvBalanceSnapshotMutex = Mutex()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -355,7 +370,7 @@ fun DogecoinWalletSheet(
     // Phase 2: the on-device SPV light client (process singleton — shared with the debug console). Read-only;
     // started on demand for "Built-in" and retained across sheet dismissal for fast reopen. See walletReadSource.
     val spvService = remember { DogecoinSpvService.getInstance(context, repository) }
-    val spvStatus by spvService.status.collectAsState()
+    val processSpvStatus by spvService.status.collectAsState()
     val spvDataSource = remember(spvService) { DogecoinSpvDataSource(spvService) }
     // Tor state drives the SPV connection disclosure: with Tor ON the light client routes peers over Tor and
     // never connects clearnet (intent = mode != OFF; ready = bootstrapped + RUNNING). See DogecoinSpvService.
@@ -379,6 +394,10 @@ fun DogecoinWalletSheet(
 
     var snapshot by remember { mutableStateOf(initialSnapshot) }
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
+    // A process-owned SPV instance can legitimately report the prior chain while a rebind is settling. Never let
+    // that old chain's synced/readiness state enter this sheet; the service's activeNetwork checks remain the
+    // independent fail-closed boundary for snapshots and broadcast.
+    val spvStatus = dogecoinSpvStatusForSelectedNetwork(processSpvStatus, selectedNetwork)
     // Phase 2 backend selector: which source serves balance/UTXO reads for the selected network. Default RPC.
     // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
     // Default to "Built-in" (SPV) when no node is configured and SPV is practical, so a no-node user sees
@@ -394,6 +413,11 @@ fun DogecoinWalletSheet(
     var nodeAssist by remember(selectedNetwork) { mutableStateOf(false) }
     val dogecoinBackend =
         if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
+    val spvTargetNetwork = dogecoinSpvTargetNetwork(
+        persistedBackend = persistedBackend,
+        selectedNetwork = selectedNetwork,
+        supported = spvService.isSupported(selectedNetwork)
+    )
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
@@ -935,9 +959,10 @@ fun DogecoinWalletSheet(
             val net = selectedNetwork
             val addr = snapshot.key.address
             val sessionGeneration = walletIoSession.captureGeneration()
+            val routeRevision = rpcConfigRevision
             return coroutineScope.launch {
                 val balance = try {
-                    walletIoSession.serialized { spvDataSource.getBalance(addr, net) }
+                    dogecoinSpvBalanceSnapshotMutex.withLock { spvDataSource.getBalance(addr, net) }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Throwable) {
@@ -947,7 +972,8 @@ fun DogecoinWalletSheet(
                     balance != null &&
                     walletIoSession.isCurrent(sessionGeneration) &&
                     selectedNetwork == net &&
-                    snapshot.key.address == addr
+                    snapshot.key.address == addr &&
+                    rpcConfigRevision == routeRevision
                 ) {
                     walletBalance = balance
                     walletBalanceError = null
@@ -1750,14 +1776,14 @@ fun DogecoinWalletSheet(
     // across sheet dismissal; stop only when the persisted backend/network explicitly moves away from SPV.
     // Keyed on persistedBackend (NOT the assist-effective backend): home-node assist must leave the light
     // client syncing in the background, so enabling assist never stops SPV here.
-    var spvStartAttempt by remember { mutableStateOf(0) }
-    var spvStarting by remember { mutableStateOf(false) }
-    var spvStartFailed by remember { mutableStateOf(false) }
-    LaunchedEffect(persistedBackend, selectedNetwork, spvStartAttempt) {
+    var spvStartAttempt by remember(selectedNetwork) { mutableStateOf(0) }
+    var spvStarting by remember(selectedNetwork) { mutableStateOf(false) }
+    var spvStartFailed by remember(selectedNetwork) { mutableStateOf(false) }
+    LaunchedEffect(spvTargetNetwork, spvStartAttempt) {
         val sessionGeneration = walletIoSession.captureGeneration()
         val startAttempt = spvStartAttempt
-        if (persistedBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
-            if (!nodeAssist) walletBalance = null  // show "syncing" until the light client reads a balance
+        val targetNetwork = spvTargetNetwork
+        if (targetNetwork != null) {
             // Every SPV owner reserves a newer desired generation, even if the service is already running. This
             // cancels an older queued teardown from a rapid RPC→SPV switch before taking the idempotent fast path.
             val startRequest = spvService.reserveStartRequest()
@@ -1769,26 +1795,35 @@ fun DogecoinWalletSheet(
                 // Process SPV lifecycle mutex only — never walletIoSession.serialized.
                 // Home-node status/balance also use the sheet IO session; if SPV start held that lock,
                 // "Use home node" / "Refresh node status" starved behind bitcoinj (often minutes on testnet).
-                val startApplied = dogecoinSpvLifecycleMutex.withLock {
-                    withContext(Dispatchers.IO) {
-                        spvService.startForRequest(selectedNetwork, startRequest)
+                // Applying the already-reserved process owner survives sheet dismissal. Superseded queued starts
+                // still return false at the service generation check, while the latest selected chain cannot be
+                // abandoned behind an older slow start merely because its sheet left composition.
+                val startApplied = withContext(NonCancellable + Dispatchers.IO) {
+                    dogecoinSpvLifecycleMutex.withLock {
+                        spvService.startForRequest(targetNetwork, startRequest)
                     }
                 }
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStartFailed = !startApplied
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStartFailed = true
             } finally {
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStarting = false
             }
         } else {
@@ -1796,10 +1831,10 @@ fun DogecoinWalletSheet(
             spvStartFailed = false
             // Process-owned request survives sheet dismissal. If a slow old start is still finishing, it is
             // stopped afterward; a later SPV start supersedes this request inside the service.
-            spvService.requestStop()
+            spvService.requestStop(statusNetworkAfterStop = selectedNetwork)
         }
     }
-    LaunchedEffect(spvStarting, spvStartAttempt) {
+    LaunchedEffect(spvStarting, spvStartAttempt, selectedNetwork) {
         if (!spvStarting) return@LaunchedEffect
         delay(DOGECOIN_SPV_START_TIMEOUT_MS)
         if (spvStarting) {
@@ -1841,30 +1876,90 @@ fun DogecoinWalletSheet(
         // On revert the SPV reactive-balance effect repopulates (it restarts on the backend flip).
     }
 
-    // Reactively pull the SPV balance/UTXOs as the light client syncs (chainHeight climbs as it finds our
-    // funding txs). RPC/explorer balances are driven by refreshWalletBalance() instead.
-    LaunchedEffect(dogecoinBackend, spvStatus.chainHeight, spvStatus.synced) {
-        if (dogecoinBackend != DogecoinBackend.SPV) return@LaunchedEffect
+    // A stopped or wrong-network SPV service cannot substantiate the prior SPV snapshot. Clear it instead of
+    // presenting an old amount with an idle ring or claiming it was observed through block zero. The next
+    // successful matching start triggers the immediate snapshot loop below.
+    LaunchedEffect(dogecoinBackend, selectedNetwork, spvStatus.running, spvStatus.network) {
+        if (
+            dogecoinBackend == DogecoinBackend.SPV &&
+            (!spvStatus.running || spvStatus.network != selectedNetwork)
+        ) {
+            walletBalance = null
+            walletBalanceError = null
+        }
+    }
+
+    // Snapshot immediately once SPV is running (including an already-running process service on reopen), then
+    // re-pull at a bounded cadence while the balance is unknown OR headers are still syncing. Do not key the
+    // UNSYNCED loop to chainHeight: a stalled height was the original permanent-empty-balance bug, and per-block
+    // cancellation churns the same bitcoinj monitor. The dedicated SPV lane cannot starve home-node RPC.
+    // Once synced, retain the old per-new-block refresh behavior so later inbound/spend activity appears. While
+    // unsynced this key stays zero; the bounded timer owns refreshes and a fast-moving chain cannot churn jobs.
+    val spvSyncedBalanceHeight = if (spvStatus.synced) spvStatus.chainHeight else 0
+    LaunchedEffect(
+        dogecoinBackend,
+        selectedNetwork,
+        snapshot.key.address,
+        spvStatus.running,
+        spvStatus.network,
+        spvStatus.synced,
+        spvSyncedBalanceHeight,
+        rpcConfigRevision
+    ) {
+        if (
+            dogecoinBackend != DogecoinBackend.SPV ||
+            !spvStatus.running ||
+            spvStatus.network != selectedNetwork
+        ) return@LaunchedEffect
+
         val net = selectedNetwork
         val addr = snapshot.key.address
         val sessionGeneration = walletIoSession.captureGeneration()
-        val balance = try {
-            walletIoSession.serialized { spvDataSource.getBalance(addr, net) }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            null
-        }
-        if (
-            balance != null &&
-            walletIoSession.isCurrent(sessionGeneration) &&
-            selectedNetwork == net &&
-            snapshot.key.address == addr
-        ) {
-            walletBalance = balance
-            walletBalanceError = null
-            walletActivity = emptyList()  // SPV has no rich activity history yet
-            walletActivityError = null
+        val routeRevision = rpcConfigRevision
+        while (true) {
+            val beforeSnapshot = spvService.status.value
+            if (
+                !walletIoSession.isCurrent(sessionGeneration) ||
+                rpcConfigRevision != routeRevision ||
+                !beforeSnapshot.running ||
+                beforeSnapshot.network != net
+            ) return@LaunchedEffect
+
+            val balance = try {
+                dogecoinSpvBalanceSnapshotMutex.withLock { spvDataSource.getBalance(addr, net) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+            if (
+                balance != null &&
+                walletIoSession.isCurrent(sessionGeneration) &&
+                selectedNetwork == net &&
+                snapshot.key.address == addr &&
+                rpcConfigRevision == routeRevision
+            ) {
+                // A known zero is still a known balance. It is presentation-only while syncing; unchanged
+                // send/broadcast gates continue to require spvStatus.synced and the existing peer floor.
+                walletBalance = balance
+                walletBalanceError = null
+                walletActivity = emptyList()
+                walletActivityError = null
+            }
+
+            val liveStatus = spvService.status.value
+            if (
+                !walletIoSession.isCurrent(sessionGeneration) ||
+                rpcConfigRevision != routeRevision ||
+                liveStatus.network != net ||
+                !shouldPollDogecoinSpvBalance(
+                    effectiveBackend = dogecoinBackend,
+                    running = liveStatus.running,
+                    synced = liveStatus.synced,
+                    balanceKnown = walletBalance != null
+                )
+            ) return@LaunchedEffect
+            delay(DOGECOIN_SPV_BALANCE_REFRESH_INTERVAL_MS)
         }
     }
 
@@ -1873,12 +1968,12 @@ fun DogecoinWalletSheet(
     // (dMs grows while dHeight is frozen -> rate falls -> ETA rises) instead of freezing an optimistic number;
     // re-anchored on a chain regression (rescan); skipped entirely once essentially caught up. Reads the
     // StateFlow directly so each tick sees the fresh height. Cosmetic — never gates anything.
-    var syncEtaMinutes by remember { mutableStateOf<Int?>(null) }
+    var syncEtaMinutes by remember(selectedNetwork) { mutableStateOf<Int?>(null) }
     LaunchedEffect(dogecoinBackend, selectedNetwork) {
         var anchorHeight = -1
         var anchorTimeMs = 0L
         while (true) {
-            val st = spvService.status.value
+            val st = dogecoinSpvStatusForSelectedNetwork(spvService.status.value, selectedNetwork)
             val isSyncing = dogecoinBackend == DogecoinBackend.SPV && st.running && !st.synced
             if (!isSyncing || st.chainHeight <= 0 || st.blocksBehind <= 0) {
                 anchorHeight = -1
@@ -1910,7 +2005,9 @@ fun DogecoinWalletSheet(
     // Confirmation ring fill (presentation-only): observe the just-sent tx through the effective backend.
     // SPV keeps its existing validated-chain depth; RPC/home-node assist asks the wallet-scoped node for this
     // exact txid. Neither result feeds coin selection, signing, policy checks, or broadcast authorization.
-    var confirmationObservation by remember { mutableStateOf<DogecoinConfirmationObservation?>(null) }
+    var confirmationObservation by remember(selectedNetwork) {
+        mutableStateOf<DogecoinConfirmationObservation?>(null)
+    }
     val confirmingDepth = confirmationObservation
         ?.takeIf { observation -> observation.txid.equals(sentReceipt?.txid, ignoreCase = true) }
         ?.depth
@@ -2022,7 +2119,7 @@ fun DogecoinWalletSheet(
     // Activity / pending list (SPV): poll the READ-ONLY wallet-tx snapshot so the pending cards + full activity
     // list reflect confirmations climbing 0->target. Incoming txs appear here automatically (bloom-matched), so
     // the RECEIVING phone sees an inbound payment confirm without any extra plumbing. Never feeds signing.
-    var spvTxs by remember { mutableStateOf<List<DogecoinSpvTx>>(emptyList()) }
+    var spvTxs by remember(selectedNetwork) { mutableStateOf<List<DogecoinSpvTx>>(emptyList()) }
     LaunchedEffect(dogecoinBackend, selectedNetwork) {
         if (dogecoinBackend != DogecoinBackend.SPV) {
             spvTxs = emptyList()
@@ -2098,7 +2195,7 @@ fun DogecoinWalletSheet(
     val pendingTxRows = txRows.filter { it.confirmations < DOGECOIN_SPV_CONFIRM_TARGET }
     // Tap-to-inspect: which tx's confirmation-detail dialog is open. Keyed by txid (not the row) so the dialog's
     // ring keeps climbing as the 15s poll refreshes the underlying row.
-    var walletTxDetailId by remember { mutableStateOf<String?>(null) }
+    var walletTxDetailId by remember(selectedNetwork) { mutableStateOf<String?>(null) }
 
     // Auto-save every recipient on a successful send (per-network) so it appears in the recipient picker without
     // a manual "Save recipient" tap. Runs only AFTER sentReceipt is set (post-broadcast), isolated in runCatching
@@ -2219,6 +2316,12 @@ fun DogecoinWalletSheet(
                     val spv = dogecoinBackend == DogecoinBackend.SPV
                     val s = spvStatus
                     val colors = dogeWalletColors
+                    val spvBehindLabel = dogecoinSpvBehindLabel(
+                        bestPeerHeight = s.bestPeerHeight,
+                        chainHeight = s.chainHeight,
+                        running = s.running
+                    )
+                    val spvBehindText = dogecoinSpvBehindText(spvBehindLabel)
                     // A pending send fills the ring from the effective route: our validated SPV chain, or the
                     // configured home node while RPC/assist is active. SPV keeps its synced/near-tip presentation
                     // gate; node progress deliberately does not depend on the background SPV sync state.
@@ -2232,11 +2335,10 @@ fun DogecoinWalletSheet(
                     )
                     // Mutually exclusive with confirming: only show Syncing when behind AND not filling the ring.
                     val syncing = spv && s.running && !s.synced && !confirming
-                    val syncProgress = if (syncing) {
-                        val behind = s.blocksBehind.coerceAtLeast(0).toFloat()
-                        (1f - behind / (behind + 1500f)).coerceIn(0.04f, 0.97f)
-                    } else 1f
-                    val bal = walletBalance
+                    val syncProgress = if (syncing) dogecoinSpvSyncProgress(spvBehindLabel) else 1f
+                    val bal = walletBalance?.takeIf {
+                        !spv || (s.running && s.network == selectedNetwork)
+                    }
                     val ringMode = when {
                         confirming -> RingMode.CONFIRMING
                         syncing -> RingMode.SYNCING
@@ -2248,9 +2350,13 @@ fun DogecoinWalletSheet(
                         else -> 1f
                     }
                     val ringDesc = when {
-                        syncing -> "Syncing, ${s.blocksBehind} blocks behind" +
-                            (syncEtaMinutes?.let { ", about $it minutes left" } ?: "")
                         confirming -> "$confDepth of $DOGECOIN_SPV_CONFIRM_TARGET confirmations"
+                        syncing && bal != null -> stringResource(
+                            R.string.dogecoin_spv_balance_syncing_description,
+                            DogecoinAmount.formatKoinu(bal.confirmedKoinu),
+                            spvBehindText
+                        )
+                        syncing -> stringResource(R.string.dogecoin_spv_syncing_description, spvBehindText)
                         else -> bal?.let { "Balance ${DogecoinAmount.formatKoinu(it.confirmedKoinu)} DOGE" }
                             ?: "Balance not loaded"
                     }
@@ -2268,21 +2374,6 @@ fun DogecoinWalletSheet(
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 when {
-                                    syncing -> {
-                                        Text("Syncing", style = MaterialTheme.typography.titleMedium, color = colors.ink)
-                                        Text(
-                                            "${s.blocksBehind} behind",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = colors.muted
-                                        )
-                                        syncEtaMinutes?.let { eta ->
-                                            Text(
-                                                "~$eta min left",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = colors.muted
-                                            )
-                                        }
-                                    }
                                     confirming -> {
                                         Text("Confirming", style = MaterialTheme.typography.titleMedium, color = colors.ink)
                                         Text(
@@ -2316,6 +2407,20 @@ fun DogecoinWalletSheet(
                                             )
                                         }
                                     }
+                                    syncing -> {
+                                        Text(
+                                            stringResource(R.string.dogecoin_spv_syncing_label),
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = colors.ink
+                                        )
+                                        syncEtaMinutes?.let { eta ->
+                                            Text(
+                                                "~$eta min left",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colors.muted
+                                            )
+                                        }
+                                    }
                                     else -> Text("—", style = MaterialTheme.typography.headlineMedium, color = colors.muted)
                                 }
                             }
@@ -2330,6 +2435,29 @@ fun DogecoinWalletSheet(
                             if (s.overTor && torReady) add("Tor on") else if (torIntentOn) add("Tor starting")
                         }.joinToString("   ·   ")
                         Text(strip, style = MaterialTheme.typography.labelMedium, color = colors.muted)
+                        if (spv && syncing) {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_spv_sync_status,
+                                    spvBehindText,
+                                    s.peerCount
+                                ),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.muted,
+                                textAlign = TextAlign.Center
+                            )
+                            if (bal != null) {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_spv_balance_syncing_note,
+                                        s.chainHeight
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.muted,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
                         if (!spv && (refreshing || refreshingBalance)) {
                             Text(
                                 text = stringResource(
@@ -2427,9 +2555,16 @@ fun DogecoinWalletSheet(
                         dogecoinNodeAssistEligible(selectedNetwork, savedEndpointClass)
                     if (nodeAssist || offerVisible) {
                         item(key = "node_assist") {
+                            val spvProgress = dogecoinSpvBehindText(
+                                dogecoinSpvBehindLabel(
+                                    bestPeerHeight = spvStatus.bestPeerHeight,
+                                    chainHeight = spvStatus.chainHeight,
+                                    running = spvStatus.running
+                                )
+                            )
                             NodeAssistCard(
                                 active = nodeAssist,
-                                blocksBehind = spvStatus.blocksBehind,
+                                spvProgress = spvProgress,
                                 notOverTor = torIntentOn,
                                 // Status + balance refresh in LaunchedEffect(nodeAssist) after recomposition;
                                 // refreshing HERE would capture this composition's pre-flip SPV backend.
@@ -2981,12 +3116,25 @@ fun DogecoinWalletSheet(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
                         val s = spvStatus
+                        val progress = dogecoinSpvBehindText(
+                            dogecoinSpvBehindLabel(
+                                bestPeerHeight = s.bestPeerHeight,
+                                chainHeight = s.chainHeight,
+                                running = s.running
+                            )
+                        )
                         val line = when {
-                            !s.running -> "Starting…"
-                            s.peerCount == 0 -> "Connecting to the Dogecoin network…"
-                            s.synced -> "Synced · block ${s.chainHeight} · ${s.peerCount} peer(s)"
-                            s.bestPeerHeight > 0L -> "Syncing… ${s.blocksBehind} blocks behind · ${s.peerCount} peer(s)"
-                            else -> "Syncing… block ${s.chainHeight} · ${s.peerCount} peer(s)"
+                            !s.running -> stringResource(R.string.dogecoin_spv_status_starting)
+                            s.synced -> stringResource(
+                                R.string.dogecoin_spv_status_synced,
+                                s.chainHeight,
+                                s.peerCount
+                            )
+                            else -> stringResource(
+                                R.string.dogecoin_spv_status_syncing,
+                                progress,
+                                s.peerCount
+                            )
                         }
                         Text(
                             text = line,
@@ -2996,7 +3144,14 @@ fun DogecoinWalletSheet(
                         )
                         if (!s.synced) {
                             Text(
-                                text = "Your balance appears as the headers catch up to the tip.",
+                                text = if (walletBalance != null) {
+                                    stringResource(
+                                        R.string.dogecoin_spv_balance_syncing_note,
+                                        s.chainHeight
+                                    )
+                                } else {
+                                    stringResource(R.string.dogecoin_spv_balance_searching)
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
@@ -3028,10 +3183,19 @@ fun DogecoinWalletSheet(
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
-                        val balance = walletBalance
+                        val balance = walletBalance?.takeIf {
+                            dogecoinBackend != DogecoinBackend.SPV ||
+                                (spvStatus.running && spvStatus.network == selectedNetwork)
+                        }
                         if (balance == null) {
                             Text(
-                                text = walletBalanceError ?: stringResource(R.string.dogecoin_balance_not_loaded),
+                                text = walletBalanceError ?: stringResource(
+                                    if (dogecoinBackend == DogecoinBackend.SPV) {
+                                        R.string.dogecoin_spv_balance_searching
+                                    } else {
+                                        R.string.dogecoin_balance_not_loaded
+                                    }
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (walletBalanceError == null) {
                                     MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
@@ -3041,7 +3205,12 @@ fun DogecoinWalletSheet(
                                 lineHeight = 18.sp
                             )
                         } else {
-                            val maxSpendEstimate = if (isValidSelectedFeeRate(sendFeeRate)) {
+                            val provisionalSpvBalance =
+                                dogecoinBackend == DogecoinBackend.SPV && !spvStatus.synced
+                            val maxSpendEstimate = if (
+                                !provisionalSpvBalance &&
+                                isValidSelectedFeeRate(sendFeeRate)
+                            ) {
                                 runCatching {
                                     DogecoinTransactionBuilder.maxSpendable(
                                         wallet = snapshot.key,
@@ -3056,23 +3225,39 @@ fun DogecoinWalletSheet(
                             }
                             Text(
                                 text = stringResource(
-                                    R.string.dogecoin_balance_available,
+                                    if (provisionalSpvBalance) {
+                                        R.string.dogecoin_spv_balance_found_so_far
+                                    } else {
+                                        R.string.dogecoin_balance_available
+                                    },
                                     DogecoinAmount.formatKoinu(balance.confirmedKoinu)
                                 ),
                                 style = MaterialTheme.typography.headlineMedium,
                                 fontFamily = FontFamily.Monospace
                             )
-                            Text(
-                                text = stringResource(
-                                    R.string.dogecoin_balance_details,
-                                    DogecoinAmount.formatKoinu(balance.confirmedKoinu),
-                                    DogecoinAmount.formatKoinu(balance.unconfirmedKoinu),
-                                    balance.utxoCount
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                                lineHeight = 18.sp
-                            )
+                            if (provisionalSpvBalance) {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_spv_balance_syncing_note,
+                                        spvStatus.chainHeight
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                    lineHeight = 18.sp
+                                )
+                            } else {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_balance_details,
+                                        DogecoinAmount.formatKoinu(balance.confirmedKoinu),
+                                        DogecoinAmount.formatKoinu(balance.unconfirmedKoinu),
+                                        balance.utxoCount
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                    lineHeight = 18.sp
+                                )
+                            }
                             // P0-3 provenance: a node-backed balance is node-reported, not independently
                             // verified; an all-zero node read means the node sees nothing for this address
                             // yet (distinct from a read error, which sets walletBalanceError above).
@@ -3111,7 +3296,7 @@ fun DogecoinWalletSheet(
                                     lineHeight = 18.sp
                                 )
                             }
-                            if (balance.utxos.isNotEmpty()) {
+                            if (!provisionalSpvBalance && balance.utxos.isNotEmpty()) {
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                                 Text(
                                     text = if (showUtxoDetails) stringResource(R.string.dogecoin_hide_coins)
@@ -3944,9 +4129,19 @@ fun DogecoinWalletSheet(
                             )
                         }
                         if (dogecoinBackend == DogecoinBackend.SPV && !spvStatus.synced) {
+                            val progress = dogecoinSpvBehindText(
+                                dogecoinSpvBehindLabel(
+                                    bestPeerHeight = spvStatus.bestPeerHeight,
+                                    chainHeight = spvStatus.chainHeight,
+                                    running = spvStatus.running
+                                )
+                            )
                             Text(
-                                text = "Syncing the built-in light client… sending unlocks once it catches up " +
-                                    "(peers ${spvStatus.peerCount}, ${spvStatus.blocksBehind} blocks behind).",
+                                text = stringResource(
+                                    R.string.dogecoin_spv_send_waiting,
+                                    progress,
+                                    spvStatus.peerCount
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
