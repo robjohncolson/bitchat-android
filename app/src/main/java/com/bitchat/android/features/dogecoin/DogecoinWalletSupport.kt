@@ -211,13 +211,32 @@ internal enum class DogecoinRawTransactionExportAction {
  * Broadcast confirmation has its own stricter route-specific gates.
  */
 internal fun canReviewDogecoinSend(
+    network: DogecoinNetwork,
     effectiveBackend: DogecoinBackend,
     spvSynced: Boolean,
     nodeReady: Boolean
-): Boolean = when (effectiveBackend) {
-    DogecoinBackend.SPV -> spvSynced
-    DogecoinBackend.RPC,
-    DogecoinBackend.EXPLORER -> nodeReady
+): Boolean = dogecoinSpendRouteAllowed(network, effectiveBackend) &&
+    when (effectiveBackend) {
+        DogecoinBackend.SPV -> spvSynced
+        DogecoinBackend.RPC,
+        DogecoinBackend.EXPLORER -> nodeReady
+    }
+
+/** Confirm readiness follows the selected route and cannot cross-unlock another backend. */
+internal fun canBroadcastDogecoinSend(
+    transactionNetwork: DogecoinNetwork,
+    selectedNetwork: DogecoinNetwork,
+    effectiveBackend: DogecoinBackend,
+    spvSynced: Boolean,
+    nodeReady: Boolean
+): Boolean {
+    if (transactionNetwork != selectedNetwork) return false
+    if (!dogecoinSpendRouteAllowed(selectedNetwork, effectiveBackend)) return false
+    return when (effectiveBackend) {
+        DogecoinBackend.SPV -> spvSynced
+        DogecoinBackend.RPC,
+        DogecoinBackend.EXPLORER -> nodeReady
+    }
 }
 
 internal enum class DogecoinConfirmationProgressSource {

@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * helper into an attack tool:
  *
  *   1. decode (bounded; PaymentBroadcastRequest.decode caps size before any large allocation)
- *   2. per-network opt-in (mainnet defaults OFF, independently of testnet/regtest)
+ *   2. effective per-network opt-in (mainnet is ineligible until a separately designed safe route exists)
  *   3. network match (only the network this device is configured for)
  *   4. favorites-only (default on)
  *   5. dedup / replay (idempotent resend of a cached terminal result; drop if still in-flight)
@@ -52,7 +52,8 @@ class BroadcastHelperService private constructor(appContext: Context) {
     private val lock = Any()
 
     /** True if this device currently advertises itself as a helper for [network] (UI uses this for capability TLV). */
-    fun isHelperEnabled(network: DogecoinNetwork): Boolean = repository.loadHelperEnabled(network)
+    fun isHelperEnabled(network: DogecoinNetwork): Boolean =
+        dogecoinGenericRpcSpendAllowed(network) && repository.loadHelperEnabled(network)
 
     /**
      * Handle an inbound PAYMENT_BROADCAST_REQUEST. Returns the encoded [PaymentBroadcastResult] bytes to
@@ -79,7 +80,11 @@ class BroadcastHelperService private constructor(appContext: Context) {
         val network = DogecoinNetwork.values().firstOrNull { it.id == request.networkId }
 
         // 2. Per-network opt-in gate.
-        if (network == null || !repository.loadHelperEnabled(network)) {
+        if (
+            network == null ||
+            !dogecoinGenericRpcSpendAllowed(network) ||
+            !repository.loadHelperEnabled(network)
+        ) {
             return decline(request, "Helper is not enabled for ${request.networkId}.")
         }
         // 3. Network match.
@@ -136,6 +141,13 @@ class BroadcastHelperService private constructor(appContext: Context) {
     }
 
     private suspend fun broadcast(request: PaymentBroadcastRequest, network: DogecoinNetwork): PaymentBroadcastResult {
+        if (!dogecoinGenericRpcSpendAllowed(network)) {
+            return reject(
+                request,
+                PaymentBroadcastRejectCode.OTHER,
+                "Peer helping is unavailable on mainnet."
+            )
+        }
         // 7. Structural re-validation (hex-decode + shape) — the expensive step, now behind the gates.
         val normalizedHex = try {
             DogecoinRawTxValidator.normalize(request.rawTransactionHex)

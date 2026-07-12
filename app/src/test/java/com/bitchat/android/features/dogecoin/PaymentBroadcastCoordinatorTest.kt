@@ -296,6 +296,30 @@ class PaymentBroadcastCoordinatorTest {
     }
 
     @Test
+    fun `generic mainnet peer broadcast fails before bytes reach helper discovery`() =
+        runTest(UnconfinedTestDispatcher()) {
+            var listedCandidates = false
+            var dispatched = false
+            val coordinator = PaymentBroadcastCoordinator(
+                listCandidateHelpers = {
+                    listedCandidates = true
+                    listOf("A")
+                },
+                sendRequestToPeer = { _, _ ->
+                    dispatched = true
+                    true
+                }
+            )
+
+            val outcome = coordinator.broadcast(rawHex, txid, DogecoinNetwork.MAINNET)
+
+            assertTrue(outcome is PaymentBroadcastCoordinator.Outcome.Failed)
+            assertTrue((outcome as PaymentBroadcastCoordinator.Outcome.Failed).reason.contains("unavailable on mainnet"))
+            assertTrue("mainnet helper discovery must not run", !listedCandidates)
+            assertTrue("signed bytes must not be dispatched", !dispatched)
+        }
+
+    @Test
     fun `when no request can be dispatched it reports no reachable peer`() = runTest(UnconfinedTestDispatcher()) {
         val coordinator = coordinatorWith(listOf("A")) { _, _, _ -> false } // routing fails, never dispatched
         val outcome = coordinator.broadcast(rawHex, txid, network)

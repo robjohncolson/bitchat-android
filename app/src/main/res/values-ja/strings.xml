@@ -764,6 +764,8 @@
   <string name="dogecoin_send_rescan_already_imported_hint">このアドレスはすでに Dogecoin Core 1.14 にインポートされています。送信の確認と「最大額を使用」は、このウォレットに見える UTXO のみ使用できます。古い資金を復元するには、新しい剪定なし Core か、新しいウォレットでの再スキャンを使用してください。</string>
   <string name="dogecoin_send_rescan_before_spend_hint">この Dogecoin Core 1.14 ノードでは、送信の確認と「最大額を使用」は、履歴スキャンなしでこのアドレスをウォッチオンリーでインポートします。このアドレスに古い資金がある可能性がある場合は、送信の前に再スキャンを実行してください。</string>
   <string name="dogecoin_send_review">送信を確認</string>
+  <string name="dogecoin_mainnet_rpc_spend_requires_tpn">メインネットでは「マイノード」は読み取り専用です。送金には Trusted personal node プロファイルと有効なセッションが必要です。現時点で送金するには「内蔵」を選んでください。</string>
+  <string name="dogecoin_mainnet_rpc_helper_unavailable">メインネットではピア向けヘルパーを利用できません。Trusted personal node のトランザクションがヘルパー経由で中継されることはありません。</string>
   <string name="dogecoin_send_review_expired">署名済みトランザクションの確認が期限切れになりました。ブロードキャストの前に、残高を更新し、送信を再確認してください。</string>
   <string name="dogecoin_send_title">DOGE を送信</string>
   <string name="dogecoin_send_use_max">最大額を使用</string>

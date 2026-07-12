@@ -90,6 +90,9 @@ class PaymentBroadcastCoordinator(
      * time is bounded by [MAX_ATTEMPTS] * [ATTEMPT_TIMEOUT_MS] (90s), well under the 10-minute window.
      */
     suspend fun broadcast(rawTransactionHex: String, expectedTxid: String, network: DogecoinNetwork): Outcome = coroutineScope {
+        if (!dogecoinGenericRpcSpendAllowed(network)) {
+            return@coroutineScope Outcome.Failed("Peer helping is unavailable on mainnet.")
+        }
         val uuid = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val request = PaymentBroadcastRequest(uuid, network.id, rawTransactionHex, expectedTxid)
         val payload = request.encode() ?: return@coroutineScope Outcome.Failed("Could not encode the broadcast request.")
