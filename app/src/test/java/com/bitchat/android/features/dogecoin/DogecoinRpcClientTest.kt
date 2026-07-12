@@ -108,13 +108,13 @@ class DogecoinRpcClientTest {
     ).joinToString("")
 
     @Test
-    fun `blockchain status reports ready mainnet node`() = runTest {
+    fun `blockchain status clamps Core progress overshoot and reports ready mainnet node`() = runTest {
         val methods = mutableListOf<String>()
         val client = DogecoinRpcClient(
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":1.0}"""
+                        """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":1.000000079}"""
                     )
                     "getwalletinfo" -> rpcResponse("""{"walletname":"main-wallet"}""")
                     "getnetworkinfo" -> rpcResponse(
@@ -153,6 +153,7 @@ class DogecoinRpcClientTest {
         assertEquals(null, status.rescanBlockchainError)
         assertEquals(5_000_000, status.blocks)
         assertEquals(5_000_000, status.headers)
+        assertEquals(1.0, status.verificationProgress)
     }
 
     @Test
@@ -234,13 +235,13 @@ class DogecoinRpcClientTest {
     }
 
     @Test
-    fun `blockchain status keeps syncing mainnet node unavailable for wallet actions`() = runTest {
+    fun `blockchain status preserves ordinary progress while keeping IBD unavailable`() = runTest {
         val methods = mutableListOf<String>()
         val client = DogecoinRpcClient(
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","blocks":4990000,"headers":5000000,"initialblockdownload":true,"verificationprogress":0.99}"""
+                        """{"chain":"main","blocks":4990000,"headers":5000000,"initialblockdownload":true,"verificationprogress":0.5}"""
                     )
                     else -> error("Unexpected RPC method $method")
                 }
@@ -260,6 +261,7 @@ class DogecoinRpcClientTest {
         assertEquals(true, status.initialBlockDownload)
         assertEquals(4_990_000, status.blocks)
         assertEquals(5_000_000, status.headers)
+        assertEquals(0.5, status.verificationProgress)
     }
 
     @Test
@@ -356,6 +358,32 @@ class DogecoinRpcClientTest {
         assertEquals(listOf("getblockchaininfo"), methods)
         assertFalse(status.connected)
         assertTrue(status.error.orEmpty().contains("invalid verificationprogress"))
+    }
+
+    @Test
+    fun `blockchain status rejects implausible or non-finite verification progress`() = runTest {
+        listOf("-0.01", "2.000001", "1e999").forEach { rawProgress ->
+            val methods = mutableListOf<String>()
+            val client = DogecoinRpcClient(
+                httpClient = stubRpcClient(methods) { method ->
+                    when (method) {
+                        "getblockchaininfo" -> rpcResponse(
+                            """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":$rawProgress}"""
+                        )
+                        else -> error("Unexpected RPC method $method")
+                    }
+                }
+            )
+
+            val status = client.getBlockchainStatus(
+                config = DogecoinRpcConfig(url = "http://dogecoin.local"),
+                network = DogecoinNetwork.MAINNET
+            )
+
+            assertEquals(listOf("getblockchaininfo"), methods)
+            assertFalse("progress=$rawProgress must fail status parsing", status.connected)
+            assertTrue(status.error.orEmpty().contains("verificationprogress"))
+        }
     }
 
     @Test

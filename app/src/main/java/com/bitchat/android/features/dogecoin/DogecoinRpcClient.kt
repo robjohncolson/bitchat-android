@@ -168,7 +168,8 @@ class DogecoinRpcClient(
             require(blocks == null || headers == null || headers >= blocks) {
                 "RPC getblockchaininfo returned headers below the current block height."
             }
-            val verificationProgress = parseOptionalFraction(result, "verificationprogress", "getblockchaininfo")
+            val verificationProgress =
+                parseOptionalProgressFraction(result, "verificationprogress", "getblockchaininfo")
             val pruned = parseOptionalBoolean(result, "pruned", "getblockchaininfo")
             val walletStatus = if (chain == network.chainName && initialBlockDownload != true) {
                 getWalletInfoStatus(rpcConfig)
@@ -1100,7 +1101,16 @@ class DogecoinRpcClient(
         return parsed
     }
 
-    private fun parseOptionalFraction(result: JsonObject, fieldName: String, method: String): Double? {
+    /**
+     * Parses a display-only progress fraction. Dogecoin Core 1.14 can report a tiny floating-point
+     * overshoot above 1.0 at tip, so plausible finite values are clamped for storage/display. This helper
+     * must not be reused for monetary amounts, which stay on the exact decimal-to-koinu path.
+     */
+    private fun parseOptionalProgressFraction(
+        result: JsonObject,
+        fieldName: String,
+        method: String
+    ): Double? {
         val value = result.get(fieldName)?.takeUnless { it.isJsonNull } ?: return null
         val primitive = value.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
         require(primitive?.isNumber == true) {
@@ -1108,10 +1118,13 @@ class DogecoinRpcClient(
         }
         val parsed = runCatching { primitive.asDouble }.getOrNull()
             ?: throw IllegalArgumentException("RPC $method returned an invalid $fieldName.")
-        require(!parsed.isNaN() && !parsed.isInfinite() && parsed in 0.0..1.0) {
+        require(parsed.isFinite()) {
+            "RPC $method returned a non-finite $fieldName."
+        }
+        require(parsed in 0.0..2.0) {
             "RPC $method returned an out-of-range $fieldName."
         }
-        return parsed
+        return parsed.coerceIn(0.0, 1.0)
     }
 
     private fun parseOptionalBoolean(result: JsonObject, fieldName: String, method: String): Boolean? {
