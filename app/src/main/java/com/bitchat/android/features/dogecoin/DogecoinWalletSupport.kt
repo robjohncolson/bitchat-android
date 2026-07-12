@@ -309,13 +309,21 @@ internal fun shouldPollDogecoinSpvBalance(
     running &&
     (!balanceKnown || !synced)
 
-/** Process SPV ownership follows the persisted backend, not session-only home-node assist. */
+/**
+ * Process SPV ownership follows the persisted backend. A mainnet TPN read session is the one additional
+ * owner: it must keep Built-in syncing without changing the persisted/effective spend backend.
+ */
 internal fun dogecoinSpvTargetNetwork(
     persistedBackend: DogecoinBackend,
     selectedNetwork: DogecoinNetwork,
-    supported: Boolean
+    supported: Boolean,
+    trustedPersonalNodeReadSession: Boolean = false
 ): DogecoinNetwork? = selectedNetwork.takeIf {
-    persistedBackend == DogecoinBackend.SPV && supported
+    supported &&
+        (
+            persistedBackend == DogecoinBackend.SPV ||
+                (trustedPersonalNodeReadSession && selectedNetwork == DogecoinNetwork.MAINNET)
+            )
 }
 
 /**

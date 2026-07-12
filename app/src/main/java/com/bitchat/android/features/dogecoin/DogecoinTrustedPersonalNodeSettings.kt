@@ -1,5 +1,6 @@
 package com.bitchat.android.features.dogecoin
 
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,18 +36,20 @@ import androidx.compose.ui.unit.sp
 import com.bitchat.android.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * DES-1-A's mainnet trust ceremony only. This surface owns a separate draft and authorization store;
- * it never writes generic RPC settings, changes the selected backend, activates a session, reads a
- * balance, signs, or broadcasts.
+ * DES-1-A/B mainnet trust ceremony and explicit process-only read session. This surface owns a separate
+ * draft/authorization and a display-only node snapshot; it never writes generic RPC settings, changes the
+ * selected backend, exposes signer inputs, signs, or broadcasts.
  */
 @Composable
 internal fun DogecoinTrustedPersonalNodeSettings(
     androidMainnetAddress: String,
+    onSessionUseChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -70,6 +73,7 @@ internal fun DogecoinTrustedPersonalNodeSettings(
     var requestedWalletId by remember(androidMainnetAddress) { mutableStateOf("") }
     var draftRevision by remember(androidMainnetAddress) { mutableLongStateOf(0L) }
     val probeGeneration = remember(androidMainnetAddress) { AtomicLong(0L) }
+    val readGeneration = remember(androidMainnetAddress) { AtomicLong(0L) }
 
     var probeClient by remember(androidMainnetAddress) { mutableStateOf(DogecoinRpcClient()) }
     var activeToken by remember(androidMainnetAddress) {
@@ -79,8 +83,16 @@ internal fun DogecoinTrustedPersonalNodeSettings(
         mutableStateOf<DogecoinTrustedPersonalNodeProvisioningResult?>(null)
     }
     var probeError by remember(androidMainnetAddress) { mutableStateOf<String?>(null) }
+    var readError by remember(androidMainnetAddress) { mutableStateOf<String?>(null) }
     var provisioning by remember(androidMainnetAddress) { mutableStateOf(false) }
     var authorizing by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var activeReadToken by remember(androidMainnetAddress) {
+        mutableStateOf<DogecoinTrustedPersonalNodeActivationToken?>(null)
+    }
+    var sessionWarningAcknowledged by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var nowMonotonicMillis by remember(androidMainnetAddress) {
+        mutableLongStateOf(SystemClock.elapsedRealtime())
+    }
     var showRevokeConfirmation by remember(androidMainnetAddress) { mutableStateOf(false) }
 
     var controlsLaptop by remember(androidMainnetAddress) { mutableStateOf(false) }
@@ -99,16 +111,34 @@ internal fun DogecoinTrustedPersonalNodeSettings(
         loadedState
     }
     val sessionHolder = remember(storeLoaded, holderInitialState, loadedProfile, androidMainnetAddress) {
-        DogecoinTrustedPersonalNodeSessionHolder(
-            savedState = holderInitialState,
-            savedProfile = loadedProfile?.takeIf { it.androidAddress == androidMainnetAddress }
-        )
+        if (!storeLoaded) {
+            // Do not project the temporary pre-load UNAUTHORIZED value into the process registry: on a
+            // sheet reopen that would erase a valid process-only active session before encrypted prefs load.
+            DogecoinTrustedPersonalNodeProcessSessionRegistry.current()
+        } else {
+            DogecoinTrustedPersonalNodeProcessSessionRegistry.bindPersistedAuthorization(
+                savedState = holderInitialState,
+                savedProfile = loadedProfile?.takeIf { it.androidAddress == androidMainnetAddress },
+                selectedNetwork = DogecoinNetwork.MAINNET,
+                androidAddress = androidMainnetAddress
+            )
+        }
     }
     // Holder state is plain process memory; this epoch makes its deliberate transitions observable by Compose.
     var holderEpoch by remember(androidMainnetAddress) { mutableIntStateOf(0) }
     @Suppress("UNUSED_VARIABLE") val observedHolderEpoch = holderEpoch
     val authorizationState = sessionHolder.state
     val authorizedProfile = sessionHolder.profile
+    val timedDisplaySnapshot = sessionHolder.displaySnapshot
+    val freshTimedDisplaySnapshot = timedDisplaySnapshot?.takeIf { candidate ->
+        authorizedProfile != null && isDogecoinTrustedPersonalNodeTimedSnapshotFresh(
+            authorizedProfile,
+            candidate,
+            nowMonotonicMillis
+        )
+    }
+    val displaySnapshotFresh = freshTimedDisplaySnapshot != null
+    val processSessionUsesNode = dogecoinTrustedPersonalNodeSessionUsesNode(authorizationState)
 
     LaunchedEffect(store, androidMainnetAddress) {
         val loaded = try {
@@ -146,8 +176,28 @@ internal fun DogecoinTrustedPersonalNodeSettings(
     DisposableEffect(probeClient, sessionHolder) {
         onDispose {
             probeGeneration.incrementAndGet()
+            readGeneration.incrementAndGet()
             probeClient.cancelActiveRequests()
+            activeReadToken?.let(sessionHolder::cancelActivation)
             sessionHolder.cancelProvisioning()
+        }
+    }
+
+    LaunchedEffect(processSessionUsesNode) {
+        onSessionUseChanged(processSessionUsesNode)
+    }
+
+    // Display age and expiry use only the phone's monotonic clock. This loop performs no network or disk I/O.
+    LaunchedEffect(authorizationState, timedDisplaySnapshot?.capturedAtMonotonicMillis) {
+        while (sessionHolder.displaySnapshot != null) {
+            val now = SystemClock.elapsedRealtime()
+            nowMonotonicMillis = now
+            val before = sessionHolder.state
+            sessionHolder.refreshFreshness(now)
+            if (sessionHolder.state != before) {
+                holderEpoch += 1
+            }
+            delay(1_000L)
         }
     }
 
@@ -316,6 +366,100 @@ internal fun DogecoinTrustedPersonalNodeSettings(
         }
     }
 
+    fun runTrustedPersonalNodeRead() {
+        if (provisioning || authorizing || activeReadToken != null) return
+        val capturedProfile = sessionHolder.profile ?: return
+        val startedAt = SystemClock.elapsedRealtime()
+        val token = when (sessionHolder.state) {
+            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE ->
+                sessionHolder.beginActivation(startedAt)
+            DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ->
+                sessionHolder.refreshActiveReadSnapshot(startedAt)
+            DogecoinTrustedPersonalNodeState.DEGRADED ->
+                sessionHolder.retryDegradedActivation(startedAt)
+            else -> null
+        } ?: return
+
+        val capturedGeneration = readGeneration.incrementAndGet()
+        val capturedClient = probeClient.guardedBy {
+            check(readGeneration.get() == capturedGeneration) {
+                context.getString(R.string.dogecoin_tpn_probe_stale)
+            }
+            check(sessionHolder.isActivationCurrent(token)) {
+                context.getString(R.string.dogecoin_tpn_probe_stale)
+            }
+        }
+        activeReadToken = token
+        readError = null
+        nowMonotonicMillis = startedAt
+        holderEpoch += 1
+
+        scope.launch {
+            val outcome = try {
+                val storedCredentials = withContext(Dispatchers.IO) {
+                    store.loadCredentials(capturedProfile)
+                } ?: throw DogecoinTrustedPersonalNodeCredentialsUnavailableException(
+                    context.getString(R.string.dogecoin_tpn_credentials_unavailable)
+                )
+                Result.success(
+                    capturedClient.readTrustedPersonalNodeDisplaySnapshot(
+                        profile = capturedProfile,
+                        credentials = storedCredentials
+                    )
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Result.failure(error)
+            }
+
+            if (
+                readGeneration.get() != capturedGeneration ||
+                activeReadToken != token ||
+                sessionHolder.profile != capturedProfile ||
+                !sessionHolder.isActivationCurrent(token)
+            ) {
+                sessionHolder.cancelActivation(token)
+                holderEpoch += 1
+                return@launch
+            }
+
+            activeReadToken = null
+            nowMonotonicMillis = SystemClock.elapsedRealtime()
+            outcome.fold(
+                onSuccess = { snapshot ->
+                    if (!sessionHolder.recordSuccessfulReadSnapshot(token, snapshot, nowMonotonicMillis)) {
+                        readError = context.getString(R.string.dogecoin_tpn_snapshot_expired)
+                    }
+                },
+                onFailure = { error ->
+                    if (
+                        error.isDogecoinRpcAuthenticationFailure() ||
+                        error is DogecoinTrustedPersonalNodeCredentialsUnavailableException
+                    ) {
+                        sessionHolder.recordAuthenticationRequired(token)
+                    } else {
+                        sessionHolder.recordTransientFailure(token)
+                    }
+                    readError = error.message ?: error.javaClass.simpleName
+                }
+            )
+            holderEpoch += 1
+        }
+    }
+
+    fun stopTrustedPersonalNodeRead() {
+        readGeneration.incrementAndGet()
+        activeReadToken?.let(sessionHolder::cancelActivation)
+        activeReadToken = null
+        probeClient.cancelActiveRequests()
+        probeClient = DogecoinRpcClient()
+        sessionHolder.deactivate()
+        sessionWarningAcknowledged = false
+        readError = null
+        holderEpoch += 1
+    }
+
     WalletCard {
         Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
@@ -340,13 +484,10 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                         Text(stringResource(R.string.dogecoin_tpn_loading))
                     }
                 }
-                authorizationState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE &&
-                    authorizedProfile != null -> {
-                    Text(
-                        text = stringResource(R.string.dogecoin_tpn_authorized_inactive),
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                authorizedProfile != null &&
+                    authorizationState != DogecoinTrustedPersonalNodeState.UNAUTHORIZED &&
+                    authorizationState != DogecoinTrustedPersonalNodeState.REVOKED &&
+                    authorizationState != DogecoinTrustedPersonalNodeState.PROVISIONING -> {
                     SelectionContainer {
                         Text(
                             text = stringResource(
@@ -364,15 +505,142 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                             lineHeight = 18.sp
                         )
                     }
-                    Text(
-                        text = stringResource(R.string.dogecoin_tpn_inactive_notice),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        lineHeight = 18.sp
-                    )
+
+                    when (authorizationState) {
+                        DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE -> {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_authorized_inactive),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_inactive_notice),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                lineHeight = 18.sp
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_session_warning),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                            TpnConfirmationRow(
+                                checked = sessionWarningAcknowledged,
+                                onCheckedChange = { sessionWarningAcknowledged = it },
+                                text = stringResource(R.string.dogecoin_tpn_session_acknowledge),
+                                enabled = activeReadToken == null
+                            )
+                            Button(
+                                onClick = { runTrustedPersonalNodeRead() },
+                                enabled = sessionWarningAcknowledged && activeReadToken == null,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(stringResource(R.string.dogecoin_tpn_use_action))
+                            }
+                        }
+                        DogecoinTrustedPersonalNodeState.CHECKING -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text(stringResource(R.string.dogecoin_tpn_checking))
+                            }
+                        }
+                        DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED -> {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_active_read_only),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        DogecoinTrustedPersonalNodeState.DEGRADED -> {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_degraded),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                            if (displaySnapshotFresh) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_tpn_degraded_cached),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                    lineHeight = 18.sp
+                                )
+                            }
+                        }
+                        DogecoinTrustedPersonalNodeState.AUTH_REQUIRED -> {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_auth_required),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        else -> Unit
+                    }
+
+                    readError?.let { error ->
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_read_failed, error),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                    }
+
+                    if (
+                        freshTimedDisplaySnapshot != null &&
+                        authorizationState != DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+                    ) {
+                        TpnReadOnlySnapshot(
+                            snapshot = freshTimedDisplaySnapshot,
+                            ageSeconds = (
+                                (nowMonotonicMillis - freshTimedDisplaySnapshot.capturedAtMonotonicMillis)
+                                    .coerceAtLeast(0L) / 1_000L
+                                )
+                        )
+                    } else if (
+                        timedDisplaySnapshot != null &&
+                        authorizationState != DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+                    ) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_snapshot_expired),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                    }
+
+                    if (
+                        authorizationState == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+                        authorizationState == DogecoinTrustedPersonalNodeState.DEGRADED
+                    ) {
+                        OutlinedButton(
+                            onClick = { runTrustedPersonalNodeRead() },
+                            enabled = activeReadToken == null,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.dogecoin_tpn_refresh_action))
+                        }
+                    }
+                    if (
+                        authorizationState == DogecoinTrustedPersonalNodeState.CHECKING ||
+                        authorizationState == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+                        authorizationState == DogecoinTrustedPersonalNodeState.DEGRADED
+                    ) {
+                        OutlinedButton(
+                            onClick = { stopTrustedPersonalNodeRead() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.dogecoin_tpn_stop_action))
+                        }
+                    }
                     OutlinedButton(
                         onClick = { showRevokeConfirmation = true },
-                        enabled = !authorizing,
+                        enabled = !authorizing && activeReadToken == null,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(stringResource(R.string.dogecoin_tpn_revoke_action))
@@ -615,6 +883,11 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                     onClick = {
                         showRevokeConfirmation = false
                         storeError = null
+                        readGeneration.incrementAndGet()
+                        activeReadToken?.let(sessionHolder::cancelActivation)
+                        activeReadToken = null
+                        probeClient.cancelActiveRequests()
+                        probeClient = DogecoinRpcClient()
                         authorizing = true
                         scope.launch {
                             val revoked = try {
@@ -630,6 +903,8 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                                 loadedState = DogecoinTrustedPersonalNodeState.REVOKED
                                 loadedProfile = null
                                 password = ""
+                                readError = null
+                                sessionWarningAcknowledged = false
                                 holderEpoch += 1
                             } else if (storeError == null) {
                                 storeError = context.getString(R.string.dogecoin_tpn_revoke_failed)
@@ -648,6 +923,107 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun TpnReadOnlySnapshot(
+    snapshot: DogecoinTrustedPersonalNodeTimedDisplaySnapshot,
+    ageSeconds: Long
+) {
+    val node = snapshot.nodeSnapshot
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SelectionContainer {
+            Text(
+                text = stringResource(
+                    R.string.dogecoin_tpn_provenance,
+                    node.origin,
+                    ageSeconds
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.tertiary,
+                lineHeight = 18.sp
+            )
+        }
+        Text(
+            text = stringResource(
+                R.string.dogecoin_tpn_readiness_summary,
+                node.blocks,
+                node.headers,
+                node.peerCount
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+        )
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_balance_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Text(
+            text = stringResource(
+                R.string.dogecoin_tpn_balance_summary,
+                DogecoinAmount.formatKoinu(node.balance.confirmedKoinu),
+                DogecoinAmount.formatKoinu(node.balance.unconfirmedKoinu),
+                node.balance.utxoCount
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            lineHeight = 18.sp
+        )
+        if (node.balance.totalKoinu == 0L) {
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_balance_zero_notice),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary,
+                lineHeight = 18.sp
+            )
+        }
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_activity_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        if (node.activity.isEmpty()) {
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_activity_empty),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                lineHeight = 18.sp
+            )
+        } else {
+            node.activity.take(TPN_ACTIVITY_PREVIEW_LIMIT).forEach { item ->
+                SelectionContainer {
+                    Text(
+                        text = stringResource(
+                            R.string.dogecoin_tpn_activity_row,
+                            item.category,
+                            formatSignedDogecoin(item.amountKoinu),
+                            shortDogecoinTxid(item.txid),
+                            item.confirmations,
+                            formatDogecoinActivityTime(
+                                item.timeSeconds,
+                                stringResource(R.string.unknown)
+                            )
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+            val hiddenCount = node.activity.size - TPN_ACTIVITY_PREVIEW_LIMIT
+            if (hiddenCount > 0) {
+                Text(
+                    text = stringResource(R.string.dogecoin_activity_more, hiddenCount),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    lineHeight = 18.sp
+                )
+            }
+        }
     }
 }
 
@@ -677,3 +1053,8 @@ private fun TpnConfirmationRow(
         )
     }
 }
+
+private const val TPN_ACTIVITY_PREVIEW_LIMIT = 5
+
+private class DogecoinTrustedPersonalNodeCredentialsUnavailableException(message: String) :
+    IllegalStateException(message)

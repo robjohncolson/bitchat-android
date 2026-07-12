@@ -6,6 +6,10 @@ internal enum class DogecoinTrustedPersonalNodeState {
     UNAUTHORIZED,
     PROVISIONING,
     AUTHORIZED_INACTIVE,
+    CHECKING,
+    ACTIVE_UNVERIFIED,
+    DEGRADED,
+    AUTH_REQUIRED,
     REVOKED
 }
 

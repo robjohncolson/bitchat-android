@@ -6,9 +6,9 @@ internal data class DogecoinTrustedPersonalNodeProvisioningToken(
 )
 
 /**
- * Process-memory-only trust-ceremony state. It deliberately has no ACTIVE state in DES-1-A: a saved
- * profile always reconstructs as [DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE], and cannot
- * unlock reads or spending. Provisioning tokens are one-shot and bound to the current draft revision.
+ * Process-memory-only trust-ceremony and read-session state. A saved profile always reconstructs as
+ * [DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE]; activation, readiness, and display snapshots
+ * are never durable and this holder intentionally exposes no signing or broadcast authority.
  */
 internal class DogecoinTrustedPersonalNodeSessionHolder(
     savedState: DogecoinTrustedPersonalNodeState = DogecoinTrustedPersonalNodeState.UNAUTHORIZED,
@@ -32,12 +32,28 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     private var provisioningResult: DogecoinTrustedPersonalNodeProvisioningResult? = null
     private var issuedCandidate: DogecoinTrustedPersonalNodeProfileCandidate? = null
 
+    private var nextActivationNonce = 1L
+    private var activationToken: DogecoinTrustedPersonalNodeActivationToken? = null
+    private var stateBeforeChecking = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+
+    var displaySnapshot: DogecoinTrustedPersonalNodeTimedDisplaySnapshot? = null
+        private set
+
     @Synchronized
     fun beginProvisioning(draftRevision: Long): DogecoinTrustedPersonalNodeProvisioningToken {
         require(draftRevision >= 0L) { "Draft revision must be non-negative." }
         if (state != DogecoinTrustedPersonalNodeState.PROVISIONING) {
-            inactiveStateBeforeProvisioning = state
+            inactiveStateBeforeProvisioning = when (state) {
+                DogecoinTrustedPersonalNodeState.REVOKED -> DogecoinTrustedPersonalNodeState.REVOKED
+                DogecoinTrustedPersonalNodeState.AUTH_REQUIRED -> DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+                else -> if (profile != null) {
+                    DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+                } else {
+                    DogecoinTrustedPersonalNodeState.UNAUTHORIZED
+                }
+            }
         }
+        clearReadSession()
         clearTransientProvisioning()
         val token = DogecoinTrustedPersonalNodeProvisioningToken(
             nonce = nextNonce,
@@ -127,8 +143,163 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
 
     @Synchronized
     fun cancelProvisioning() {
+        if (state != DogecoinTrustedPersonalNodeState.PROVISIONING) return
         clearTransientProvisioning()
         state = inactiveFallbackState()
+    }
+
+    /** Starts a fresh readiness check only after an explicit tap on a valid durable authorization. */
+    @Synchronized
+    fun beginActivation(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeActivationToken? {
+        val boundProfile = profile?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile) ?: return null
+        if (state != DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE || nowMonotonicMillis < 0L) {
+            return null
+        }
+        return beginActivationInternal(
+            boundProfile,
+            nowMonotonicMillis,
+            keepDisplaySnapshot = false,
+            previousState = state
+        )
+    }
+
+    /** DEGRADED never auto-recovers; a new readiness check requires another explicit operator action. */
+    @Synchronized
+    fun retryDegradedActivation(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeActivationToken? {
+        val boundProfile = profile?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile) ?: return null
+        if (state != DogecoinTrustedPersonalNodeState.DEGRADED || nowMonotonicMillis < 0L) return null
+        return beginActivationInternal(
+            boundProfile,
+            nowMonotonicMillis,
+            keepDisplaySnapshot = true,
+            previousState = state
+        )
+    }
+
+    /** Refresh is explicit and re-runs the complete readiness/read workflow; old data becomes stale meanwhile. */
+    @Synchronized
+    fun refreshActiveReadSnapshot(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeActivationToken? {
+        val boundProfile = profile?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile) ?: return null
+        if (state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED || nowMonotonicMillis < 0L) return null
+        return beginActivationInternal(
+            boundProfile,
+            nowMonotonicMillis,
+            keepDisplaySnapshot = true,
+            previousState = state
+        )
+    }
+
+    /** Dismiss/cancellation resolves CHECKING synchronously instead of leaving an immortal spinner. */
+    @Synchronized
+    fun cancelActivation(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
+        if (state != DogecoinTrustedPersonalNodeState.CHECKING || !matchesActiveToken(token)) return false
+        activationToken = null
+        state = if (stateBeforeChecking == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE) {
+            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+        } else {
+            DogecoinTrustedPersonalNodeState.DEGRADED
+        }
+        return true
+    }
+
+    /** Synchronous lease check used before every RPC in a multi-call activation workflow. */
+    @Synchronized
+    fun isActivationCurrent(token: DogecoinTrustedPersonalNodeActivationToken): Boolean =
+        state == DogecoinTrustedPersonalNodeState.CHECKING && matchesActiveToken(token)
+
+    /**
+     * Atomically accepts the fixed readiness+read result. Freshness starts at the explicit activation tap,
+     * not RPC completion, so a slow multi-call workflow cannot mint a newly fresh two-minute window.
+     */
+    @Synchronized
+    fun recordSuccessfulReadSnapshot(
+        token: DogecoinTrustedPersonalNodeActivationToken,
+        result: DogecoinTrustedPersonalNodeDisplaySnapshot,
+        nowMonotonicMillis: Long
+    ): Boolean {
+        val boundProfile = profile ?: return false
+        if (state != DogecoinTrustedPersonalNodeState.CHECKING || !matchesActiveToken(token)) return false
+        val timedSnapshot = DogecoinTrustedPersonalNodeTimedDisplaySnapshot(
+            binding = token.binding,
+            capturedAtMonotonicMillis = token.startedAtMonotonicMillis,
+            nodeSnapshot = result
+        )
+        if (!isDogecoinTrustedPersonalNodeTimedSnapshotFresh(boundProfile, timedSnapshot, nowMonotonicMillis)) {
+            state = DogecoinTrustedPersonalNodeState.DEGRADED
+            return false
+        }
+        displaySnapshot = timedSnapshot
+        state = DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED
+        stateBeforeChecking = state
+        return true
+    }
+
+    /** Transport, parse, or ordinary node failures retain any last snapshot only as explicitly stale data. */
+    @Synchronized
+    fun recordTransientFailure(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
+        if (!matchesActiveToken(token)) return false
+        if (
+            state != DogecoinTrustedPersonalNodeState.CHECKING &&
+            state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED
+        ) {
+            return false
+        }
+        state = DogecoinTrustedPersonalNodeState.DEGRADED
+        return true
+    }
+
+    /** A rejected credential cannot enter the DEGRADED retry loop. Re-provisioning is required. */
+    @Synchronized
+    fun recordAuthenticationRequired(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
+        if (!matchesActiveToken(token)) return false
+        if (
+            state != DogecoinTrustedPersonalNodeState.CHECKING &&
+            state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED
+        ) {
+            return false
+        }
+        clearReadSession()
+        state = DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+        return true
+    }
+
+    /** Expires a live readiness/snapshot by phone monotonic time; no server clock is consulted. */
+    @Synchronized
+    fun refreshFreshness(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeState {
+        if (state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED) return state
+        val boundProfile = profile
+        val currentSnapshot = displaySnapshot
+        if (
+            boundProfile == null ||
+            currentSnapshot == null ||
+            !isDogecoinTrustedPersonalNodeTimedSnapshotFresh(boundProfile, currentSnapshot, nowMonotonicMillis)
+        ) {
+            state = DogecoinTrustedPersonalNodeState.DEGRADED
+        }
+        return state
+    }
+
+    @Synchronized
+    fun freshDisplaySnapshot(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeTimedDisplaySnapshot? {
+        refreshFreshness(nowMonotonicMillis)
+        return displaySnapshot.takeIf { state == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED }
+    }
+
+    /** Ends use for this process without deleting the durable authorization. */
+    @Synchronized
+    fun deactivate() {
+        if (
+            profile == null ||
+            (state != DogecoinTrustedPersonalNodeState.CHECKING &&
+                state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED &&
+                state != DogecoinTrustedPersonalNodeState.DEGRADED)
+        ) {
+            return
+        }
+        clearReadSession()
+        clearTransientProvisioning()
+        state = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+        inactiveStateBeforeProvisioning = state
     }
 
     /** Rebinding to a different durable revision always drops transient provisioning/session state. */
@@ -140,9 +311,11 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         val validProfile = savedProfile
             ?.takeIf { savedState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE }
             ?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile)
-        if (profile != validProfile || state == DogecoinTrustedPersonalNodeState.PROVISIONING) {
-            clearTransientProvisioning()
+        if (profile == validProfile && validProfile != null && state.isLiveReadSessionState()) {
+            return
         }
+        clearTransientProvisioning()
+        clearReadSession()
         profile = validProfile
         state = initialState(savedState, validProfile)
         inactiveStateBeforeProvisioning = state
@@ -151,18 +324,20 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     @Synchronized
     fun revoke() {
         clearTransientProvisioning()
+        clearReadSession()
         profile = null
         state = DogecoinTrustedPersonalNodeState.REVOKED
         inactiveStateBeforeProvisioning = state
     }
 
     private fun inactiveFallbackState(): DogecoinTrustedPersonalNodeState =
-        if (profile != null) {
-            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
-        } else if (inactiveStateBeforeProvisioning == DogecoinTrustedPersonalNodeState.REVOKED) {
-            DogecoinTrustedPersonalNodeState.REVOKED
-        } else {
-            DogecoinTrustedPersonalNodeState.UNAUTHORIZED
+        when {
+            inactiveStateBeforeProvisioning == DogecoinTrustedPersonalNodeState.REVOKED ->
+                DogecoinTrustedPersonalNodeState.REVOKED
+            inactiveStateBeforeProvisioning == DogecoinTrustedPersonalNodeState.AUTH_REQUIRED ->
+                DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+            profile != null -> DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+            else -> DogecoinTrustedPersonalNodeState.UNAUTHORIZED
         }
 
     private fun clearTransientProvisioning() {
@@ -171,6 +346,41 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         provisioningResult = null
         issuedCandidate = null
     }
+
+    private fun beginActivationInternal(
+        boundProfile: DogecoinTrustedPersonalNodeProfile,
+        nowMonotonicMillis: Long,
+        keepDisplaySnapshot: Boolean,
+        previousState: DogecoinTrustedPersonalNodeState
+    ): DogecoinTrustedPersonalNodeActivationToken {
+        clearTransientProvisioning()
+        if (!keepDisplaySnapshot) displaySnapshot = null
+        val token = DogecoinTrustedPersonalNodeActivationToken(
+            nonce = nextActivationNonce,
+            binding = boundProfile.toSessionBinding(),
+            startedAtMonotonicMillis = nowMonotonicMillis
+        )
+        nextActivationNonce = if (nextActivationNonce == Long.MAX_VALUE) 1L else nextActivationNonce + 1L
+        activationToken = token
+        stateBeforeChecking = previousState
+        state = DogecoinTrustedPersonalNodeState.CHECKING
+        return token
+    }
+
+    private fun matchesActiveToken(token: DogecoinTrustedPersonalNodeActivationToken): Boolean =
+        activationToken == token && profile?.toSessionBinding() == token.binding
+
+    private fun clearReadSession() {
+        activationToken = null
+        stateBeforeChecking = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+        displaySnapshot = null
+    }
+
+    private fun DogecoinTrustedPersonalNodeState.isLiveReadSessionState(): Boolean =
+        this == DogecoinTrustedPersonalNodeState.CHECKING ||
+            this == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+            this == DogecoinTrustedPersonalNodeState.DEGRADED ||
+            this == DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
 
     private fun DogecoinTrustedPersonalNodeProfile.matches(
         candidate: DogecoinTrustedPersonalNodeProfileCandidate

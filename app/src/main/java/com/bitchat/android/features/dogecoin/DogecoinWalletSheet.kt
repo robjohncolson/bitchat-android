@@ -414,11 +414,32 @@ fun DogecoinWalletSheet(
     var nodeAssist by remember(selectedNetwork) { mutableStateOf(false) }
     val dogecoinBackend =
         if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
+    var trustedPersonalNodeKeepsSpvSyncing by remember(selectedNetwork) {
+        val processState = DogecoinTrustedPersonalNodeProcessSessionRegistry.current().state
+        mutableStateOf(
+            selectedNetwork == DogecoinNetwork.MAINNET &&
+                dogecoinTrustedPersonalNodeSessionUsesNode(processState)
+        )
+    }
     val spvTargetNetwork = dogecoinSpvTargetNetwork(
         persistedBackend = persistedBackend,
         selectedNetwork = selectedNetwork,
-        supported = spvService.isSupported(selectedNetwork)
+        supported = spvService.isSupported(selectedNetwork),
+        trustedPersonalNodeReadSession = trustedPersonalNodeKeepsSpvSyncing
     )
+    LaunchedEffect(selectedNetwork, snapshot.key.address) {
+        if (selectedNetwork != DogecoinNetwork.MAINNET) {
+            // Network switches synchronously discard any process-only TPN session. Returning to mainnet
+            // rebinds the durable profile as AUTHORIZED_INACTIVE through the settings surface.
+            DogecoinTrustedPersonalNodeProcessSessionRegistry.bindPersistedAuthorization(
+                savedState = DogecoinTrustedPersonalNodeState.UNAUTHORIZED,
+                savedProfile = null,
+                selectedNetwork = selectedNetwork,
+                androidAddress = snapshot.key.address
+            )
+            trustedPersonalNodeKeepsSpvSyncing = false
+        }
+    }
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
@@ -1795,12 +1816,20 @@ fun DogecoinWalletSheet(
     }
 
     // Start the built-in client only after the bootstrap shell has already rendered. Keep it process-scoped
-    // across sheet dismissal; stop only when the persisted backend/network explicitly moves away from SPV.
-    // Keyed on persistedBackend (NOT the assist-effective backend): home-node assist must leave the light
-    // client syncing in the background, so enabling assist never stops SPV here.
+    // across sheet dismissal. The persisted SPV backend and an explicit TPN read session both own a start;
+    // neither testnet assist nor TPN changes the persisted/effective spend backend.
     var spvStartAttempt by remember(selectedNetwork) { mutableStateOf(0) }
     var spvStarting by remember(selectedNetwork) { mutableStateOf(false) }
     var spvStartFailed by remember(selectedNetwork) { mutableStateOf(false) }
+    fun stillOwnsSpvStart(targetNetwork: DogecoinNetwork): Boolean =
+        selectedNetwork == targetNetwork &&
+            (
+                persistedBackend == DogecoinBackend.SPV ||
+                    (
+                        trustedPersonalNodeKeepsSpvSyncing &&
+                            targetNetwork == DogecoinNetwork.MAINNET
+                        )
+                )
     LaunchedEffect(spvTargetNetwork, spvStartAttempt) {
         val sessionGeneration = walletIoSession.captureGeneration()
         val startAttempt = spvStartAttempt
@@ -1828,8 +1857,7 @@ fun DogecoinWalletSheet(
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
                     spvStartAttempt == startAttempt &&
-                    selectedNetwork == targetNetwork &&
-                    persistedBackend == DogecoinBackend.SPV
+                    stillOwnsSpvStart(targetNetwork)
                 ) spvStartFailed = !startApplied
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1837,15 +1865,13 @@ fun DogecoinWalletSheet(
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
                     spvStartAttempt == startAttempt &&
-                    selectedNetwork == targetNetwork &&
-                    persistedBackend == DogecoinBackend.SPV
+                    stillOwnsSpvStart(targetNetwork)
                 ) spvStartFailed = true
             } finally {
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
                     spvStartAttempt == startAttempt &&
-                    selectedNetwork == targetNetwork &&
-                    persistedBackend == DogecoinBackend.SPV
+                    stillOwnsSpvStart(targetNetwork)
                 ) spvStarting = false
             }
         } else {
@@ -2904,7 +2930,10 @@ fun DogecoinWalletSheet(
                 if (selectedNetwork == DogecoinNetwork.MAINNET) {
                     item(key = "trusted_personal_node") {
                         DogecoinTrustedPersonalNodeSettings(
-                            androidMainnetAddress = snapshot.key.address
+                            androidMainnetAddress = snapshot.key.address,
+                            onSessionUseChanged = { usesNode ->
+                                trustedPersonalNodeKeepsSpvSyncing = usesNode
+                            }
                         )
                     }
                 }
