@@ -5,6 +5,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -582,6 +583,378 @@ class DogecoinRpcClient private constructor(
             ),
             activity = activity
         )
+    }
+
+    /**
+     * DES-1-C's fixed proof collection. The request token is issued by the live process session and
+     * rebound to the complete durable profile before doing I/O. [requestIsCurrent] must query that
+     * holder's exact token/profile/monotonic lease; it is installed at the central RPC chokepoint and
+     * runs before every request. Every candidate is verified or the whole call throws, so a
+     * successfully verified prefix is never exposed.
+     *
+     * This is intentionally separate from the generic wallet APIs: those may import an address, and
+     * this workflow must remain a fixed read-only allow-list. It does not sign, preflight, or broadcast.
+     */
+    internal suspend fun readTrustedPersonalNodeProofSnapshot(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        requestToken: DogecoinTrustedPersonalNodeProofRequestToken,
+        requestIsCurrent: () -> Boolean
+    ): DogecoinTrustedPersonalNodeProofSnapshot = guardedBy {
+        check(requestIsCurrent()) {
+            "Trusted personal node proof request is no longer current."
+        }
+    }.readTrustedPersonalNodeProofSnapshotInternal(profile, credentials, requestToken)
+
+    /** The public-to-feature entry above always installs the live-session lease at callElement. */
+    private suspend fun readTrustedPersonalNodeProofSnapshotInternal(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        requestToken: DogecoinTrustedPersonalNodeProofRequestToken
+    ): DogecoinTrustedPersonalNodeProofSnapshot = withContext(Dispatchers.IO) {
+        require(isValidDogecoinTrustedPersonalNodeProfile(profile)) {
+            "Trusted personal node profile is invalid or no longer authorized."
+        }
+        require(requestToken.binding == profile.toSessionBinding()) {
+            "Trusted personal node proof request does not match the active profile."
+        }
+        require(requestToken.startedAtMonotonicMillis >= 0L) {
+            "Trusted personal node proof request time is invalid."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node RPC credentials are unavailable."
+        }
+
+        val config = DogecoinRpcConfig(
+            url = profile.origin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = profile.coreWalletId
+        )
+        val startTip = readTrustedPersonalNodeProofTip(config)
+        val candidates = readTrustedPersonalNodeProofCandidates(config, profile)
+        require(candidates.size <= DOGECOIN_TPN_MAX_PROOF_CANDIDATES) {
+            "Trusted personal node reported more than $DOGECOIN_TPN_MAX_PROOF_CANDIDATES proof candidates."
+        }
+        val duplicate = candidates.groupingBy { "${it.txid}:${it.vout}" }
+            .eachCount()
+            .entries
+            .firstOrNull { it.value > 1 }
+        require(duplicate == null) {
+            "Trusted personal node reported duplicate proof outpoint ${duplicate?.key}."
+        }
+
+        val expectedScript = DogecoinAddress.p2pkhScript(profile.androidAddress, profile.network)
+        val completeProofs = ArrayList<Pair<DogecoinVerifiedPrevout, TrustedPersonalNodeProofTxOut>>(
+            candidates.size
+        )
+        var totalProofBytes = 0
+        candidates.forEach { candidate ->
+            val previousTransaction = readTrustedPersonalNodePreviousTransaction(config, candidate.txid)
+            val verified = DogecoinVerifiedPrevout.verify(
+                rawPreviousTransactionHex = previousTransaction.rawHex,
+                expectedTxid = candidate.txid,
+                vout = candidate.vout,
+                expectedP2pkhScript = expectedScript,
+                source = previousTransaction.source
+            )
+            require(verified.amountKoinu == candidate.amountKoinu) {
+                "Trusted personal node listunspent amount disagrees with the previous transaction proof."
+            }
+            require(verified.scriptPubKeyHex == candidate.scriptPubKeyHex) {
+                "Trusted personal node listunspent script disagrees with the previous transaction proof."
+            }
+            val immediateTxOut = readTrustedPersonalNodeProofTxOut(config, candidate.txid, candidate.vout)
+                ?: throw IllegalStateException(
+                    "Trusted personal node proof outpoint ${candidate.txid}:${candidate.vout} is spent or missing."
+                )
+            requireTrustedPersonalNodeTxOutMatches(verified, immediateTxOut)
+
+            totalProofBytes = try {
+                Math.addExact(totalProofBytes, verified.previousTransactionByteCount)
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException("Trusted personal node proof byte total overflowed.")
+            }
+            require(totalProofBytes <= DOGECOIN_TPN_MAX_SNAPSHOT_PROOF_BYTES) {
+                "Trusted personal node previous-transaction proofs exceed the 4 MiB snapshot limit."
+            }
+            completeProofs += verified to immediateTxOut
+        }
+
+        val endTip = readTrustedPersonalNodeProofTip(config)
+        requireTrustedPersonalNodeTipExtension(config, startTip, endTip)
+
+        // `gettxout.bestblock` binds each final unspent check to the exact frozen end tip. A new block or
+        // reorg during this final pass fails the complete collection instead of minting a mixed snapshot.
+        val finalCandidates = ArrayList<DogecoinTrustedPersonalNodeProofCandidate>(completeProofs.size)
+        completeProofs.forEach { (verified, immediateTxOut) ->
+            val finalTxOut = readTrustedPersonalNodeProofTxOut(config, verified.txid, verified.vout)
+                ?: throw IllegalStateException(
+                    "Trusted personal node proof outpoint ${verified.txid}:${verified.vout} changed or was spent."
+                )
+            require(finalTxOut.bestBlockHash == endTip.hash) {
+                "Trusted personal node tip changed during the final outpoint checks."
+            }
+            require(finalTxOut.confirmations >= immediateTxOut.confirmations) {
+                "Trusted personal node outpoint confirmations regressed during proof collection."
+            }
+            requireTrustedPersonalNodeTxOutMatches(verified, finalTxOut)
+            finalCandidates += DogecoinTrustedPersonalNodeProofCandidate.verifiedAtTip(
+                verifiedPrevout = verified,
+                finalConfirmations = finalTxOut.confirmations,
+                finalBestBlockHash = finalTxOut.bestBlockHash
+            )
+        }
+
+        DogecoinTrustedPersonalNodeProofSnapshot.complete(
+            binding = requestToken.binding,
+            capturedAtMonotonicMillis = requestToken.startedAtMonotonicMillis,
+            startTip = startTip,
+            endTip = endTip,
+            proofCandidates = finalCandidates,
+            totalProofBytes = totalProofBytes
+        )
+    }
+
+    private fun readTrustedPersonalNodeProofTip(
+        config: DogecoinRpcConfig
+    ): DogecoinTrustedPersonalNodeBlockTip {
+        val result = callObject(config.copy(walletName = ""), "getblockchaininfo")
+        require(requiredExactString(result, "chain", "getblockchaininfo") == DogecoinNetwork.MAINNET.chainName) {
+            "Trusted personal node proof source is not on Dogecoin mainnet."
+        }
+        val initialBlockDownload = parseOptionalBoolean(
+            result,
+            "initialblockdownload",
+            "getblockchaininfo"
+        ) ?: throw IllegalArgumentException("RPC getblockchaininfo did not report initialblockdownload.")
+        require(!initialBlockDownload) {
+            "Trusted personal node is still in initial block download."
+        }
+        val blocks = parseOptionalNonNegativeInt(result, "blocks", "getblockchaininfo")
+            ?: throw IllegalArgumentException("RPC getblockchaininfo did not report blocks.")
+        val headers = parseOptionalNonNegativeInt(result, "headers", "getblockchaininfo")
+            ?: throw IllegalArgumentException("RPC getblockchaininfo did not report headers.")
+        require(headers >= blocks && headers - blocks <= DOGECOIN_TPN_MAX_BLOCK_HEADER_LAG) {
+            "Trusted personal node is not within the required block/header lag."
+        }
+        val progress = parseOptionalProgressFraction(
+            result,
+            "verificationprogress",
+            "getblockchaininfo"
+        ) ?: throw IllegalArgumentException("RPC getblockchaininfo did not report verificationprogress.")
+        require(progress >= DOGECOIN_TPN_MIN_VERIFICATION_PROGRESS) {
+            "Trusted personal node verification progress is below the proof threshold."
+        }
+        val hash = requiredExactString(result, "bestblockhash", "getblockchaininfo")
+        require(txidRegex.matches(hash)) {
+            "RPC getblockchaininfo returned an invalid bestblockhash."
+        }
+        return DogecoinTrustedPersonalNodeBlockTip(blocks, hash)
+    }
+
+    private fun readTrustedPersonalNodeProofCandidates(
+        config: DogecoinRpcConfig,
+        profile: DogecoinTrustedPersonalNodeProfile
+    ): List<DogecoinUtxo> {
+        val result = callElement(
+            config,
+            "listunspent",
+            JsonArray().apply {
+                add(DOGECOIN_TPN_MIN_INPUT_CONFIRMATIONS)
+                add(9_999_999)
+                add(JsonArray().apply { add(profile.androidAddress) })
+            }
+        )
+        require(result.isJsonArray) { "RPC listunspent response was not an array." }
+        require(result.asJsonArray.size() <= DOGECOIN_TPN_MAX_PROOF_CANDIDATES) {
+            "Trusted personal node reported more than $DOGECOIN_TPN_MAX_PROOF_CANDIDATES proof candidates."
+        }
+        val exactBoundScript = DogecoinHex.encode(
+            DogecoinAddress.p2pkhScript(profile.androidAddress, profile.network)
+        )
+        return result.asJsonArray.map { element ->
+            require(element.isJsonObject) { "RPC listunspent returned a malformed UTXO row." }
+            val item = element.asJsonObject
+            val exactTxid = requiredExactString(item, "txid", "listunspent")
+            require(txidRegex.matches(exactTxid)) {
+                "Trusted personal node listunspent returned a non-canonical txid."
+            }
+            require(requiredExactString(item, "scriptPubKey", "listunspent") == exactBoundScript) {
+                "Trusted personal node listunspent returned a non-canonical or foreign script."
+            }
+            parseListUnspentItem(item, profile.androidAddress, profile.network).also {
+                require(it.confirmations >= DOGECOIN_TPN_MIN_INPUT_CONFIRMATIONS) {
+                    "Trusted personal node returned a proof candidate below the minimum confirmation depth."
+                }
+            }
+        }.sortedWith(compareBy<DogecoinUtxo> { it.txid }.thenBy { it.vout })
+    }
+
+    private fun readTrustedPersonalNodePreviousTransaction(
+        config: DogecoinRpcConfig,
+        txid: String
+    ): TrustedPersonalNodePreviousTransaction {
+        try {
+            val walletResult = callObject(
+                config,
+                "gettransaction",
+                JsonArray().apply {
+                    add(txid)
+                    add(true)
+                }
+            )
+            require(requiredExactString(walletResult, "txid", "gettransaction") == txid) {
+                "RPC gettransaction returned a different previous transaction id."
+            }
+            return TrustedPersonalNodePreviousTransaction(
+                rawHex = requiredExactString(walletResult, "hex", "gettransaction"),
+                source = DogecoinTrustedPersonalNodePreviousTransactionSource.WALLET_GETTRANSACTION
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (error.isDogecoinRpcAuthenticationFailure() || !isWalletPreviousTransactionUnavailable(error)) {
+                throw error
+            }
+        }
+
+        val result = callElement(
+            config.copy(walletName = ""),
+            "getrawtransaction",
+            JsonArray().apply {
+                add(txid)
+                add(false)
+            }
+        )
+        val primitive = result.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+        require(primitive?.isString == true && primitive.asString.isNotBlank()) {
+            "RPC getrawtransaction returned invalid previous-transaction hex."
+        }
+        return TrustedPersonalNodePreviousTransaction(
+            rawHex = primitive.asString,
+            source = DogecoinTrustedPersonalNodePreviousTransactionSource.TXINDEX_GETRAWTRANSACTION
+        )
+    }
+
+    private fun isWalletPreviousTransactionUnavailable(error: Throwable): Boolean {
+        val message = error.message.orEmpty().lowercase()
+        return (
+            message.contains("rpc gettransaction failed (code -5)") &&
+                message.contains("invalid or non-wallet transaction id")
+            ) ||
+            message.contains("wallet rpc method gettransaction is unavailable") ||
+            (
+                message.contains("gettransaction") &&
+                    (message.contains("code -32601") || message.contains("unknown command"))
+                )
+    }
+
+    private fun readTrustedPersonalNodeProofTxOut(
+        config: DogecoinRpcConfig,
+        txid: String,
+        vout: Int
+    ): TrustedPersonalNodeProofTxOut? {
+        val result = callElement(
+            config.copy(walletName = ""),
+            "gettxout",
+            JsonArray().apply {
+                add(txid)
+                add(vout)
+                add(true)
+            }
+        )
+        if (result.isJsonNull) return null
+        require(result.isJsonObject) { "RPC gettxout response was not an object." }
+        val value = result.asJsonObject
+        val bestBlockHash = requiredExactString(value, "bestblock", "gettxout")
+        require(txidRegex.matches(bestBlockHash)) { "RPC gettxout returned an invalid bestblock hash." }
+        val amountKoinu = value.get("value")
+            ?.takeUnless { it.isJsonNull }
+            ?.let(::dogeJsonToKoinu)
+            ?: throw IllegalArgumentException("RPC gettxout did not report value.")
+        require(amountKoinu > 0L) { "RPC gettxout returned a non-positive value." }
+        val scriptObject = value.get("scriptPubKey")?.takeIf { it.isJsonObject }?.asJsonObject
+            ?: throw IllegalArgumentException("RPC gettxout did not report scriptPubKey.")
+        val scriptHex = requiredExactString(scriptObject, "hex", "gettxout")
+        require(scriptHex.length % 2 == 0 && scriptHex.all { it in '0'..'9' || it in 'a'..'f' }) {
+            "RPC gettxout returned an invalid scriptPubKey hex."
+        }
+        val confirmations = parseRequiredInt(
+            value,
+            "confirmations",
+            "RPC gettxout did not report valid confirmations."
+        )
+        require(confirmations >= DOGECOIN_TPN_MIN_INPUT_CONFIRMATIONS) {
+            "Trusted personal node gettxout result is below the minimum confirmation depth."
+        }
+        return TrustedPersonalNodeProofTxOut(
+            bestBlockHash = bestBlockHash,
+            amountKoinu = amountKoinu,
+            scriptPubKeyHex = scriptHex,
+            confirmations = confirmations
+        )
+    }
+
+    private fun requireTrustedPersonalNodeTxOutMatches(
+        verified: DogecoinVerifiedPrevout,
+        txOut: TrustedPersonalNodeProofTxOut
+    ) {
+        require(txOut.amountKoinu == verified.amountKoinu) {
+            "Trusted personal node gettxout amount disagrees with the previous transaction proof."
+        }
+        require(txOut.scriptPubKeyHex == verified.scriptPubKeyHex) {
+            "Trusted personal node gettxout script disagrees with the previous transaction proof."
+        }
+    }
+
+    private fun requireTrustedPersonalNodeTipExtension(
+        config: DogecoinRpcConfig,
+        startTip: DogecoinTrustedPersonalNodeBlockTip,
+        endTip: DogecoinTrustedPersonalNodeBlockTip
+    ) {
+        require(endTip.height >= startTip.height) {
+            "Trusted personal node block height regressed during proof collection."
+        }
+        val extension = endTip.height - startTip.height
+        require(extension <= DOGECOIN_TPN_MAX_SNAPSHOT_TIP_EXTENSION) {
+            "Trusted personal node tip advanced beyond the proof snapshot bound."
+        }
+        if (extension == 0) {
+            require(endTip.hash == startTip.hash) {
+                "Trusted personal node replaced the best block at the same height."
+            }
+            return
+        }
+
+        var expectedHash = endTip.hash
+        var expectedHeight = endTip.height
+        repeat(extension) {
+            val header = callObject(
+                config.copy(walletName = ""),
+                "getblockheader",
+                JsonArray().apply {
+                    add(expectedHash)
+                    add(true)
+                }
+            )
+            require(requiredExactString(header, "hash", "getblockheader") == expectedHash) {
+                "RPC getblockheader returned a different block hash."
+            }
+            val height = parseOptionalNonNegativeInt(header, "height", "getblockheader")
+                ?: throw IllegalArgumentException("RPC getblockheader did not report height.")
+            require(height == expectedHeight) {
+                "RPC getblockheader returned an inconsistent block height."
+            }
+            expectedHash = requiredExactString(header, "previousblockhash", "getblockheader")
+            require(txidRegex.matches(expectedHash)) {
+                "RPC getblockheader returned an invalid previous block hash."
+            }
+            expectedHeight -= 1
+        }
+        require(expectedHeight == startTip.height && expectedHash == startTip.hash) {
+            "Trusted personal node final tip does not descend from the starting tip."
+        }
     }
 
     private fun requiredExactCoreWalletId(walletInfo: JsonObject): String {
@@ -1943,6 +2316,18 @@ class DogecoinRpcClient private constructor(
                     normalizedMessage.contains("unavailable")
                 )
     }
+
+    private data class TrustedPersonalNodePreviousTransaction(
+        val rawHex: String,
+        val source: DogecoinTrustedPersonalNodePreviousTransactionSource
+    )
+
+    private data class TrustedPersonalNodeProofTxOut(
+        val bestBlockHash: String,
+        val amountKoinu: Long,
+        val scriptPubKeyHex: String,
+        val confirmations: Int
+    )
 
     companion object {
         private val txidRegex = Regex("^[0-9a-f]{64}$")
