@@ -73,9 +73,11 @@ SPV-IO-UNBLOCK      DONE — SPV start no longer blocks home-node RPC status
 
 ### Wave 3 (ACTIVE) — mainnet SPV honesty
 
-Spec detail in card bodies below; also see live findings (2026-07-12): mainnet address
-`DRjrQ6…` had ~38.81 DOGE via `doge-spv-balance` while UI stayed on Syncing / empty balance;
-height can stall ~1k behind tip with peers>0; process-owned SPV can lag a network switch.
+Full specs: **`docs/spv-ui-honesty-spec.md`**
+
+Live findings (2026-07-12): mainnet address `DRjrQ6…` had ~38.81 DOGE via `doge-spv-balance`
+while UI stayed on Syncing / empty balance; height can stall ~1k behind tip with peers>0;
+process-owned SPV can lag a network switch.
 
 ```text
 SPV-BALANCE-REFRESH   Always re-pull SPV balance; fix misleading "0 behind" (Codex first)
@@ -268,7 +270,8 @@ DES-1 implement     Mainnet TRUSTED_PERSONAL_NODE (only after DES-1 decisions)
 - Home-node balance works after rescan; **HOME-NODE-SEND** unlocks Review under assist.  
 - Draft vs saved RPC is intentional architecture; UX was the bug, not Tailscale.  
 - `verificationprogress` slightly >1.0 is normal on Dogecoin testnet (clamped).  
-- Confirmation ring under assist was **known gap** until CONF-RPC-PROGRESS.
+- Confirmation ring under assist was **known gap** until CONF-RPC-PROGRESS.  
+- Mainnet SPV can hold correct balance in the service while UI shows empty Syncing (SPV-BALANCE-REFRESH).
 
 ---
 
