@@ -1559,7 +1559,7 @@ fun DogecoinWalletSheet(
 
     // Guardrail: there is deliberately NO automatic node probe here. Opening the wallet or editing node
     // settings performs zero RPC I/O (no credentials, no wallet address on the wire); node status is only
-    // fetched by the explicit Test connection / Check node status actions.
+    // fetched by explicit Test connection / Check node status actions or explicit home-node assist below.
 
     LaunchedEffect(paymentRequest?.uri) {
         val request = paymentRequest ?: return@LaunchedEffect
@@ -1590,11 +1590,14 @@ fun DogecoinWalletSheet(
     // Home-node assist toggles: clear the displayed balance BEFORE the re-read so a stale value from the
     // other source is never shown under the new source's label (an SPV balance captioned "My node" would
     // claim node provenance the node can't back — and vice versa). This effect's block comes from the
-    // post-flip composition, so refreshWalletBalance() reads through the assist-effective backend.
+    // post-flip composition, so the balance reads through effective RPC; both refreshes use the saved config.
     LaunchedEffect(nodeAssist) {
         walletBalance = null
         walletBalanceError = null
-        if (nodeAssist) refreshWalletBalance()
+        if (nodeAssist) {
+            refreshNodeStatus()
+            refreshWalletBalance()
+        }
         // On revert the SPV reactive-balance effect repopulates (it restarts on the backend flip).
     }
 
@@ -1997,9 +2000,8 @@ fun DogecoinWalletSheet(
                                 active = nodeAssist,
                                 blocksBehind = spvStatus.blocksBehind,
                                 notOverTor = torIntentOn,
-                                // The balance refresh runs in the LaunchedEffect(nodeAssist) below the state
-                                // declarations — a refresh called HERE would capture this composition's
-                                // pre-flip backend and read from the wrong source.
+                                // Status + balance refresh in LaunchedEffect(nodeAssist) after recomposition;
+                                // refreshing HERE would capture this composition's pre-flip SPV backend.
                                 onUse = { setNodeAssistEnabled(true) },
                                 onStop = { setNodeAssistEnabled(false) }
                             )
@@ -3431,12 +3433,15 @@ fun DogecoinWalletSheet(
                         }
                         // Phase 4: mainnet SPV sending is enabled. The mainnet-specific safety gates (WIF-backup
                         // + mainnet/high-fee/policy-unavailable acks) are enforced in reviewSend()/the broadcast
-                        // flow, mirroring the configured-node mainnet path — so the button only needs a synced SPV.
-                        val spvSendReady = dogecoinBackend == DogecoinBackend.SPV && spvStatus.synced
+                        // flow. Route readiness mirrors the effective backend here; Confirm remains stricter.
+                        val reviewSendRouteReady = canReviewDogecoinSend(
+                            effectiveBackend = dogecoinBackend,
+                            spvSynced = spvStatus.synced,
+                            nodeReady = nodeReady
+                        )
                         Button(
                             onClick = { reviewSend() },
-                            enabled = !sending && !rescanning &&
-                                ((dogecoinBackend != DogecoinBackend.SPV && nodeReady) || spvSendReady),
+                            enabled = !sending && !rescanning && reviewSendRouteReady,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -3456,6 +3461,12 @@ fun DogecoinWalletSheet(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
+                            )
+                        } else if (dogecoinBackend != DogecoinBackend.SPV && !nodeReady) {
+                            NodeStatusRow(
+                                status = nodeStatus,
+                                refreshing = refreshing,
+                                network = selectedNetwork
                             )
                         }
                     }

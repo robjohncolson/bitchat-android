@@ -1064,6 +1064,42 @@ class DogecoinWalletTest {
     }
 
     @Test
+    fun `review send readiness mirrors the effective backend`() {
+        // Built-in remains locked while unsynced; a ready node cannot unlock it unless assist changes the
+        // effective backend to RPC.
+        assertFalse(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = false,
+                nodeReady = true
+            )
+        )
+        assertTrue(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+
+        // Effective RPC covers both a persisted node backend and session-only home-node assist.
+        assertTrue(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = false,
+                nodeReady = true
+            )
+        )
+        assertFalse(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+    }
+
+    @Test
     fun `signed mainnet transaction export requires mainnet acknowledgement`() {
         val transaction = signedMainnetTransaction()
         val nowMillis = transaction.createdAtMillis

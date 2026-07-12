@@ -206,6 +206,20 @@ internal enum class DogecoinRawTransactionExportAction {
     SHARE
 }
 
+/**
+ * Presentation readiness for Review send, keyed to the backend that will actually build the transaction.
+ * Broadcast confirmation has its own stricter route-specific gates.
+ */
+internal fun canReviewDogecoinSend(
+    effectiveBackend: DogecoinBackend,
+    spvSynced: Boolean,
+    nodeReady: Boolean
+): Boolean = when (effectiveBackend) {
+    DogecoinBackend.SPV -> spvSynced
+    DogecoinBackend.RPC,
+    DogecoinBackend.EXPLORER -> nodeReady
+}
+
 internal enum class DogecoinFeePreset(val labelResId: Int) {
     SLOW(R.string.dogecoin_send_fee_preset_slow),
     NORMAL(R.string.dogecoin_send_fee_preset_normal),
