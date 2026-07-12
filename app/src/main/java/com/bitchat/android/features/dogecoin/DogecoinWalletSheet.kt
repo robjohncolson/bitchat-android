@@ -882,25 +882,47 @@ fun DogecoinWalletSheet(
         val sessionGeneration = walletIoSession.captureGeneration()
         val activeRpcClient = guardedRpcClient(requestGeneration)
         return coroutineScope.launch {
-            val (status, watchStatusResult) = walletIoSession.serialized {
-                val currentStatus = activeRpcClient.getBlockchainStatus(config, network)
-                val currentWatchStatus = if (currentStatus.isReadyFor(network)) {
-                    runCatching { activeRpcClient.getAddressWatchStatus(config, address, network) }
-                } else {
-                    null
-                }
-                currentStatus to currentWatchStatus
+            // RPC status must NOT wait on SPV start/stop. Home-node assist is the fast path when SPV is slow;
+            // serializing them on walletIoSession made "Checking node…" hang behind bitcoinj startup.
+            val result = try {
+                Result.success(
+                    walletIoSession.serialized {
+                        val currentStatus = activeRpcClient.getBlockchainStatus(config, network)
+                        val currentWatchStatus = if (currentStatus.isReadyFor(network)) {
+                            runCatching { activeRpcClient.getAddressWatchStatus(config, address, network) }
+                        } else {
+                            null
+                        }
+                        currentStatus to currentWatchStatus
+                    }
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                Result.failure(failure)
             }
-            if (
-                walletIoSession.isCurrent(sessionGeneration) &&
+            val stillCurrent = walletIoSession.isCurrent(sessionGeneration) &&
                 selectedNetwork == network &&
                 rpcConfigRevision == configRevision
-            ) {
+            result.onSuccess { (status, watchStatusResult) ->
+                if (!stillCurrent) return@onSuccess
                 nodeStatus = status
                 if (snapshot.key.address == address) {
                     addressWatchStatus = watchStatusResult?.getOrNull()
                     addressWatchStatusError = watchStatusResult?.exceptionOrNull()?.message
                 }
+            }.onFailure { failure ->
+                if (!stillCurrent) return@onFailure
+                nodeStatus = DogecoinNodeStatus(
+                    connected = false,
+                    expectedNetwork = network,
+                    error = failure.message
+                        ?: context.getString(R.string.dogecoin_node_unreachable, network.displayName)
+                )
+            }
+            // Always clear the spinner for this attempt when still the active route; never leave
+            // "Checking node…" stuck because a completion was discarded as stale.
+            if (stillCurrent || (selectedNetwork == network && rpcConfigRevision == configRevision)) {
                 refreshing = false
             }
         }
@@ -1744,13 +1766,12 @@ fun DogecoinWalletSheet(
             spvStarting = true
             spvStartFailed = false
             try {
-                // The process mutex is acquired while still cancellable; only its single holder enters the
-                // service monitor on IO. Reopen waiters suspend without tying up IO threads and disappear on dismiss.
+                // Process SPV lifecycle mutex only — never walletIoSession.serialized.
+                // Home-node status/balance also use the sheet IO session; if SPV start held that lock,
+                // "Use home node" / "Refresh node status" starved behind bitcoinj (often minutes on testnet).
                 val startApplied = dogecoinSpvLifecycleMutex.withLock {
                     withContext(Dispatchers.IO) {
-                        walletIoSession.serialized {
-                            spvService.startForRequest(selectedNetwork, startRequest)
-                        }
+                        spvService.startForRequest(selectedNetwork, startRequest)
                     }
                 }
                 if (
