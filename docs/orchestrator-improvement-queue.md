@@ -91,7 +91,7 @@ Decisions: **`docs/des1-human-decisions.md`** — **DECIDED 2026-07-12**
 
 ```text
 DES-1-DECISIONS   DONE — human locked defaults (+ prev-tx preference, shareable profile)
-DES-1-GUARDRAIL   NEXT — fail-closed generic mainnet My node spend (Codex)
+DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
 DES-1-IMPL        Phased TRUSTED_PERSONAL_NODE after guardrail
 WALLET-SESSION    State hoist for full sheet section split (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
@@ -276,6 +276,7 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Must not:** implement full TPN; enable mainnet assist flip; WIF-to-Core; weaken SPV gates; bake host URLs into APK.  
 **Done means:** unit tests for “mainnet + generic RPC → cannot spend”; suite green; describe surfaces.  
 **Out of scope:** full TPN bind/session UI (DES-1-IMPL); share/export QR.
+**Status:** DONE (`DogecoinSpendRoutePolicy` + RPC/helper chokepoints).
 
 ---
 

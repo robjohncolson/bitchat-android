@@ -1069,6 +1069,7 @@ class DogecoinWalletTest {
         // effective backend to RPC.
         assertFalse(
             canReviewDogecoinSend(
+                network = DogecoinNetwork.TESTNET,
                 effectiveBackend = DogecoinBackend.SPV,
                 spvSynced = false,
                 nodeReady = true
@@ -1076,6 +1077,7 @@ class DogecoinWalletTest {
         )
         assertTrue(
             canReviewDogecoinSend(
+                network = DogecoinNetwork.TESTNET,
                 effectiveBackend = DogecoinBackend.SPV,
                 spvSynced = true,
                 nodeReady = false
@@ -1085,6 +1087,7 @@ class DogecoinWalletTest {
         // Effective RPC covers both a persisted node backend and session-only home-node assist.
         assertTrue(
             canReviewDogecoinSend(
+                network = DogecoinNetwork.TESTNET,
                 effectiveBackend = DogecoinBackend.RPC,
                 spvSynced = false,
                 nodeReady = true
@@ -1092,9 +1095,86 @@ class DogecoinWalletTest {
         )
         assertFalse(
             canReviewDogecoinSend(
+                network = DogecoinNetwork.TESTNET,
                 effectiveBackend = DogecoinBackend.RPC,
                 spvSynced = true,
                 nodeReady = false
+            )
+        )
+
+        // With no TPN profile/session type in the product yet, every generic mainnet node route is read-only.
+        assertFalse(
+            canReviewDogecoinSend(
+                network = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = true,
+                nodeReady = true
+            )
+        )
+        assertFalse(
+            canReviewDogecoinSend(
+                network = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.EXPLORER,
+                spvSynced = true,
+                nodeReady = true
+            )
+        )
+        // The existing mainnet Built-in route stays governed only by its SPV sync readiness here.
+        assertTrue(
+            canReviewDogecoinSend(
+                network = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+    }
+
+    @Test
+    fun `broadcast readiness blocks generic mainnet without cross unlocking routes`() {
+        assertFalse(
+            canBroadcastDogecoinSend(
+                transactionNetwork = DogecoinNetwork.MAINNET,
+                selectedNetwork = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = true,
+                nodeReady = true
+            )
+        )
+        assertTrue(
+            canBroadcastDogecoinSend(
+                transactionNetwork = DogecoinNetwork.MAINNET,
+                selectedNetwork = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+        assertTrue(
+            canBroadcastDogecoinSend(
+                transactionNetwork = DogecoinNetwork.TESTNET,
+                selectedNetwork = DogecoinNetwork.TESTNET,
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = false,
+                nodeReady = true
+            )
+        )
+        assertFalse(
+            canBroadcastDogecoinSend(
+                transactionNetwork = DogecoinNetwork.TESTNET,
+                selectedNetwork = DogecoinNetwork.MAINNET,
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = true,
+                nodeReady = true
+            )
+        )
+        assertFalse(
+            canBroadcastDogecoinSend(
+                transactionNetwork = DogecoinNetwork.TESTNET,
+                selectedNetwork = DogecoinNetwork.TESTNET,
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = false,
+                nodeReady = true
             )
         )
     }

@@ -455,6 +455,8 @@
   <string name="dogecoin_send_failed">Dogecoin transaction failed.</string>
   <string name="dogecoin_send_working">Preparing transaction...</string>
   <string name="dogecoin_send_review">Review send</string>
+  <string name="dogecoin_mainnet_rpc_spend_requires_tpn">My node is read-only on mainnet. Sending requires a Trusted personal node profile and an active session. Choose Built-in to send for now.</string>
+  <string name="dogecoin_mainnet_rpc_helper_unavailable">Peer helping is unavailable on mainnet. Trusted personal node transactions will not use helper relay.</string>
   <string name="dogecoin_send_receipt">Broadcast on Dogecoin %1$s\nTxid: %2$s\nTo: %3$s\nAmount: %4$s DOGE\nFee: %5$s DOGE\nTotal debit: %6$s DOGE\nChange: %7$s DOGE</string>
   <string name="dogecoin_send_receipt_change_address">Change to: %1$s</string>
   <string name="dogecoin_send_receipt_label">Label: %1$s</string>

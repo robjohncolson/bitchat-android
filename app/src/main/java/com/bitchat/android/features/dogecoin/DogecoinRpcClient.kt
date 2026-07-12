@@ -460,6 +460,7 @@ class DogecoinRpcClient private constructor(
         network: DogecoinNetwork = DogecoinNetwork.DEFAULT
     ): String =
         withContext(Dispatchers.IO) {
+            requireDogecoinGenericRpcSpendAllowed(network)
             val rpcConfig = normalizedRpcConfig(config, network)
             val normalizedRawTransactionHex = normalizedRawTransactionHex(rawTransactionHex)
             requireNetworkReady(rpcConfig, network)
@@ -494,6 +495,7 @@ class DogecoinRpcClient private constructor(
         network: DogecoinNetwork = DogecoinNetwork.DEFAULT
     ): DogecoinMempoolAcceptance =
         withContext(Dispatchers.IO) {
+            requireDogecoinGenericRpcSpendAllowed(network)
             val rpcConfig = normalizedRpcConfig(config, network)
             val normalizedRawTransactionHex = normalizedRawTransactionHex(rawTransactionHex)
             requireNetworkReady(rpcConfig, network)

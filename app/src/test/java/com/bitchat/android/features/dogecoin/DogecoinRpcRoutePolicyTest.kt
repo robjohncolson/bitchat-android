@@ -143,6 +143,26 @@ class DogecoinRpcRoutePolicyTest {
     }
 
     @Test
+    fun `generic mainnet RPC spend calls fail before parsing bytes or making requests`() = runTest {
+        val requests = mutableListOf<String>()
+        val client = DogecoinRpcClient(recordingClient(requests))
+        val config = DogecoinRpcConfig(url = "http://127.0.0.1:22555", username = "u", password = "p")
+
+        val preflight = runCatching {
+            client.testMempoolAcceptance(config, "not-hex", DogecoinNetwork.MAINNET)
+        }
+        val broadcast = runCatching {
+            client.sendRawTransaction(config, "not-hex", DogecoinNetwork.MAINNET)
+        }
+
+        assertTrue(preflight.isFailure)
+        assertTrue(preflight.exceptionOrNull()?.message.orEmpty().contains("Trusted personal node"))
+        assertTrue(broadcast.isFailure)
+        assertTrue(broadcast.exceptionOrNull()?.message.orEmpty().contains("Trusted personal node"))
+        assertTrue("mainnet generic RPC must receive neither signed bytes nor readiness probes", requests.isEmpty())
+    }
+
+    @Test
     fun `trusted local endpoint still works through the chokepoint`() = runTest {
         val requests = mutableListOf<String>()
         val client = DogecoinRpcClient(recordingClient(requests))

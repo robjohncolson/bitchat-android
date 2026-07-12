@@ -666,7 +666,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClientWithStatus(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> 200 to rpcResponse(
-                        """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false}"""
+                        """{"chain":"test","blocks":5000000,"headers":5000000,"initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> 200 to rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> 200 to rpcResponse("""[{"allowed":true}]""")
@@ -680,7 +680,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected broadcast to fail")
         } catch (e: IllegalStateException) {
@@ -2665,7 +2665,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":${rpcString(expectedTxid.uppercase())},"allowed":true}]"""
@@ -2678,7 +2678,7 @@ class DogecoinRpcClientTest {
         val acceptance = client.testMempoolAcceptance(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = rawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "testmempoolaccept"), methods)
@@ -2699,7 +2699,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":${rpcString(expectedTxid)},"allowed":false,"reject-reason":"min relay fee not met"}]"""
@@ -2712,7 +2712,7 @@ class DogecoinRpcClientTest {
         val acceptance = client.testMempoolAcceptance(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = rawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "testmempoolaccept"), methods)
@@ -2733,7 +2733,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":${rpcString(expectedTxid)},"allowed":"true"}]"""
@@ -2747,7 +2747,7 @@ class DogecoinRpcClientTest {
             client.testMempoolAcceptance(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected string allowed flag rejection")
         } catch (e: IllegalArgumentException) {
@@ -2764,7 +2764,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":123,"allowed":true}]"""
@@ -2778,7 +2778,7 @@ class DogecoinRpcClientTest {
             client.testMempoolAcceptance(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected non-string mempool txid rejection")
         } catch (e: IllegalArgumentException) {
@@ -2796,7 +2796,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":${rpcString(expectedTxid)},"allowed":false,"reject-reason":123}]"""
@@ -2810,7 +2810,7 @@ class DogecoinRpcClientTest {
             client.testMempoolAcceptance(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected non-string mempool reject reason rejection")
         } catch (e: IllegalArgumentException) {
@@ -2828,7 +2828,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcResponse(
                         """[{"txid":${rpcString(expectedTxid)},"allowed":true}]"""
@@ -2841,7 +2841,7 @@ class DogecoinRpcClientTest {
         val acceptance = client.testMempoolAcceptance(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = rawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "testmempoolaccept"), methods)
@@ -2856,7 +2856,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "testmempoolaccept" -> rpcError(
                         code = -32601,
@@ -2870,7 +2870,7 @@ class DogecoinRpcClientTest {
         val acceptance = client.testMempoolAcceptance(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = sampleRawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "testmempoolaccept"), methods)
@@ -2893,7 +2893,7 @@ class DogecoinRpcClientTest {
             client.testMempoolAcceptance(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = "01000000000000000000",
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected no-input raw transaction rejection")
         } catch (e: IllegalArgumentException) {
@@ -2911,7 +2911,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -2926,7 +2926,7 @@ class DogecoinRpcClientTest {
         val txid = client.sendRawTransaction(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = rawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "getnetworkinfo", "testmempoolaccept", "sendrawtransaction"), methods)
@@ -2940,7 +2940,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":"false"}"""
+                        """{"chain":"test","initialblockdownload":"false"}"""
                     )
                     else -> error("Unexpected RPC method $method")
                 }
@@ -2951,7 +2951,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected invalid initial block download flag rejection")
         } catch (e: IllegalArgumentException) {
@@ -2978,7 +2978,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected invalid chain rejection")
         } catch (e: IllegalArgumentException) {
@@ -2996,7 +2996,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcError(
@@ -3012,7 +3012,7 @@ class DogecoinRpcClientTest {
         val txid = client.sendRawTransaction(
             config = DogecoinRpcConfig(url = "http://dogecoin.local"),
             rawTransactionHex = rawTransactionHex,
-            network = DogecoinNetwork.MAINNET
+            network = DogecoinNetwork.TESTNET
         )
 
         assertEquals(listOf("getblockchaininfo", "getnetworkinfo", "testmempoolaccept", "sendrawtransaction"), methods)
@@ -3026,7 +3026,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse(
                         """{"networkactive":true,"connections":8,"softdustlimit":2.0}"""
@@ -3040,7 +3040,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected node soft dust raw transaction rejection")
         } catch (e: IllegalArgumentException) {
@@ -3059,7 +3059,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3074,7 +3074,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected final mempool policy rejection")
         } catch (e: IllegalStateException) {
@@ -3096,7 +3096,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3112,7 +3112,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected mismatched broadcast txid rejection")
         } catch (e: IllegalArgumentException) {
@@ -3130,7 +3130,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3146,7 +3146,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected malformed broadcast txid rejection")
         } catch (e: IllegalArgumentException) {
@@ -3164,7 +3164,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3180,7 +3180,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected non-string broadcast txid rejection")
         } catch (e: IllegalArgumentException) {
@@ -3196,7 +3196,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":0}""")
                     else -> error("Unexpected RPC method $method")
@@ -3208,7 +3208,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected no-peer broadcast readiness rejection")
         } catch (e: IllegalStateException) {
@@ -3224,7 +3224,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true}""")
                     else -> error("Unexpected RPC method $method")
@@ -3236,7 +3236,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected missing-peer-count broadcast readiness rejection")
         } catch (e: IllegalStateException) {
@@ -3258,7 +3258,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.example.com:22555"),
                 rawTransactionHex = sampleRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected public cleartext RPC URL rejection")
         } catch (e: IllegalArgumentException) {
@@ -3281,7 +3281,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = "zz",
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected non-hex raw transaction rejection")
         } catch (e: IllegalArgumentException) {
@@ -3303,7 +3303,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = zeroOutputRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected zero output raw transaction rejection")
         } catch (e: IllegalArgumentException) {
@@ -3325,7 +3325,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = dustOutputRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected dust output raw transaction rejection")
         } catch (e: IllegalArgumentException) {
@@ -3347,7 +3347,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = nonStandardOutputRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected non-standard output script rejection")
         } catch (e: IllegalArgumentException) {
@@ -3369,7 +3369,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = overflowingOutputTotalRawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected overflowing output total rejection")
         } catch (e: IllegalArgumentException) {
@@ -3387,7 +3387,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3406,7 +3406,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected missing-input broadcast rejection")
         } catch (e: IllegalStateException) {
@@ -3427,7 +3427,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3446,7 +3446,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected low-fee broadcast rejection")
         } catch (e: IllegalStateException) {
@@ -3467,7 +3467,7 @@ class DogecoinRpcClientTest {
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","initialblockdownload":false}"""
+                        """{"chain":"test","initialblockdownload":false}"""
                     )
                     "getnetworkinfo" -> rpcResponse("""{"networkactive":true,"connections":8}""")
                     "testmempoolaccept" -> rpcResponse(
@@ -3485,7 +3485,7 @@ class DogecoinRpcClientTest {
             client.sendRawTransaction(
                 config = DogecoinRpcConfig(url = "http://dogecoin.local"),
                 rawTransactionHex = rawTransactionHex,
-                network = DogecoinNetwork.MAINNET
+                network = DogecoinNetwork.TESTNET
             )
             fail("Expected malformed broadcast RPC error code rejection")
         } catch (e: IllegalArgumentException) {
