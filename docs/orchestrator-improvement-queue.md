@@ -61,16 +61,28 @@ Report:
 P0-1 … P2-3, DES-1, HOME-NODE-SEND, VERIFYPROGRESS-CLAMP  → shipped on simple-family-profile
 ```
 
-### Wave 2 (ACTIVE) — home-node bulletproofing
+### Wave 2 (DONE) — home-node bulletproofing
 
 Full specs: **`docs/home-node-ux-hardening-spec.md`**
 
 ```text
-CONF-RPC-PROGRESS   Confirmation UI from node while RPC/assist (Codex)
-WALLET-OPEN-HARDEN  Wallet open never freezes / SPV lifecycle thrash (Codex)
+CONF-RPC-PROGRESS   DONE — node-path confirmation progress
+WALLET-OPEN-HARDEN  DONE — wallet open / SPV thrash
+SPV-IO-UNBLOCK      DONE — SPV start no longer blocks home-node RPC status
 ```
 
-**Dependencies:** Run **CONF-RPC-PROGRESS first**, then **WALLET-OPEN-HARDEN** (both touch `DogecoinWalletSheet.kt`). Do not parallelize without orchestrator file split.
+### Wave 3 (ACTIVE) — mainnet SPV honesty
+
+Spec detail in card bodies below; also see live findings (2026-07-12): mainnet address
+`DRjrQ6…` had ~38.81 DOGE via `doge-spv-balance` while UI stayed on Syncing / empty balance;
+height can stall ~1k behind tip with peers>0; process-owned SPV can lag a network switch.
+
+```text
+SPV-BALANCE-REFRESH   Always re-pull SPV balance; fix misleading "0 behind" (Codex first)
+SPV-NETWORK-REBIND    Network switch must stop old SPV and start correct chain (Codex second)
+```
+
+**Dependencies:** Prefer **SPV-BALANCE-REFRESH** first (UI refresh). **SPV-NETWORK-REBIND** next (lifecycle).
 
 ### Later (not opened)
 
@@ -218,8 +230,33 @@ DES-1 implement     Mainnet TRUSTED_PERSONAL_NODE (only after DES-1 decisions)
 **Goal:** Progressive open; no SPV stop thrash on dismiss; IO serialized/cancellable; responsive chrome.  
 **Must not:** weaken money gates; block Main on SPV/RPC; large state-hoist rewrite unless tiny helper.  
 **Done means:** 20× rapid open/close stable; cold open interactive quickly; suite green.  
-**Depends on:** prefer after CONF-RPC-PROGRESS (same sheet file).  
+**Status:** DONE (plus SPV-IO-UNBLOCK follow-up).  
 **Out of scope:** full section split, CONF progress logic (unless conflict merge).
+
+---
+
+### SPV-BALANCE-REFRESH — Show SPV balance while headers crawl
+
+**Preferred agent:** Codex  
+**Spec:** `docs/spv-ui-honesty-spec.md` § SPV-BALANCE-REFRESH  
+**Problem:** Mainnet SPV service holds real balance (`doge-spv-balance`) while Coin UI shows Syncing / empty. Balance effect only re-runs on `chainHeight`/`synced`; stall after nulling balance leaves UI empty. “0 behind” when `bestPeerHeight==0` is misleading.  
+**Goal:** Always snapshot balance after SPV start; periodic re-pull while null or syncing; honest behind/peers labels. EN+JA.  
+**Must not:** money-gate / minPeers / checkpoint / mainnet assist changes.  
+**Done means:** unit tests for label helper; suite green; manual funded mainnet shows balance while still behind tip.  
+**Out of scope:** header download speed; TRUSTED_PERSONAL_NODE.
+
+---
+
+### SPV-NETWORK-REBIND — Network switch rebinds SPV chain
+
+**Preferred agent:** Codex  
+**Spec:** `docs/spv-ui-honesty-spec.md` § SPV-NETWORK-REBIND  
+**Problem:** UI MAINNET + mainnet address while process SPV still `net=testnet`.  
+**Goal:** Network change stops prior SPV and starts correct chain; status matches sheet network; keep other network’s files.  
+**Must not:** cross-chain UTXO feed; wipe other-chain store; gate changes.  
+**Done means:** switch testnet↔mainnet; `spv net=` tracks; suite green.  
+**Depends on:** after SPV-BALANCE-REFRESH if same files.  
+**Out of scope:** mainnet home-node assist.
 
 ---
 
