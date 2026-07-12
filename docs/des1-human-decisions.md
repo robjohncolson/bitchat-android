@@ -47,8 +47,8 @@
 ## Implementation order (after this lock)
 
 ```text
-DES-1-GUARDRAIL   Fail-closed generic mainnet My node spend (small, first)
-DES-1-IMPL        Phased PRs per design § boundaries (not one mega PR)
+DES-1-GUARDRAIL   DONE
+DES-1-A … F       See docs/des1-implementation-plan.md (start with A — profile, no spend)
 ```
 
-Share/export of connection profiles can land as a small UX card during or after guardrail; must never include WIF.
+Share/export of connection profiles is DES-1-F; must never include WIF.
