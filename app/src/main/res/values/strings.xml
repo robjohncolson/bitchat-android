@@ -302,6 +302,8 @@
   <string name="dogecoin_node_test_hint">Test checks the address above without saving it. Tap Save to actually use it.</string>
   <string name="dogecoin_node_status_reflects_saved">Node status below reflects your saved settings, not the edits above.</string>
   <string name="dogecoin_node_reported_provenance">Node-reported — not independently verified.</string>
+  <string name="dogecoin_rpc_confirmation_provenance">Home node reports · %1$d/%2$d — not independently verified by Built-in.</string>
+  <string name="dogecoin_rpc_confirmation_unavailable_provenance">Home-node confirmation status is not available yet — not independently verified by Built-in.</string>
   <string name="dogecoin_node_empty_watch">Your node reports no coins for this address yet. It may still be catching up on this address.</string>
   <string name="dogecoin_rpc_endpoint_public_https_blocked">This is an unverified public HTTPS address, so bitchat won\'t send RPC credentials to it. Use your own node on a private network, or its exact Tailscale address (https://&lt;machine&gt;.&lt;tailnet&gt;.ts.net).</string>
   <string name="dogecoin_rpc_endpoint_onion_blocked">Direct .onion node addresses aren\'t supported — contacting one outside Tor would leak the onion name. Publish the node privately instead (e.g. Tailscale Serve).</string>

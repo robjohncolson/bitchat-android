@@ -379,6 +379,41 @@ class DogecoinRpcClient(
                 .take(requestedCount)
         }
 
+    /**
+     * Read-only confirmation observation for one just-broadcast wallet transaction. This never feeds coin
+     * selection or signing; it exists so RPC/home-node confirmation UI can follow the effective backend.
+     */
+    internal suspend fun getTransactionConfirmations(
+        config: DogecoinRpcConfig,
+        txid: String,
+        network: DogecoinNetwork = DogecoinNetwork.DEFAULT
+    ): Int = withContext(Dispatchers.IO) {
+        val rpcConfig = normalizedRpcConfig(config, network)
+        val expectedTxid = txid.trim().lowercase()
+        require(txidRegex.matches(expectedTxid)) {
+            "Dogecoin transaction id must be exactly 64 hexadecimal characters."
+        }
+        requireNetworkReady(rpcConfig, network)
+
+        val result = callObject(
+            rpcConfig,
+            "gettransaction",
+            JsonArray().apply {
+                add(expectedTxid)
+                add(true)
+            }
+        )
+        val returnedTxid = parseOptionalString(result, "txid", "gettransaction")
+            ?.trim()
+            ?.lowercase()
+            ?: throw IllegalArgumentException("RPC gettransaction returned no valid txid.")
+        require(returnedTxid == expectedTxid) {
+            "RPC gettransaction returned a different txid."
+        }
+        parseOptionalNonNegativeInt(result, "confirmations", "gettransaction")
+            ?: throw IllegalArgumentException("RPC gettransaction returned no valid confirmations.")
+    }
+
     suspend fun sendRawTransaction(
         config: DogecoinRpcConfig,
         rawTransactionHex: String,
@@ -1441,6 +1476,7 @@ class DogecoinRpcClient(
         private val walletRpcMethods = setOf(
             "getwalletinfo",
             "importaddress",
+            "gettransaction",
             "listunspent",
             "listtransactions",
             "rescanblockchain",

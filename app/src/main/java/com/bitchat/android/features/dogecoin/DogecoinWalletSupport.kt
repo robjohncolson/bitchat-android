@@ -220,6 +220,35 @@ internal fun canReviewDogecoinSend(
     DogecoinBackend.EXPLORER -> nodeReady
 }
 
+internal enum class DogecoinConfirmationProgressSource {
+    SPV,
+    RPC
+}
+
+/** Confirmation observation follows the effective read/broadcast route, including session-only assist. */
+internal fun dogecoinConfirmationProgressSource(
+    effectiveBackend: DogecoinBackend
+): DogecoinConfirmationProgressSource = when (effectiveBackend) {
+    DogecoinBackend.SPV -> DogecoinConfirmationProgressSource.SPV
+    DogecoinBackend.RPC,
+    DogecoinBackend.EXPLORER -> DogecoinConfirmationProgressSource.RPC
+}
+
+/** Pure presentation policy; node progress never depends on SPV sync state. */
+internal fun shouldShowDogecoinConfirmingRing(
+    effectiveBackend: DogecoinBackend,
+    hasActiveReceipt: Boolean,
+    confirmationDepth: Int?,
+    spvSyncedOrNearTip: Boolean
+): Boolean {
+    val depth = confirmationDepth ?: return false
+    if (!hasActiveReceipt || depth !in 0 until DOGECOIN_SPV_CONFIRM_TARGET) return false
+    return when (dogecoinConfirmationProgressSource(effectiveBackend)) {
+        DogecoinConfirmationProgressSource.RPC -> true
+        DogecoinConfirmationProgressSource.SPV -> spvSyncedOrNearTip
+    }
+}
+
 internal enum class DogecoinFeePreset(val labelResId: Int) {
     SLOW(R.string.dogecoin_send_fee_preset_slow),
     NORMAL(R.string.dogecoin_send_fee_preset_normal),
@@ -285,6 +314,10 @@ internal const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
 // gold ring), and the poll budget before a never-confirming tx reverts the ring to the idle balance.
 internal const val DOGECOIN_SPV_CONFIRM_TARGET = 6
 internal const val DOGECOIN_SPV_CONFIRM_POLLS = 80
+// Active node-path sends poll quickly enough to expose intermediate confirmations. At normal response latency,
+// 300 attempts at this cadence roughly match the existing SPV poll window; the attempt budget is strictly bounded.
+internal const val DOGECOIN_RPC_CONFIRM_POLLS = 300
+internal const val DOGECOIN_RPC_CONFIRM_INTERVAL_MS = 4_000L
 // Presentation-only: show the confirmation fill (not "Syncing") for a pending tx while within this many blocks
 // of the tip, so a momentary `synced` flap (peer dip / a fresh block) can't mask it. confirmationDepth is read
 // from our own chain head, so it stays accurate this close to the tip.

@@ -420,6 +420,8 @@
   <string name="dogecoin_node_test_hint">「テスト」は保存せずに上のアドレスを確認します。実際に使うには「保存」をタップしてください。</string>
   <string name="dogecoin_node_status_reflects_saved">下のノード状態は、編集中の内容ではなく保存済みの設定を反映します。</string>
   <string name="dogecoin_node_reported_provenance">ノード報告値です（独立した検証はされていません）。</string>
+  <string name="dogecoin_rpc_confirmation_provenance">ホームノードの報告 · %1$d/%2$d — 内蔵機能では独立に検証されていません。</string>
+  <string name="dogecoin_rpc_confirmation_unavailable_provenance">ホームノードの確認状況はまだ取得できません — 内蔵機能では独立に検証されていません。</string>
   <string name="dogecoin_node_empty_watch">このアドレスのコインはノードにまだ見えていません。アドレスの取り込みが続いている可能性があります。</string>
   <string name="simple_family_fallback">家族</string>
   <string name="simple_cd_back">戻る</string>

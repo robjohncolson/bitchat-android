@@ -150,6 +150,12 @@ internal data class WalletTxRow(
     val timeSeconds: Long?
 )
 
+/** Binds presentation-only confirmation depth to its txid so receipts can never inherit stale progress. */
+private data class DogecoinConfirmationObservation(
+    val txid: String,
+    val depth: Int
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DogecoinWalletSheet(
@@ -1657,28 +1663,81 @@ fun DogecoinWalletSheet(
         }
     }
 
-    // Confirmation ring fill (presentation-only): track an SPV-sent tx's depth 0..target so the focal ring can
-    // fill 0->6 as blocks land. Independent of the receipt's Claimed->Confirmed corroboration poll above (which
-    // flips at depth 1); this one runs to the target. Bounded so a never-confirming tx eventually reverts the
-    // ring to the idle balance. Reads only confirmationDepth() — never touches the money path.
-    var confirmingDepth by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(sentReceipt?.txid, dogecoinBackend, selectedNetwork) {
+    // Confirmation ring fill (presentation-only): observe the just-sent tx through the effective backend.
+    // SPV keeps its existing validated-chain depth; RPC/home-node assist asks the wallet-scoped node for this
+    // exact txid. Neither result feeds coin selection, signing, policy checks, or broadcast authorization.
+    var confirmationObservation by remember { mutableStateOf<DogecoinConfirmationObservation?>(null) }
+    val confirmingDepth = confirmationObservation
+        ?.takeIf { observation -> observation.txid.equals(sentReceipt?.txid, ignoreCase = true) }
+        ?.depth
+    val confirmationProgressSource = dogecoinConfirmationProgressSource(dogecoinBackend)
+    LaunchedEffect(
+        sentReceipt?.txid,
+        dogecoinBackend,
+        selectedNetwork,
+        snapshot.key.address,
+        savedRpcConfig,
+        rpcConfigRevision
+    ) {
         val receipt = sentReceipt
-        if (receipt == null || dogecoinBackend != DogecoinBackend.SPV || receipt.network != selectedNetwork) {
-            confirmingDepth = null
+        if (receipt == null || receipt.network != selectedNetwork) {
+            confirmationObservation = null
             return@LaunchedEffect
         }
         val txid = receipt.txid
-        repeat(DOGECOIN_SPV_CONFIRM_POLLS) {
-            // null = the tx isn't (yet) known to the SPV wallet (e.g. lost/replaced) — show NO confirming ring
-            // rather than a fake, never-progressing "0 of 6"; a known tx reports depth 0..target and drives the fill.
-            val depth = withContext(Dispatchers.IO) { spvService.confirmationDepth(selectedNetwork, txid) }
-            confirmingDepth = depth?.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET)
-            if (depth != null && depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
-            delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+        confirmationObservation = null
+        when (confirmationProgressSource) {
+            DogecoinConfirmationProgressSource.SPV -> repeat(DOGECOIN_SPV_CONFIRM_POLLS) {
+                // null = the tx isn't (yet) known to the SPV wallet (e.g. lost/replaced) — show NO confirming ring
+                // rather than a fake, never-progressing 0 of 6; a known tx reports depth 0..target and drives it.
+                val depth = withContext(Dispatchers.IO) {
+                    spvService.confirmationDepth(selectedNetwork, txid)
+                }
+                confirmationObservation = depth?.let {
+                    DogecoinConfirmationObservation(txid, it.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET))
+                }
+                if (depth != null && depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
+                delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+            }
+
+            DogecoinConfirmationProgressSource.RPC -> {
+                val network = selectedNetwork
+                val address = snapshot.key.address
+                val config = savedRpcConfig
+                val configRevision = rpcConfigRevision
+                val requestGeneration = rpcRequestGeneration.get()
+                val activeRpcClient = guardedRpcClient(requestGeneration)
+                repeat(DOGECOIN_RPC_CONFIRM_POLLS) {
+                    // A missing/error response is UNKNOWN, not zero. Keep polling without inventing progress.
+                    val depth = runCatching {
+                        activeRpcClient.getTransactionConfirmations(config, txid, network)
+                    }.getOrNull()
+                    val stillRelevant = sentReceipt?.txid == txid &&
+                        sentReceipt?.network == network &&
+                        selectedNetwork == network &&
+                        snapshot.key.address == address &&
+                        rpcConfigRevision == configRevision &&
+                        dogecoinConfirmationProgressSource(dogecoinBackend) ==
+                        DogecoinConfirmationProgressSource.RPC
+                    if (!stillRelevant) return@LaunchedEffect
+                    if (depth != null) {
+                        confirmationObservation = DogecoinConfirmationObservation(
+                            txid,
+                            depth.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET)
+                        )
+                        if (depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
+                    } else {
+                        // The node's current answer is unknown; do not keep presenting an older node claim.
+                        confirmationObservation = null
+                    }
+                    delay(DOGECOIN_RPC_CONFIRM_INTERVAL_MS)
+                }
+            }
         }
         // Budget exhausted without reaching the target — stop showing a stale count; revert to idle/balance.
-        confirmingDepth = null
+        if (confirmationObservation?.txid.equals(txid, ignoreCase = true)) {
+            confirmationObservation = null
+        }
     }
 
     // Activity / pending list (SPV): poll the READ-ONLY wallet-tx snapshot so the pending cards + full activity
@@ -1697,12 +1756,20 @@ fun DogecoinWalletSheet(
             delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
         }
     }
-    // Backend-agnostic rows: SPV from the wallet snapshot, RPC from getWalletActivity (already polled below).
-    val txRows: List<WalletTxRow> = remember(spvTxs, walletActivity, dogecoinBackend) {
-        if (dogecoinBackend == DogecoinBackend.SPV) {
+    // Backend-agnostic rows: SPV from the wallet snapshot, RPC from wallet activity plus an exact, actively
+    // polled sent-receipt row. The overlay survives through depth 6 so Pending transitions into history/detail.
+    val txRows: List<WalletTxRow> = remember(
+        spvTxs,
+        walletActivity,
+        dogecoinBackend,
+        sentReceipt,
+        confirmingDepth,
+        selectedNetwork
+    ) {
+        if (confirmationProgressSource == DogecoinConfirmationProgressSource.SPV) {
             spvTxs.map { WalletTxRow(it.txid, it.incoming, it.amountKoinu, it.confirmations, it.timeSeconds) }
         } else {
-            walletActivity.map {
+            val baseRows = walletActivity.map {
                 WalletTxRow(
                     txid = it.txid,
                     incoming = !it.category.equals("send", ignoreCase = true),
@@ -1710,6 +1777,29 @@ fun DogecoinWalletSheet(
                     confirmations = it.confirmations.coerceAtLeast(0),
                     timeSeconds = it.timeSeconds
                 )
+            }
+            val receipt = sentReceipt?.takeIf { it.network == selectedNetwork }
+            val depth = confirmingDepth
+            // The targeted lookup owns the active receipt's truth. Never fall back to a stale/coerced activity
+            // row for that txid while its exact status is unknown (including a conflict reported as negative).
+            val baseRowsWithoutActiveReceipt = if (receipt != null) {
+                baseRows.filterNot { it.txid.equals(receipt.txid, ignoreCase = true) }
+            } else {
+                baseRows
+            }
+            if (receipt != null && depth != null) {
+                // The active receipt is authoritatively an outgoing send from this UI. Core activity may expose
+                // the same self-send/change txid as a receive row, so do not let that flip the presentation.
+                val trackedRow = WalletTxRow(
+                    txid = receipt.txid,
+                    incoming = false,
+                    amountKoinu = receipt.sendAmountKoinu,
+                    confirmations = depth,
+                    timeSeconds = null
+                )
+                listOf(trackedRow) + baseRowsWithoutActiveReceipt
+            } else {
+                baseRowsWithoutActiveReceipt
             }
         }
     }
@@ -1839,15 +1929,17 @@ fun DogecoinWalletSheet(
                     val spv = dogecoinBackend == DogecoinBackend.SPV
                     val s = spvStatus
                     val colors = dogeWalletColors
-                    // A pending SPV send fills the ring 0..target as confirmations land. The depth comes from our
-                    // OWN chain head (confirmationDepth()), accurate regardless of peer count — so show CONFIRMING
-                    // even when the strict `synced` flag momentarily flaps (a peer dip below the floor, or a fresh
-                    // block a block or two ahead), as long as we're effectively at the tip. A genuine backlog
-                    // (> DOGECOIN_SPV_NEARTIP_BLOCKS) keeps it in SYNCING.
+                    // A pending send fills the ring from the effective route: our validated SPV chain, or the
+                    // configured home node while RPC/assist is active. SPV keeps its synced/near-tip presentation
+                    // gate; node progress deliberately does not depend on the background SPV sync state.
                     val confDepth = confirmingDepth
-                    val hasPending = spv && confDepth != null && confDepth < DOGECOIN_SPV_CONFIRM_TARGET
                     val nearTip = s.bestPeerHeight > 0L && s.blocksBehind <= DOGECOIN_SPV_NEARTIP_BLOCKS
-                    val confirming = hasPending && (s.synced || nearTip)
+                    val confirming = shouldShowDogecoinConfirmingRing(
+                        effectiveBackend = dogecoinBackend,
+                        hasActiveReceipt = sentReceipt?.network == selectedNetwork,
+                        confirmationDepth = confDepth,
+                        spvSyncedOrNearTip = s.synced || nearTip
+                    )
                     // Mutually exclusive with confirming: only show Syncing when behind AND not filling the ring.
                     val syncing = spv && s.running && !s.synced && !confirming
                     val syncProgress = if (syncing) {
@@ -1951,7 +2043,15 @@ fun DogecoinWalletSheet(
                         // from our own validated headers, so they carry no such caption.
                         if (!spv) {
                             Text(
-                                text = stringResource(R.string.dogecoin_node_reported_provenance),
+                                text = if (confirming) {
+                                    stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        confDepth!!,
+                                        DOGECOIN_SPV_CONFIRM_TARGET
+                                    )
+                                } else {
+                                    stringResource(R.string.dogecoin_node_reported_provenance)
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colors.muted
                             )
@@ -2022,6 +2122,25 @@ fun DogecoinWalletSheet(
                             pendingTxRows.take(DOGECOIN_PENDING_CARDS_LIMIT).forEach { row ->
                                 WalletTxRowView(row) { walletTxDetailId = row.txid }
                             }
+                            val activeReceipt = sentReceipt
+                            val activeRpcDepth = confirmingDepth
+                            if (
+                                confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                activeReceipt?.network == selectedNetwork &&
+                                activeRpcDepth != null &&
+                                activeRpcDepth < DOGECOIN_SPV_CONFIRM_TARGET
+                            ) {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        activeRpcDepth,
+                                        DOGECOIN_SPV_CONFIRM_TARGET
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = dogeWalletColors.muted,
+                                    lineHeight = 16.sp
+                                )
+                            }
                             val morePending = pendingTxRows.size - DOGECOIN_PENDING_CARDS_LIMIT
                             if (morePending > 0) {
                                 Text(
@@ -2088,6 +2207,26 @@ fun DogecoinWalletSheet(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = rc.muted
                                 )
+                                val activeRpcDepth = confirmingDepth
+                                if (
+                                    confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                    receipt.network == selectedNetwork
+                                ) {
+                                    Text(
+                                        text = if (activeRpcDepth != null) {
+                                            stringResource(
+                                                R.string.dogecoin_rpc_confirmation_provenance,
+                                                activeRpcDepth,
+                                                DOGECOIN_SPV_CONFIRM_TARGET
+                                            )
+                                        } else {
+                                            stringResource(R.string.dogecoin_rpc_confirmation_unavailable_provenance)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = rc.muted,
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 SelectionContainer {
                                     Text(
                                         text = receipt.txid.take(10) + "…" + receipt.txid.takeLast(8),
@@ -3342,6 +3481,26 @@ fun DogecoinWalletSheet(
                                         lineHeight = 16.sp
                                     )
                                 }
+                                val activeRpcDepth = confirmingDepth
+                                if (
+                                    confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                    receipt.network == selectedNetwork
+                                ) {
+                                    Text(
+                                        text = if (activeRpcDepth != null) {
+                                            stringResource(
+                                                R.string.dogecoin_rpc_confirmation_provenance,
+                                                activeRpcDepth,
+                                                DOGECOIN_SPV_CONFIRM_TARGET
+                                            )
+                                        } else {
+                                            stringResource(R.string.dogecoin_rpc_confirmation_unavailable_provenance)
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 SelectionContainer {
                                     Text(
                                         text = receiptText,
@@ -4299,6 +4458,25 @@ fun DogecoinWalletSheet(
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
                                 color = dogeWalletColors.muted
+                            )
+                        }
+                        if (confirmationProgressSource == DogecoinConfirmationProgressSource.RPC) {
+                            val isActiveReceipt = sentReceipt?.network == selectedNetwork &&
+                                sentReceipt?.txid.equals(txDetailRow.txid, ignoreCase = true)
+                            Text(
+                                text = if (isActiveReceipt) {
+                                    stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        txDetailRow.confirmations,
+                                        target
+                                    )
+                                } else {
+                                    stringResource(R.string.dogecoin_node_reported_provenance)
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = dogeWalletColors.muted,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 16.sp
                             )
                         }
                     }
