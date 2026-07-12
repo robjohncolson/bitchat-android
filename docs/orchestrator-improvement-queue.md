@@ -84,15 +84,20 @@ SPV-BALANCE-REFRESH   DONE — re-pull SPV balance; honest behind labels
 SPV-NETWORK-REBIND    DONE — network switch rebinds SPV chain
 ```
 
-**Dependencies:** Prefer **SPV-BALANCE-REFRESH** first (UI refresh). **SPV-NETWORK-REBIND** next (lifecycle).
+### Wave 4 (ACTIVE) — mainnet trusted personal node (gated)
 
-### Later (not opened)
+Full design: **`docs/dogecoin-trusted-personal-node-mainnet-design.md`**  
+Decision pack: **`docs/des1-human-decisions.md`**
 
 ```text
-WALLET-SESSION      State hoist for full sheet section split (money-path review)
-SPV-AUDIT-LATER     Independent SPV corroboration badge / dispute
-DES-1 implement     Mainnet TRUSTED_PERSONAL_NODE (only after DES-1 decisions)
+DES-1-DECISIONS   Human approve/override design defaults (orchestrator + human)
+DES-1-GUARDRAIL   Optional: fail-closed generic mainnet My node before full TPN
+DES-1-IMPL        Implement TRUSTED_PERSONAL_NODE only after DES-1-DECISIONS
+WALLET-SESSION    State hoist for full sheet section split (after money-path calm)
+SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 ```
+
+**Order:** DES-1-DECISIONS first. Code only after human answers (or "defaults OK").
 
 ---
 
