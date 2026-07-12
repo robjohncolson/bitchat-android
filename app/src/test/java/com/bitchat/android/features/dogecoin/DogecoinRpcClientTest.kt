@@ -2,6 +2,11 @@ package com.bitchat.android.features.dogecoin
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import okhttp3.Credentials
 import okhttp3.Interceptor
@@ -106,6 +111,41 @@ class DogecoinRpcClientTest {
         "76a914333333333333333333333333333333333333333388ac",
         "00000000"
     ).joinToString("")
+
+    @Test
+    fun `cancel active requests aborts a guarded clone call`() = runTest {
+        val entered = CountDownLatch(1)
+        val sawCancellation = CountDownLatch(1)
+        val blockingHttpClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                entered.countDown()
+                val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                while (!chain.call().isCanceled() && System.nanoTime() < deadlineNanos) {
+                    Thread.sleep(5)
+                }
+                if (!chain.call().isCanceled()) throw IOException("Test call was not canceled")
+                sawCancellation.countDown()
+                throw IOException("Canceled by wallet dismissal")
+            })
+            .build()
+        val client = DogecoinRpcClient(httpClient = blockingHttpClient)
+        val guardedClient = client.guardedBy { }
+
+        val result = async(Dispatchers.IO) {
+            guardedClient.getBlockchainStatus(
+                DogecoinRpcConfig(url = "http://dogecoin.local"),
+                DogecoinNetwork.TESTNET
+            )
+        }
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+
+        client.cancelActiveRequests()
+        val status = result.await()
+
+        assertTrue(sawCancellation.await(2, TimeUnit.SECONDS))
+        assertFalse(status.connected)
+        assertTrue(status.error.orEmpty().contains("Canceled by wallet dismissal"))
+    }
 
     @Test
     fun `blockchain status clamps Core progress overshoot and reports ready mainnet node`() = runTest {

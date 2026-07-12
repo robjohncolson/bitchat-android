@@ -124,12 +124,10 @@ class ChatViewModel(
     private val dataManager = DataManager(application.applicationContext)
     private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
     private val dogecoinWalletRepository by lazy { DogecoinWalletRepository(getApplication()) }
-    // On-device SPV light client (read-only, sync-on-demand). Created lazily on first SPV use; stopped in
-    // onCleared. Currently driven only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
-    private var dogecoinSpvService: com.bitchat.android.features.dogecoin.DogecoinSpvService? = null
+    // On-device SPV light client (read-only, sync-on-demand). The singleton is process-owned and currently
+    // driven here only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
     private fun dogecoinSpv(): com.bitchat.android.features.dogecoin.DogecoinSpvService =
         com.bitchat.android.features.dogecoin.DogecoinSpvService.getInstance(getApplication(), dogecoinWalletRepository)
-            .also { dogecoinSpvService = it }
 
     // --- Milestone 3b: broadcast-over-mesh (node-optional sender + opt-in helper) ---
     private val broadcastHelper by lazy {
@@ -693,7 +691,8 @@ class ChatViewModel(
         // ViewModel. Compare-and-clear so a newer ViewModel that already re-registered is not clobbered.
         com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.clearSinkIfCurrent(broadcastResultSink)
         com.bitchat.android.debug.DebugConsole.clearHostIfCurrent(debugConsoleHost)
-        dogecoinSpvService?.stop()  // release the SPV PeerGroup/store if it was started this session
+        // The SPV singleton is process-owned and intentionally survives ViewModel/sheet teardown; process death
+        // releases it. Stopping here would both block Main and let an old ViewModel race a newly opened wallet.
         // Note: Mesh service lifecycle is now managed by MainActivity
     }
     

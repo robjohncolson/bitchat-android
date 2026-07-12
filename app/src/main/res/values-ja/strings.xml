@@ -791,6 +791,10 @@
   <string name="dogecoin_wallet_network_summary">選択中の Dogecoin %1$s ウォレット。アドレスとノード RPC はこのネットワークと一致する必要があります。</string>
   <string name="dogecoin_wallet_reset">Dogecoin ウォレットをリセットしました</string>
   <string name="dogecoin_wallet_title">Dogecoin ウォレット</string>
+  <string name="dogecoin_wallet_opening">Dogecoin ウォレットを開いています…</string>
+  <string name="dogecoin_wallet_open_failed">ウォレットの準備に時間がかかっているか、完了できませんでした。もう一度お試しください。</string>
+  <string name="dogecoin_spv_starting">内蔵ウォレットを起動しています…</string>
+  <string name="dogecoin_spv_start_failed">内蔵ウォレットの起動に時間がかかっているか、完了できませんでした。もう一度お試しください。</string>
   <string name="dogecoin_wif_copied">鍵をクリップボードにコピーしました</string>
   <string name="dogecoin_wif_copy_missing">この鍵の WIF バックアップは記録されていません。このアドレスに入金・送金する前に、WIF をコピーして保管してください。</string>
   <string name="dogecoin_wif_copy_missing_testnet">このテストネット鍵の WIF バックアップは記録されていません。テストネットではバックアップは任意ですが、手順の練習のため推奨します。</string>

@@ -30,6 +30,7 @@ import org.libdohj.params.DogecoinTestNet3Params
 import java.io.File
 import java.net.InetSocketAddress
 import java.util.Date
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Sync status for the on-device SPV light client, observed by the wallet UI. */
 data class DogecoinSpvStatus(
@@ -73,15 +74,18 @@ data class DogecoinSpvTx(
  * (Option B — [DogecoinTransactionBuilder] stays the sole signer) and does NOT broadcast in this phase.
  *
  * Lifecycle: SYNC-ON-DEMAND, not a foreground service. [start] when the wallet sheet selects the SPV
- * backend / opens; [stop] on close or backend switch. Owned at app/ChatViewModel scope so it survives a
- * sheet re-open within a session. REGTEST is unsupported (no peers). bitcoinj's crypto is spongycastle,
- * isolated from the app's bcprov 1.70. See docs/dogecoin-spv-integration-plan.md.
+ * backend / opens; keep it process-scoped across sheet dismissal so sync and mmap state survive rapid reopen;
+ * [stop] on an explicit backend/network teardown. REGTEST is unsupported (no peers). bitcoinj's crypto is
+ * spongycastle, isolated from the app's bcprov 1.70. See docs/dogecoin-spv-integration-plan.md.
  */
 class DogecoinSpvService private constructor(
     private val appContext: Context,
     private val repository: DogecoinWalletRepository
 ) {
     private val lock = Any()
+    // Orders synchronous starts/stops with process-owned asynchronous stop requests. A later request wins,
+    // so an RPC switch survives sheet dismissal while a subsequent SPV reopen cancels that pending teardown.
+    private val lifecycleRequestGeneration = AtomicInteger(0)
 
     private var bitcoinjContext: org.bitcoinj.core.Context? = null
     private var wallet: Wallet? = null
@@ -132,17 +136,26 @@ class DogecoinSpvService private constructor(
      * for an already-running network. Heavy work (peer connect + header download) runs on bitcoinj threads.
      */
     fun start(network: DogecoinNetwork) {
+        startForRequest(network, reserveStartRequest())
+    }
+
+    /** Reserve desired-SPV ownership before a caller waits on any outer lifecycle serialization. */
+    internal fun reserveStartRequest(): Int = lifecycleRequestGeneration.incrementAndGet()
+
+    /** Execute a previously reserved start only if no newer stop/start request superseded it. */
+    internal fun startForRequest(network: DogecoinNetwork, requestGeneration: Int): Boolean =
         synchronized(lock) {
+            if (lifecycleRequestGeneration.get() != requestGeneration) return@synchronized false
             val params = paramsFor(network) ?: run {
                 Log.i(TAG, "SPV not supported for $network; ignoring start")
-                return
+                return@synchronized false
             }
-            if (activeNetwork == network && peerGroup != null) return // already running
+            if (activeNetwork == network && peerGroup != null) return@synchronized true // already running
             stopLocked() // tear down any other-network instance first
 
             val snapshot = repository.loadWalletIfPresent(network) ?: run {
                 Log.i(TAG, "No $network wallet key yet; not starting SPV")
-                return
+                return@synchronized false
             }
 
             val ctx = org.bitcoinj.core.Context(params)
@@ -281,11 +294,29 @@ class DogecoinSpvService private constructor(
                     }
                 }
             }
+            true
+        }
+
+    /** Stop the SPV client and release resources. Caller must already be off Main. */
+    fun stop() {
+        val requestGeneration = lifecycleRequestGeneration.incrementAndGet()
+        synchronized(lock) {
+            if (lifecycleRequestGeneration.get() == requestGeneration) stopLocked()
         }
     }
 
-    /** Stop the SPV client and release resources. Safe to call when not running. */
-    fun stop() = synchronized(lock) { stopLocked() }
+    /**
+     * Request process-owned teardown without making a UI lifecycle callback wait on the bitcoinj monitor.
+     * A later [start] supersedes a queued stop; a stop requested after a running start waits and then tears it down.
+     */
+    fun requestStop() {
+        val requestGeneration = lifecycleRequestGeneration.incrementAndGet()
+        torScope.launch {
+            synchronized(lock) {
+                if (lifecycleRequestGeneration.get() == requestGeneration) stopLocked()
+            }
+        }
+    }
 
     private fun stopLocked() {
         catchUpJob?.cancel()
@@ -328,8 +359,10 @@ class DogecoinSpvService private constructor(
             // failure SPV is left stopped (fail-closed, never a clearnet leak); the sheet lifecycle or the next
             // endpoint change re-starts it.
             runCatching {
+                val requestGeneration = lifecycleRequestGeneration.get()
                 stopLocked()
-                start(net)
+                // An internal transport rebuild must not supersede a later explicit stop request.
+                startForRequest(net, requestGeneration)
             }.onFailure { Log.w(TAG, "SPV transport rebuild failed; left stopped (fail-closed)", it) }
         }
     }
@@ -589,6 +622,9 @@ class DogecoinSpvService private constructor(
      * a store/wallet drift. REGTEST/no-op safe.
      */
     fun clearPersistedState(network: DogecoinNetwork) = synchronized(lock) {
+        // Destructive reset supersedes every previously reserved sheet start. A genuinely later open may
+        // reserve a new generation and rebuild only after these files have been removed.
+        lifecycleRequestGeneration.incrementAndGet()
         stopLocked()
         runCatching { blockStoreFile(network).delete() }
         runCatching { walletFile(network).delete() }

@@ -201,6 +201,10 @@
 
   <!-- Dogecoin wallet -->
   <string name="dogecoin_wallet_title">Dogecoin wallet</string>
+  <string name="dogecoin_wallet_opening">Opening Dogecoin wallet…</string>
+  <string name="dogecoin_wallet_open_failed">Wallet setup is taking longer than expected or could not finish. Try again.</string>
+  <string name="dogecoin_spv_starting">Starting Built-in wallet…</string>
+  <string name="dogecoin_spv_start_failed">Built-in wallet startup is taking longer than expected or could not finish. Try again.</string>
   <string name="dogecoin_wallet_network_summary">Selected Dogecoin %1$s wallet. Addresses and node RPC must match this network.</string>
   <string name="dogecoin_network_title">Network</string>
   <string name="dogecoin_network_mainnet">Mainnet</string>
