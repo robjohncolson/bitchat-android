@@ -84,20 +84,20 @@ SPV-BALANCE-REFRESH   DONE — re-pull SPV balance; honest behind labels
 SPV-NETWORK-REBIND    DONE — network switch rebinds SPV chain
 ```
 
-### Wave 4 (ACTIVE) — mainnet trusted personal node (gated)
+### Wave 4 (ACTIVE) — mainnet trusted personal node
 
 Full design: **`docs/dogecoin-trusted-personal-node-mainnet-design.md`**  
-Decision pack: **`docs/des1-human-decisions.md`**
+Decisions: **`docs/des1-human-decisions.md`** — **DECIDED 2026-07-12**
 
 ```text
-DES-1-DECISIONS   Human approve/override design defaults (orchestrator + human)
-DES-1-GUARDRAIL   Optional: fail-closed generic mainnet My node before full TPN
-DES-1-IMPL        Implement TRUSTED_PERSONAL_NODE only after DES-1-DECISIONS
+DES-1-DECISIONS   DONE — human locked defaults (+ prev-tx preference, shareable profile)
+DES-1-GUARDRAIL   NEXT — fail-closed generic mainnet My node spend (Codex)
+DES-1-IMPL        Phased TRUSTED_PERSONAL_NODE after guardrail
 WALLET-SESSION    State hoist for full sheet section split (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 ```
 
-**Order:** DES-1-DECISIONS first. Code only after human answers (or "defaults OK").
+**Order:** DES-1-GUARDRAIL first, then phased DES-1-IMPL. No mega-PR.
 
 ---
 
@@ -264,6 +264,18 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Done means:** switch testnet↔mainnet; `spv net=` tracks; suite green.  
 **Depends on:** after SPV-BALANCE-REFRESH if same files.  
 **Out of scope:** mainnet home-node assist.
+
+---
+
+### DES-1-GUARDRAIL — Fail-closed generic mainnet My node spend
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-human-decisions.md` (DECIDED) + design § “legacy mainnet RPC”  
+**Problem:** Generic mainnet “My node” / non-TPN RPC can look like a spend path without the full TRUSTED_PERSONAL_NODE ceremony.  
+**Goal:** On mainnet, unless a valid TPN profile **and** active session exist (TPN may not be fully implemented yet — treat as **absent** → fail closed), block **sign/broadcast via RPC**. Clear EN+JA copy that mainnet node spend requires Trusted personal node. Testnet home-node assist unchanged. SPV mainnet path unchanged.  
+**Must not:** implement full TPN; enable mainnet assist flip; WIF-to-Core; weaken SPV gates; bake host URLs into APK.  
+**Done means:** unit tests for “mainnet + generic RPC → cannot spend”; suite green; describe surfaces.  
+**Out of scope:** full TPN bind/session UI (DES-1-IMPL); share/export QR.
 
 ---
 
