@@ -2901,6 +2901,14 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                if (selectedNetwork == DogecoinNetwork.MAINNET) {
+                    item(key = "trusted_personal_node") {
+                        DogecoinTrustedPersonalNodeSettings(
+                            androidMainnetAddress = snapshot.key.address
+                        )
+                    }
+                }
+
                 item(key = "node") {
                     WalletCard {
                         Text(

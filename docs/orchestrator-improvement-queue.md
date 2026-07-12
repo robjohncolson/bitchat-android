@@ -93,8 +93,8 @@ Plan: **`docs/des1-implementation-plan.md`**
 ```text
 DES-1-DECISIONS   DONE
 DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
-DES-1-A           NEXT — TPN profile + ceremony (no spend) (Codex)
-DES-1-B           Activation + readiness + read-only display
+DES-1-A           DONE — TPN profile + ceremony (no spend)
+DES-1-B           NEXT — Activation + readiness + read-only display (Codex)
 DES-1-C           Proof-backed UTXO / prev-tx
 DES-1-D           Send coordinator (first TPN spend unlock)
 DES-1-E           Settlement + dispute + SPV-6
@@ -295,6 +295,7 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Must not:** enable mainnet RPC spend; importaddress/rescan from app; bake URLs into APK; DES-1-B–D scope creep.  
 **Done means:** origin/state unit tests; suite green; describe UI surfaces.  
 **Out of scope:** activation reads (B), proofs (C), send (D).
+**Status:** DONE.
 
 ---
 
