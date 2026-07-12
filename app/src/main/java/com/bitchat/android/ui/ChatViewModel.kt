@@ -7,6 +7,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.bitchat.android.favorites.FavoritesPersistenceService
 import com.bitchat.android.features.dogecoin.DogecoinAddress
+import com.bitchat.android.features.dogecoin.DogecoinDebugConsoleHandler
+import com.bitchat.android.features.dogecoin.DogepaidBroadcastClaim
+import com.bitchat.android.features.dogecoin.DogepaidPaymentContext
+import com.bitchat.android.features.dogecoin.DogepaidReceiptDeliveryPlanner
+import com.bitchat.android.features.dogecoin.DogepaidReceipt
+import com.bitchat.android.features.dogecoin.DogepaidReceiptCheckResult
+import com.bitchat.android.features.dogecoin.DogepaidReceiptObservationSource
 import com.bitchat.android.features.dogecoin.DogecoinNetwork
 import com.bitchat.android.features.dogecoin.DogecoinProtocol
 import com.bitchat.android.features.dogecoin.DogecoinWalletRepository
@@ -117,12 +124,10 @@ class ChatViewModel(
     private val dataManager = DataManager(application.applicationContext)
     private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
     private val dogecoinWalletRepository by lazy { DogecoinWalletRepository(getApplication()) }
-    // On-device SPV light client (read-only, sync-on-demand). Created lazily on first SPV use; stopped in
-    // onCleared. Currently driven only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
-    private var dogecoinSpvService: com.bitchat.android.features.dogecoin.DogecoinSpvService? = null
+    // On-device SPV light client (read-only, sync-on-demand). The singleton is process-owned and currently
+    // driven here only via the debug console (doge-spv-*). See docs/dogecoin-spv-integration-plan.md.
     private fun dogecoinSpv(): com.bitchat.android.features.dogecoin.DogecoinSpvService =
         com.bitchat.android.features.dogecoin.DogecoinSpvService.getInstance(getApplication(), dogecoinWalletRepository)
-            .also { dogecoinSpvService = it }
 
     // --- Milestone 3b: broadcast-over-mesh (node-optional sender + opt-in helper) ---
     private val broadcastHelper by lazy {
@@ -159,27 +164,6 @@ class ChatViewModel(
             .getFavoriteStatus(bytes)?.isMutual == true
     }.getOrDefault(false)
 
-    /** Debug-only: build + sign a REAL Dogecoin tx for the console money-path commands (suspend; lists UTXOs). */
-    private suspend fun debugBuildSignedDogeTx(
-        net: DogecoinNetwork, to: String, amount: String, feePerKbKoinu: Long
-    ): com.bitchat.android.features.dogecoin.DogecoinSignedTransaction {
-        val cfg = dogecoinWalletRepository.loadRpcConfig(net)
-        val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
-        val rpc = com.bitchat.android.features.dogecoin.DogecoinRpcClient()
-        val utxos = rpc.listUnspent(cfg, snap.key.address, net)
-        return com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
-            wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amount,
-            network = net, feePerKbKoinu = feePerKbKoinu,
-            minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
-        )
-    }
-
-    /** Debug-only: explorer client built from the saved provider + API key (see the doge-explorer-config command). */
-    private fun debugExplorerClient() = com.bitchat.android.features.dogecoin.DogecoinExplorerClient(
-        provider = dogecoinWalletRepository.loadExplorerProvider(),
-        apiKey = dogecoinWalletRepository.loadExplorerApiKey()
-    )
-
     /**
      * Debug-only adb console host. Registered in [init] when BuildConfig.DEBUG and released in [onCleared].
      * Drive it from a host machine:
@@ -188,14 +172,15 @@ class ChatViewModel(
      * selected network's existing guards and use a dummy tx that helpers reject — they exercise dispatch only.
      */
     private val debugConsoleHost = object : com.bitchat.android.debug.DebugConsole.Host {
-        override fun handle(cmd: String, args: List<String>): String = when (cmd) {
+        override fun handle(cmd: String, args: List<String>): String =
+            dogecoinDebugConsoleHandler.handleOrNull(cmd, args) ?: when (cmd) {
             "help" -> "cmds: help myid favorites candidates cansend forcemutual sendfav broadcast-test nostr tor | " +
                 "doge-network <net> | doge-rpc-set <url> [user] [pass] [wallet] | doge-rpc-show | doge-address | " +
                 "doge-import-wif <wif> | doge-balance | doge-self-broadcast <addr> <amt> [feeKb] | " +
                 "doge-peer-broadcast <addr> <amt> [feeKb] | doge-helper-enable <0|1> | " +
                 "doge-reset | doge-reset-mainnet <currentAddr> | doge-spv-start | doge-spv-stop | doge-spv-rescan | doge-spv-status | doge-spv-balance | doge-spv-unspents | doge-spv-crosscheck | doge-spv-broadcast <addr> <amt> [feeKb] | doge-spv-mainnet-send <addr> <amt> <DRYRUN|CONFIRM> [feeKb] | doge-spv-peer-broadcast <addr> <amt> [feeKb] | " +
                 "doge-explorer-config <blockbook|blockchair> [apiKey] | doge-explorer-balance [addr] | doge-explorer-utxos [addr] | doge-explorer-broadcast <rawHex> | doge-explorer-send <addr> <amt> [feeKb] | " +
-                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect"
+                "peers | reannounce | tor-set <on|off> | nostr-connect | nostr-disconnect | myqr | provision <url> | profile [show|power|simple|pick] | nostr-id | group-send <hex1,hex2,...> <msg> | group-show"
             "myid" -> "myPeerID=${mesh.myPeerID} net=${currentDogecoinNetwork().id} connectedPeers=${state.getConnectedPeersValue().size}"
             "favorites" -> {
                 val all = com.bitchat.android.favorites.FavoritesPersistenceService.shared.debugAllRelationships()
@@ -276,419 +261,39 @@ class ChatViewModel(
                 val relays = com.bitchat.android.nostr.NostrRelayManager.shared.relays.value
                 "nostr " + relays.joinToString(" ") { "${it.url.substringAfter("://")}=${if (it.isConnected) "UP" else "down"}" }
             }
+            "nostr-id" -> {
+                val id = com.bitchat.android.nostr.NostrIdentityBridge.getCurrentNostrIdentity(getApplication())
+                if (id == null) "no nostr identity" else "nostr-id pubkeyHex=${id.publicKeyHex} npub=${id.npub}"
+            }
+            "group-send" -> {
+                // E2E family-group transport test (Increment 1): group-send <hex1,hex2,...> <message...>
+                val membersArg = args.getOrNull(0)
+                val msg = args.drop(1).joinToString(" ")
+                val members = membersArg?.split(",")
+                    ?.map { it.trim().lowercase() }
+                    ?.filter { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+                    ?: emptyList()
+                if (members.isEmpty() || msg.isBlank()) "usage: group-send <hex1,hex2,...> <message>" else {
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        val convKey = startNostrGroup(members, null)
+                        sendMessage(msg)
+                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "group-send convKey=$convKey members=${members.size + 1}")
+                    }
+                    "group-send launched (watch DbgConsole / group-show)"
+                }
+            }
+            "group-show" -> {
+                val groups = state.getPrivateChatsValue().filterKeys { it.startsWith("nostr_grp_") }
+                if (groups.isEmpty()) "no group conversations" else buildString {
+                    groups.forEach { (k, msgs) ->
+                        appendLine("group $k count=${msgs.size}")
+                        msgs.takeLast(10).forEach { m -> appendLine("  [${m.sender}] ${m.content}") }
+                    }
+                }
+            }
             "tor" -> {
                 val s = com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value
                 "tor mode=${s.mode} running=${s.running} bootstrap=${s.bootstrapPercent}% state=${s.state}"
-            }
-            // ---- Dogecoin wallet (P0: drive a send / peer-broadcast from the console) ----
-            "doge-network" -> {
-                val net = DogecoinNetwork.values().firstOrNull { it.id == args.firstOrNull()?.lowercase() }
-                if (net == null) "usage: doge-network mainnet|testnet|regtest" else {
-                    dogecoinWalletRepository.saveSelectedNetwork(net)
-                    "net=${dogecoinWalletRepository.loadSelectedNetwork().id}"
-                }
-            }
-            "doge-rpc-set" -> {
-                if (args.isEmpty()) "usage: doge-rpc-set <url> [user] [pass] [walletName]" else {
-                    val net = currentDogecoinNetwork()
-                    val cfg = com.bitchat.android.features.dogecoin.DogecoinRpcConfig(
-                        url = args.getOrElse(0) { "" }, username = args.getOrElse(1) { "" },
-                        password = args.getOrElse(2) { "" }, walletName = args.getOrElse(3) { "" })
-                    dogecoinWalletRepository.saveRpcConfig(net, cfg)
-                    "saved rpc net=${net.id} url=${cfg.url} wallet=${cfg.walletName}"
-                }
-            }
-            "doge-rpc-show" -> {
-                val net = currentDogecoinNetwork()
-                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
-                viewModelScope.launch {
-                    runCatching {
-                        val s = com.bitchat.android.features.dogecoin.DogecoinRpcClient().getBlockchainStatus(cfg, net)
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-rpc-show ready=${s.isReadyFor(net)} canBroadcast=${s.canBroadcastFor(net)}")
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-rpc-show node ERR ${it.message}") }
-                }
-                "net=${net.id} url=${cfg.url} user=${cfg.username} wallet=${cfg.walletName} (node status -> DbgConsole)"
-            }
-            "doge-address" -> {
-                val net = currentDogecoinNetwork()
-                "addr=${dogecoinWalletRepository.loadOrCreateWallet(net).key.address} net=${net.id}"
-            }
-            "doge-import-wif" -> {
-                val wif = args.firstOrNull()
-                val net = currentDogecoinNetwork()
-                when {
-                    wif == null -> "usage: doge-import-wif <wif>"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet key import is console-blocked"
-                    else -> runCatching {
-                        val snap = dogecoinWalletRepository.importWalletFromWif(net, wif)
-                        "imported addr=${snap.key.address} net=${net.id}"   // never logs the WIF
-                    }.getOrElse { "import ERR ${it.message}" }
-                }
-            }
-            "doge-balance" -> {
-                val net = currentDogecoinNetwork()
-                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
-                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                viewModelScope.launch {
-                    runCatching {
-                        val bal = com.bitchat.android.features.dogecoin.DogecoinRpcClient().getWalletBalance(cfg, addr, net)
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-balance conf=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-balance ERR ${it.message}") }
-                }
-                "balance for ${addr.take(12)} net=${net.id} -> DbgConsole"
-            }
-            "doge-reset" -> {
-                val net = currentDogecoinNetwork()
-                if (net == DogecoinNetwork.MAINNET) "refused: mainnet wallet reset is console-blocked (use doge-reset-mainnet <currentAddress> to confirm)"
-                else {
-                    dogecoinSpv().clearPersistedState(net)   // stop + delete SPV store + stale wallet file
-                    val snap = dogecoinWalletRepository.resetWallet(net)
-                    "wallet reset net=${net.id} new addr=${snap.key.address} (fresh birthdate=now; run doge-spv-start)"
-                }
-            }
-            "doge-reset-mainnet" -> {
-                // Acknowledgment-gated mainnet key regeneration: the Phase 4 read-only soak needs a FRESH
-                // mainnet key (birthdate=now) so SPV seeds at the recent checkpoint instead of genesis. This
-                // DISCARDS the current mainnet key (irreversible — any funds at it become inaccessible from
-                // this app), so it requires the caller to pass the EXACT current mainnet address as
-                // confirmation. Debug-console only; never signs, exports a key, or broadcasts.
-                val net = currentDogecoinNetwork()
-                val confirmAddr = args.getOrNull(0)?.trim()
-                val tag = com.bitchat.android.debug.DebugConsole.TAG
-                if (net != DogecoinNetwork.MAINNET) "refused: not on mainnet (use doge-reset for ${net.id})"
-                else {
-                    val cur = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                    when (confirmAddr) {
-                        null -> "DANGER: discards the current mainnet key (irreversible; funds at it become inaccessible from this app). Current mainnet address = $cur — re-run: doge-reset-mainnet $cur"
-                        cur -> {
-                            android.util.Log.w(tag, "doge-reset-mainnet: DISCARDING the current mainnet key and generating a fresh one (confirmed)")
-                            dogecoinSpv().clearPersistedState(net)
-                            val snap = dogecoinWalletRepository.resetWallet(net)
-                            "MAINNET wallet reset: new addr=${snap.key.address} (fresh birthdate=now). Fund THIS address, then doge-spv-start."
-                        }
-                        else -> "refused: confirmation address did not match the current mainnet address ($cur)"
-                    }
-                }
-            }
-            "doge-spv-start" -> {
-                val net = currentDogecoinNetwork()
-                if (!dogecoinSpv().isSupported(net)) "spv-start refused: not supported for ${net.id} (regtest has no peers)"
-                else {
-                    val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                    dogecoinSpv().start(net)
-                    "spv starting net=${net.id} watch=${addr.take(12)} (sync-on-demand) -> doge-spv-status"
-                }
-            }
-            "doge-spv-stop" -> { dogecoinSpv().stop(); "spv stopped" }
-            "doge-spv-rescan" -> {
-                val net = currentDogecoinNetwork()
-                dogecoinSpv().clearPersistedState(net)
-                "spv state cleared for ${net.id} (keeps key); run doge-spv-start to rescan from the birthdate checkpoint"
-            }
-            "doge-spv-status" -> {
-                val s = dogecoinSpv().status.value
-                "spv net=${s.network.id} running=${s.running} synced=${s.synced} overTor=${s.overTor} height=${s.chainHeight} " +
-                    "peers=${s.peerCount} bestPeer=${s.bestPeerHeight} behind=${s.blocksBehind}"
-            }
-            "doge-spv-balance" -> {
-                val net = currentDogecoinNetwork()
-                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                viewModelScope.launch {
-                    runCatching {
-                        val bal = dogecoinSpv().snapshotBalance(net)
-                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-balance avail=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-balance ERR ${it.message}") }
-                }
-                "spv balance for ${addr.take(12)} net=${net.id} -> DbgConsole"
-            }
-            "doge-spv-unspents" -> {
-                val net = currentDogecoinNetwork()
-                viewModelScope.launch {
-                    runCatching {
-                        val utxos = dogecoinSpv().snapshotUnspents(net)
-                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents count=${utxos.size} total=${utxos.sumOf { it.amountKoinu }}k")
-                        utxos.take(5).forEachIndexed { i, u -> android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "  [$i] ${u.txid}:${u.vout} ${u.amountKoinu}k conf=${u.confirmations}") }
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-unspents ERR ${it.message}") }
-                }
-                "spv unspents net=${net.id} -> DbgConsole"
-            }
-            "doge-spv-crosscheck" -> {
-                // Phase 4 soak surface: validate every SPV-spendable UTXO against the node's UTXO set
-                // (gettxout) — the safety-critical direction (no phantom/spent UTXO is treated as spendable).
-                // Read-only; touches no money path.
-                val net = currentDogecoinNetwork()
-                val addr = dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    val tag = com.bitchat.android.debug.DebugConsole.TAG
-                    runCatching {
-                        val spvUtxos = dogecoinSpv().snapshotUnspents(net)
-                            ?: error("spv not active for ${net.id} (run doge-spv-start first)")
-                        if (spvUtxos.isEmpty()) {
-                            android.util.Log.d(tag, "doge-spv-crosscheck net=${net.id}: SPV has 0 UTXOs (nothing to check)")
-                        } else {
-                            val rpcConfig = dogecoinWalletRepository.loadRpcConfig(net)
-                            val rpc = com.bitchat.android.features.dogecoin.DogecoinRpcClient()
-                            val oracle = HashMap<String, com.bitchat.android.features.dogecoin.DogecoinTxOut?>()
-                            spvUtxos.forEach { u ->
-                                oracle[com.bitchat.android.features.dogecoin.DogecoinSpvCrossCheck.outpoint(u.txid, u.vout)] =
-                                    runCatching { rpc.getTxOut(rpcConfig, u.txid, u.vout, net) }
-                                        .getOrElse { android.util.Log.d(tag, "  gettxout ERR ${u.txid.take(12)}:${u.vout} ${it.message}"); null }
-                            }
-                            val report = com.bitchat.android.features.dogecoin.DogecoinSpvCrossCheck.compare(spvUtxos, oracle)
-                            android.util.Log.d(tag, "doge-spv-crosscheck net=${net.id} addr=${addr.take(12)} spvUtxos=${spvUtxos.size} " +
-                                "spvTotal=${report.spvTotalKoinu}k nodeConfirmed=${report.nodeConfirmedKoinu}k result=${if (report.allMatch) "PASS" else "FAIL"}")
-                            report.mismatches.take(10).forEach { e ->
-                                android.util.Log.d(tag, "  MISMATCH ${e.txid.take(16)}:${e.vout} ${e.status} spv=${e.spvKoinu}k node=${e.oracleKoinu}k conf=${e.oracleConfirmations}")
-                            }
-                        }
-                    }.getOrElse { android.util.Log.d(tag, "doge-spv-crosscheck ERR ${it.message}") }
-                }
-                "spv-vs-node cross-check net=${net.id} -> DbgConsole (read-only)"
-            }
-            "doge-spv-broadcast" -> {
-                val to = args.getOrNull(0); val amt = args.getOrNull(1)
-                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                when {
-                    to == null || amt == null -> "usage: doge-spv-broadcast <addr> <amountDoge> [feePerKbKoinu]"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            runCatching {
-                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
-                                // Node-free: build + sign from the SPV UTXO view, then relay via SPV peers.
-                                val utxos = dogecoinSpv().snapshotUnspents(net)
-                                    ?: error("spv not active for ${net.id} (run doge-spv-start first)")
-                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
-                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
-                                    network = net, feePerKbKoinu = feeKb,
-                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
-                                )
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} change=${signed.changeKoinu}")
-                                val txid = com.bitchat.android.features.dogecoin.DogecoinSpvDataSource(dogecoinSpv())
-                                    .broadcast(signed.rawTransactionHex, net)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast CLAIMED txid=$txid (poll doge-spv-status for depth)")
-                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-broadcast ERR ${it.message}") }
-                        }
-                        "spv-broadcast launched net=${net.id} (on-device SPV peers; Claimed only) -> DbgConsole"
-                    }
-                }
-            }
-            "doge-spv-mainnet-send" -> {
-                // Phase 4: the ONE deliberate, confirmation-gated MAINNET SPV broadcast channel (irreversible
-                // real money). Build+sign stays on-device (DogecoinTransactionBuilder); this calls the service
-                // broadcast DIRECTLY with mainnetAuthorized=true (the DataSource/UI path stays mainnet-blocked).
-                // DRYRUN builds + shows the tx (txid/fee/change) WITHOUT broadcasting; CONFIRM broadcasts.
-                val to = args.getOrNull(0)
-                val amt = args.getOrNull(1)
-                val mode = args.getOrNull(2)?.uppercase()
-                val feeKb = args.getOrNull(3)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                val tag = com.bitchat.android.debug.DebugConsole.TAG
-                when {
-                    net != DogecoinNetwork.MAINNET -> "refused: doge-spv-mainnet-send is mainnet-only (use doge-spv-broadcast on ${net.id})"
-                    to == null || amt == null || (mode != "DRYRUN" && mode != "CONFIRM") ->
-                        "usage: doge-spv-mainnet-send <addr> <amountDoge> <DRYRUN|CONFIRM> [feeKb] — DRYRUN shows the built tx, CONFIRM broadcasts (IRREVERSIBLE real money)"
-                    else -> {
-                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            runCatching {
-                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
-                                val utxos = dogecoinSpv().snapshotUnspents(net) ?: error("spv not active (run doge-spv-start)")
-                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
-                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
-                                    network = net, feePerKbKoinu = feeKb,
-                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
-                                )
-                                android.util.Log.d(tag, "doge-spv-mainnet-send[$mode] BUILT txid=${signed.txid} send=${amt} to=${to} fee=${signed.feeKoinu}k change=${signed.changeKoinu}k")
-                                if (mode == "CONFIRM") {
-                                    val normalized = com.bitchat.android.features.dogecoin.DogecoinRawTxValidator.normalize(signed.rawTransactionHex)
-                                    val expectedTxid = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.transactionId(normalized)
-                                    val txid = dogecoinSpv().broadcast(net, normalized, expectedTxid, mainnetAuthorized = true)
-                                        ?: error("broadcast returned null (not synced / below peer floor)")
-                                    android.util.Log.d(tag, "doge-spv-mainnet-send BROADCAST CLAIMED txid=$txid (poll doge-spv-status for depth)")
-                                } else {
-                                    android.util.Log.d(tag, "doge-spv-mainnet-send DRYRUN only — NOT broadcast. Re-run with CONFIRM to send.")
-                                }
-                            }.getOrElse { android.util.Log.d(tag, "doge-spv-mainnet-send ERR ${it.message}") }
-                        }
-                        "MAINNET spv-send[$mode] ${amt} -> ${to} launched -> DbgConsole${if (mode == "CONFIRM") " (IRREVERSIBLE)" else " (dry-run)"}"
-                    }
-                }
-            }
-            "doge-self-broadcast" -> {
-                val to = args.getOrNull(0); val amt = args.getOrNull(1)
-                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                when {
-                    to == null || amt == null -> "usage: doge-self-broadcast <addr> <amountDoge> [feePerKbKoinu]"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch {
-                            runCatching {
-                                val cfg = dogecoinWalletRepository.loadRpcConfig(net)
-                                val signed = debugBuildSignedDogeTx(net, to, amt, feeKb)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} change=${signed.changeKoinu}")
-                                val txid = com.bitchat.android.features.dogecoin.DogecoinRpcClient().sendRawTransaction(cfg, signed.rawTransactionHex, net)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast BROADCAST OK txid=$txid")
-                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-self-broadcast ERR ${it.message}") }
-                        }
-                        "self-broadcast launched net=${net.id} -> DbgConsole"
-                    }
-                }
-            }
-            "doge-peer-broadcast" -> {
-                val to = args.getOrNull(0); val amt = args.getOrNull(1)
-                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                when {
-                    to == null || amt == null -> "usage: doge-peer-broadcast <addr> <amountDoge> [feePerKbKoinu]"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch {
-                            val signed = runCatching { debugBuildSignedDogeTx(net, to, amt, feeKb) }
-                                .getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast build ERR ${it.message}"); return@launch }
-                            android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} -> requestPeerBroadcast")
-                            requestPeerBroadcast(signed)
-                            var waited = 0
-                            while (waited < 95000) {
-                                val st = peerBroadcastState.value
-                                if (st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed ||
-                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed ||
-                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed) {
-                                    android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-peer-broadcast TERMINAL=$st"); break
-                                }
-                                kotlinx.coroutines.delay(500); waited += 500
-                            }
-                        }
-                        "peer-broadcast launched net=${net.id} (signs real tx -> requestPeerBroadcast) -> DbgConsole"
-                    }
-                }
-            }
-            "doge-spv-peer-broadcast" -> {
-                val to = args.getOrNull(0); val amt = args.getOrNull(1)
-                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                when {
-                    to == null || amt == null -> "usage: doge-spv-peer-broadcast <addr> <amountDoge> [feePerKbKoinu]"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch {
-                            val signed = runCatching {
-                                // OFFLINE build: sign from the PERSISTED SPV UTXO set (no internet needed on this
-                                // phone); only the mesh helper needs connectivity to actually broadcast.
-                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
-                                val utxos = dogecoinSpv().snapshotUnspents(net) ?: error("spv not active (run doge-spv-start)")
-                                com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
-                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
-                                    network = net, feePerKbKoinu = feeKb,
-                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU)
-                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-peer-broadcast build ERR ${it.message}"); return@launch }
-                            android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-peer-broadcast signed txid=${signed.txid} fee=${signed.feeKoinu} (offline SPV build) -> requestPeerBroadcast")
-                            requestPeerBroadcast(signed)
-                            var waited = 0
-                            while (waited < 95000) {
-                                val st = peerBroadcastState.value
-                                if (st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed ||
-                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed ||
-                                    st is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed) {
-                                    android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-spv-peer-broadcast TERMINAL=$st"); break
-                                }
-                                kotlinx.coroutines.delay(500); waited += 500
-                            }
-                        }
-                        "spv-peer-broadcast launched net=${net.id} (offline SPV-built, relayed over mesh) -> DbgConsole"
-                    }
-                }
-            }
-            "doge-helper-enable" -> {
-                val on = args.firstOrNull()?.let { it == "1" || it.equals("true", ignoreCase = true) }
-                if (on == null) "usage: doge-helper-enable <0|1>" else {
-                    val net = currentDogecoinNetwork()
-                    dogecoinWalletRepository.saveHelperEnabled(net, on)
-                    reannounceIdentity()
-                    "helper-enable=$on net=${net.id} (re-announced)"
-                }
-            }
-            // ---- explorer-backed "no-node" mode (public block explorer; Blockbook keyless default) ----
-            "doge-explorer-config" -> {
-                val p = when (args.firstOrNull()?.lowercase()) {
-                    "blockbook" -> com.bitchat.android.features.dogecoin.DogecoinExplorerProvider.BLOCKBOOK
-                    "blockchair" -> com.bitchat.android.features.dogecoin.DogecoinExplorerProvider.BLOCKCHAIR
-                    else -> null
-                }
-                if (p == null) "usage: doge-explorer-config <blockbook|blockchair> [apiKey]" else {
-                    dogecoinWalletRepository.saveExplorerProvider(p)
-                    args.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { dogecoinWalletRepository.saveExplorerApiKey(it) }
-                    "explorer provider=$p keySet=${dogecoinWalletRepository.loadExplorerApiKey() != null}"  // key never echoed
-                }
-            }
-            "doge-explorer-balance" -> {
-                val net = currentDogecoinNetwork()
-                val addr = args.firstOrNull() ?: dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                viewModelScope.launch {
-                    runCatching {
-                        val bal = debugExplorerClient().getBalance(addr, net)
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-balance conf=${bal.confirmedKoinu} uncon=${bal.unconfirmedKoinu} utxos=${bal.utxoCount}")
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-balance ERR ${it.message}") }
-                }
-                "explorer-balance ${addr.take(12)} net=${net.id} -> DbgConsole"
-            }
-            "doge-explorer-utxos" -> {
-                val net = currentDogecoinNetwork()
-                val addr = args.firstOrNull() ?: dogecoinWalletRepository.loadOrCreateWallet(net).key.address
-                viewModelScope.launch {
-                    runCatching {
-                        val utxos = debugExplorerClient().listUtxos(addr, net)
-                        android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-utxos count=${utxos.size} total=${utxos.sumOf { it.amountKoinu }}k")
-                        utxos.take(5).forEachIndexed { i, u -> android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "  [$i] ${u.txid}:${u.vout} ${u.amountKoinu}k conf=${u.confirmations}") }
-                    }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-utxos ERR ${it.message}") }
-                }
-                "explorer-utxos ${addr.take(12)} net=${net.id} -> DbgConsole"
-            }
-            "doge-explorer-broadcast" -> {
-                val raw = args.firstOrNull()
-                val net = currentDogecoinNetwork()
-                when {
-                    raw == null -> "usage: doge-explorer-broadcast <rawTxHex>"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch {
-                            runCatching {
-                                val txid = debugExplorerClient().broadcast(raw, net)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-broadcast OK txid=$txid")
-                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-broadcast ERR ${it.message}") }
-                        }
-                        "explorer-broadcast launched net=${net.id} -> DbgConsole"
-                    }
-                }
-            }
-            "doge-explorer-send" -> {
-                val to = args.getOrNull(0); val amt = args.getOrNull(1)
-                val feeKb = args.getOrNull(2)?.toLongOrNull() ?: com.bitchat.android.features.dogecoin.DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
-                val net = currentDogecoinNetwork()
-                when {
-                    to == null || amt == null -> "usage: doge-explorer-send <addr> <amountDoge> [feePerKbKoinu]"
-                    net == DogecoinNetwork.MAINNET -> "refused: mainnet broadcast is console-blocked"
-                    else -> {
-                        viewModelScope.launch {
-                            runCatching {
-                                val explorer = debugExplorerClient()
-                                val snap = dogecoinWalletRepository.loadOrCreateWallet(net)
-                                val utxos = explorer.listUtxos(snap.key.address, net)
-                                val signed = com.bitchat.android.features.dogecoin.DogecoinTransactionBuilder.createSignedTransaction(
-                                    wallet = snap.key, utxos = utxos, recipientAddress = to, amount = amt,
-                                    network = net, feePerKbKoinu = feeKb,
-                                    minimumOutputKoinu = com.bitchat.android.features.dogecoin.DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send signed txid=${signed.txid} fee=${signed.feeKoinu} utxos=${utxos.size}")
-                                val txid = explorer.broadcast(signed.rawTransactionHex, net)
-                                android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send BROADCAST OK txid=$txid")
-                            }.getOrElse { android.util.Log.d(com.bitchat.android.debug.DebugConsole.TAG, "doge-explorer-send ERR ${it.message}") }
-                        }
-                        "explorer-send launched net=${net.id} (no-node: explorer UTXOs + explorer broadcast) -> DbgConsole"
-                    }
-                }
             }
             // ---- mesh / connectivity ----
             "peers" -> {
@@ -714,6 +319,71 @@ class ChatViewModel(
             }
             "nostr-connect" -> { viewModelScope.launch { com.bitchat.android.nostr.NostrRelayManager.shared.connect() }; "nostr connect requested" }
             "nostr-disconnect" -> { com.bitchat.android.nostr.NostrRelayManager.shared.disconnect(); "nostr disconnected" }
+            "myqr" -> {
+                val url = buildMyQRString(state.nickname.value, getCurrentNpub())
+                // Also emit a base64 form so it can be copied between phones over adb without escaping the
+                // '&' in the query string (and as the paste-friendly path for a camera-less relative; the
+                // QR-scan + paste UI is AddFamilyScreen).
+                val b64 = android.util.Base64.encodeToString(
+                    url.toByteArray(Charsets.UTF_8),
+                    android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING
+                )
+                "$url\nqrb64=$b64"
+            }
+            "provision" -> {
+                // Family provisioning: the OTHER phone's `myqr`, as either the raw bitchat:// URL or its
+                // base64 (qrb64=) form. Adds them as a mutual favorite so a private Nostr DM works at once.
+                // (args is already the tokens AFTER the command, so the value is args[0].)
+                val arg = args.firstOrNull()
+                val url = when {
+                    arg == null -> null
+                    arg.startsWith("bitchat://") -> arg
+                    else -> runCatching {
+                        String(android.util.Base64.decode(arg, android.util.Base64.URL_SAFE), Charsets.UTF_8)
+                    }.getOrNull()
+                }
+                if (url == null) "usage: provision <bitchat://verify?...|base64>  (the other phone's `myqr`)"
+                else {
+                    // Skip the freshness window — a stable identity QR is fine to provision from later; the
+                    // Ed25519 signature still authenticates it.
+                    val qr = com.bitchat.android.services.VerificationService.verifyScannedQR(url, maxAgeSeconds = Long.MAX_VALUE)
+                    when {
+                        qr == null -> "provision: invalid or unsigned QR"
+                        com.bitchat.android.profile.FamilyProvisioning.provisionFamilyContact(qr) ->
+                            "provision: added '${qr.nickname}' as MUTUAL favorite (noise=${qr.noiseKeyHex.take(16)}… npub=${qr.npub?.take(14) ?: "none"})"
+                        else -> "provision: failed to decode noise key"
+                    }
+                }
+            }
+            "profile" -> {
+                when (args.firstOrNull()?.lowercase()) {
+                    null, "show" -> "profile=${com.bitchat.android.profile.ProfilePreferenceManager.get(getApplication())} " +
+                        "tor=${com.bitchat.android.net.TorPreferenceManager.get(getApplication())} " +
+                        "pow=${com.bitchat.android.nostr.PoWPreferenceManager.isPowEnabled()} " +
+                        "channel=${com.bitchat.android.geohash.LocationChannelManager.getInstance(getApplication()).selectedChannel.value.displayName}"
+                    "power" -> {
+                        viewModelScope.launch {
+                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                getApplication(), com.bitchat.android.profile.AppProfile.POWER
+                            )
+                        }
+                        "profile -> POWER (flag only; Tor/PoW/channel left as-is)"
+                    }
+                    "simple" -> {
+                        viewModelScope.launch {
+                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                getApplication(), com.bitchat.android.profile.AppProfile.SIMPLE
+                            )
+                        }
+                        "profile -> SIMPLE (Tor off, PoW off, no public room); watch 'profile show'"
+                    }
+                    "pick" -> {
+                        com.bitchat.android.profile.ProfilePreferenceManager.clearChosen(getApplication())
+                        "profile-pick: cleared 'chosen' — the one-time picker should reappear (recompose)"
+                    }
+                    else -> "usage: profile [show|power|simple|pick]"
+                }
+            }
             else -> "unknown cmd '$cmd' (try: help)"
         }
     }
@@ -722,6 +392,16 @@ class ChatViewModel(
             com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Idle
         )
     val peerBroadcastState: StateFlow<com.bitchat.android.features.dogecoin.PeerBroadcastUiState> = _peerBroadcastState
+    private val dogecoinDebugConsoleHandler by lazy {
+        DogecoinDebugConsoleHandler(
+            walletRepository = dogecoinWalletRepository,
+            coroutineScope = viewModelScope,
+            spv = ::dogecoinSpv,
+            requestPeerBroadcast = ::requestPeerBroadcast,
+            peerBroadcastState = peerBroadcastState,
+            reannounceIdentity = ::reannounceIdentity,
+        )
+    }
     // 3b.1 Nostr fallback: stable reference so the sink can be compare-and-cleared on teardown.
     private val broadcastResultSink: (String, ByteArray) -> Unit = { fromId, payload ->
         paymentBroadcastCoordinator.onResult(fromId, payload)
@@ -1011,7 +691,8 @@ class ChatViewModel(
         // ViewModel. Compare-and-clear so a newer ViewModel that already re-registered is not clobbered.
         com.bitchat.android.features.dogecoin.PaymentBroadcastResultRouter.clearSinkIfCurrent(broadcastResultSink)
         com.bitchat.android.debug.DebugConsole.clearHostIfCurrent(debugConsoleHost)
-        dogecoinSpvService?.stop()  // release the SPV PeerGroup/store if it was started this session
+        // The SPV singleton is process-owned and intentionally survives ViewModel/sheet teardown; process death
+        // releases it. Stopping here would both block Main and let an old ViewModel race a newly opened wallet.
         // Note: Mesh service lifecycle is now managed by MainActivity
     }
     
@@ -1093,16 +774,19 @@ class ChatViewModel(
             // Clear notifications for this sender since user is now viewing the chat
             clearNotificationsForSender(peerID)
 
-            // Persistently mark all messages in this conversation as read so Nostr fetches
-            // after app restarts won't re-mark them as unread.
-            try {
-                val seen = com.bitchat.android.services.SeenMessageStore.getInstance(getApplication())
-                val chats = state.getPrivateChatsValue()
-                val messages = chats[peerID] ?: emptyList()
-                messages.forEach { msg ->
-                    try { seen.markRead(msg.id) } catch (_: Exception) { }
+            // Persistently mark all messages in this conversation as read so Nostr fetches after app restarts
+            // won't re-mark them as unread. Do it in ONE batched write, OFF the main thread — the previous
+            // per-message markRead() ran a full serialize + AES-encrypted SharedPreferences write for EACH
+            // message on the UI thread, which is the dominant "chat is slow to open" cost.
+            val messageIds = (state.getPrivateChatsValue()[peerID] ?: emptyList()).map { it.id }
+            if (messageIds.isNotEmpty()) {
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        com.bitchat.android.services.SeenMessageStore.getInstance(getApplication())
+                            .markReadBulk(messageIds)
+                    } catch (_: Exception) { }
                 }
-            } catch (_: Exception) { }
+            }
         }
     }
     
@@ -1115,6 +799,18 @@ class ChatViewModel(
         // Ensure sheet is hidden
         hidePrivateChatSheet()
     }
+
+    // MARK: - Deep-link: open a conversation from a notification tap
+    // The Power UI opens the private-chat sheet directly (see MainActivity.handleNotificationIntent), but the
+    // SIMPLE profile renders its own screen with local navigation state, so a tapped notification has no way to
+    // drive it. This one-shot signal carries the conversation key (a `nostr_…`/`nostr_grp_…` convKey or a mesh
+    // peerID); SimpleModeScreen observes it, navigates to that thread, and consumes it. Harmless in Power mode
+    // (nothing observes it there).
+    private val _pendingOpenConversation = MutableStateFlow<String?>(null)
+    val pendingOpenConversation: StateFlow<String?> = _pendingOpenConversation.asStateFlow()
+
+    fun requestOpenConversation(convKey: String) { _pendingOpenConversation.value = convKey }
+    fun consumePendingOpenConversation() { _pendingOpenConversation.value = null }
 
     // MARK: - Open Latest Unread Private Chat
 
@@ -1172,6 +868,174 @@ class ChatViewModel(
 
     
     // MARK: - Message Sending
+
+    /**
+     * Posts a structured payment claim to the immutable private destination captured at Pay tap.
+     *
+     * This deliberately bypasses [sendMessage], whose destination is mutable UI state. The durable
+     * reservation is committed before the chat message is inserted/sent, giving automatic and manual
+     * receipt actions one shared at-most-once boundary per network/txid.
+     */
+    fun postDogepaidReceipt(
+        paymentContext: DogepaidPaymentContext,
+        claim: DogepaidBroadcastClaim
+    ) {
+        viewModelScope.launch {
+            val plan = DogepaidReceiptDeliveryPlanner.plan(
+                paymentContext = paymentContext,
+                claim = claim,
+                myPeerId = mesh.myPeerID,
+                myNostrPubkeyHex = NostrIdentityBridge
+                    .getCurrentNostrIdentity(getApplication())
+                    ?.publicKeyHex
+            ) ?: return@launch
+            val receiptText = plan.receipt.encode()
+            if (privateChatManager.isPeerBlocked(plan.conversationKey)) return@launch
+
+            val reserved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                dogecoinWalletRepository.reserveOutgoingPaymentReceipt(claim.network, claim.txid)
+            }
+            if (!reserved) return@launch
+
+            val conversationKey = plan.conversationKey
+            val requesterPubkey = plan.requesterNostrPubkeyHex
+            if (requesterPubkey != null) {
+                // This is an account-DM alias derived from the signed group message's structural sender key;
+                // it creates no favorite/Noise identity and never consults a display name.
+                GeohashAliasRegistry.put(conversationKey, requesterPubkey)
+            }
+
+            privateChatManager.sendPrivateMessage(
+                content = receiptText,
+                peerID = conversationKey,
+                recipientNickname = nicknameForPeer(conversationKey),
+                senderNickname = state.getNicknameValue(),
+                myPeerID = mesh.myPeerID
+            ) { messageContent, peerID, recipientNickname, messageId ->
+                com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh)
+                    .sendPrivate(messageContent, peerID, recipientNickname, messageId)
+            }
+        }
+    }
+
+    /**
+     * Explicit receipt-status check against this device's selected local wallet view. No explorer is
+     * consulted and cross-network receipts return before any SPV/RPC read. SPV is observed only if its
+     * existing singleton is already active; this surface never starts a second client or changes backend.
+     */
+    fun checkDogepaidReceipt(
+        receipt: DogepaidReceipt,
+        onResult: (DogepaidReceiptCheckResult) -> Unit
+    ) {
+        viewModelScope.launch {
+            val walletNetwork = dogecoinWalletRepository.loadSelectedNetwork()
+            val snapshot = dogecoinWalletRepository.loadWalletIfPresent(walletNetwork)
+            val walletAddress = snapshot?.key?.address.orEmpty()
+            if (receipt.network != walletNetwork || snapshot == null) {
+                onResult(
+                    DogepaidReceiptCheckResult(
+                        state = com.bitchat.android.features.dogecoin.DogepaidReceiptStateResolver.resolve(
+                            receipt,
+                            walletNetwork,
+                            walletAddress,
+                            emptyList()
+                        ),
+                        source = DogepaidReceiptObservationSource.NONE
+                    )
+                )
+                return@launch
+            }
+
+            val backend = dogecoinWalletRepository.resolveBackend(walletNetwork)
+            val observations = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    when (backend) {
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.SPV ->
+                            dogecoinSpv().snapshotTransactions(walletNetwork).orEmpty().map { tx ->
+                                com.bitchat.android.features.dogecoin.DogepaidLocalObservation(
+                                    network = walletNetwork,
+                                    txid = tx.txid,
+                                    walletAddress = walletAddress,
+                                    incoming = tx.incoming,
+                                    amountKoinu = tx.amountKoinu,
+                                    confirmations = tx.confirmations
+                                )
+                            }
+
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC -> {
+                            val config = dogecoinWalletRepository.loadRpcConfig(walletNetwork)
+                            com.bitchat.android.features.dogecoin.DogecoinRpcClient()
+                                .getWalletActivity(config, walletAddress, walletNetwork, count = 100)
+                                .map { tx ->
+                                    com.bitchat.android.features.dogecoin.DogepaidLocalObservation(
+                                        network = walletNetwork,
+                                        txid = tx.txid,
+                                        walletAddress = walletAddress,
+                                        incoming = tx.category.equals("receive", ignoreCase = true),
+                                        amountKoinu = tx.amountKoinu,
+                                        confirmations = tx.confirmations
+                                    )
+                                }
+                        }
+
+                        // Public explorer status would leak txid/address interest; never use it here.
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.EXPLORER -> emptyList()
+                    }
+                }.getOrDefault(emptyList())
+            }
+
+            onResult(
+                DogepaidReceiptCheckResult(
+                    state = com.bitchat.android.features.dogecoin.DogepaidReceiptStateResolver.resolve(
+                        receipt,
+                        walletNetwork,
+                        walletAddress,
+                        observations
+                    ),
+                    source = when (backend) {
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.SPV ->
+                            DogepaidReceiptObservationSource.SPV
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC ->
+                            DogepaidReceiptObservationSource.RPC
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.EXPLORER ->
+                            DogepaidReceiptObservationSource.NONE
+                    },
+                    rpcNotOverTorDisclosure = backend ==
+                        com.bitchat.android.features.dogecoin.DogecoinBackend.RPC &&
+                        com.bitchat.android.net.ArtiTorManager.getInstance().statusFlow.value.mode !=
+                        com.bitchat.android.net.TorMode.OFF
+                )
+            )
+        }
+    }
+
+    /** Re-send the same failed outgoing receipt artifact (same message id), never mint a second receipt. */
+    fun retryDogepaidReceipt(message: BitchatMessage, conversationKey: String) {
+        if (message.deliveryStatus !is com.bitchat.android.model.DeliveryStatus.Failed) return
+        if (com.bitchat.android.features.dogecoin.DogepaidReceipt.parse(message.content) == null) return
+        if (!com.bitchat.android.features.dogecoin.isEligibleDogepaidPrivateConversationKey(conversationKey)) return
+        val stored = state.getPrivateChatsValue()[conversationKey]
+            ?.firstOrNull { it.id == message.id && it.content == message.content }
+            ?: return
+        if (stored.senderPeerID != mesh.myPeerID) return
+
+        messageManager.updateMessageDeliveryStatus(message.id, com.bitchat.android.model.DeliveryStatus.Sending)
+        runCatching {
+            com.bitchat.android.services.MessageRouter.getInstance(getApplication(), mesh).sendPrivate(
+                message.content,
+                conversationKey,
+                nicknameForPeer(conversationKey).orEmpty(),
+                message.id
+            )
+        }.onSuccess {
+            messageManager.updateMessageDeliveryStatus(message.id, com.bitchat.android.model.DeliveryStatus.Sent)
+        }.onFailure { error ->
+            messageManager.updateMessageDeliveryStatus(
+                message.id,
+                com.bitchat.android.model.DeliveryStatus.Failed(error.message ?: "send failed")
+            )
+        }
+    }
     
     fun sendMessage(content: String) {
         if (content.isEmpty()) return
@@ -1684,7 +1548,10 @@ class ChatViewModel(
      * Sender side: relay a locally-signed transaction to opt-in helper peers when the local node
      * cannot broadcast. Drives [peerBroadcastState] (Pending -> Confirmed/Claimed/Failed) for the wallet UI.
      */
-    fun requestPeerBroadcast(signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction) {
+    fun requestPeerBroadcast(
+        signedTransaction: com.bitchat.android.features.dogecoin.DogecoinSignedTransaction,
+        paymentReceiptContext: DogepaidPaymentContext? = null
+    ) {
         _peerBroadcastState.value = com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Pending
         viewModelScope.launch {
             val network = currentDogecoinNetwork()
@@ -1702,13 +1569,37 @@ class ChatViewModel(
             } catch (e: Exception) {
                 com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed(e.message ?: "Broadcast failed.")
             }
-            _peerBroadcastState.value = when (outcome) {
+            val terminalState = when (outcome) {
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Confirmed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed(outcome.txid)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Claimed ->
                     resolveClaimedPeerBroadcast(outcome.txid, network)
                 is com.bitchat.android.features.dogecoin.PaymentBroadcastCoordinator.Outcome.Failed ->
                     com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Failed(outcome.reason)
+            }
+            _peerBroadcastState.value = terminalState
+
+            val claimedTxid = when (terminalState) {
+                is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Confirmed -> terminalState.txid
+                is com.bitchat.android.features.dogecoin.PeerBroadcastUiState.Claimed -> terminalState.txid
+                else -> null
+            }
+            if (
+                paymentReceiptContext != null &&
+                network == signedTransaction.network &&
+                claimedTxid == signedTransaction.txid
+            ) {
+                // App-scope emission survives closing/switching the wallet sheet. This remains a static claim;
+                // helper corroboration never becomes settlement authority for the receiving chat bubble.
+                postDogepaidReceipt(
+                    paymentReceiptContext,
+                    DogepaidBroadcastClaim(
+                        network = signedTransaction.network,
+                        txid = signedTransaction.txid,
+                        amountKoinu = signedTransaction.sendAmountKoinu,
+                        recipientAddress = signedTransaction.recipientAddress
+                    )
+                )
             }
         }
     }
@@ -1899,7 +1790,7 @@ class ChatViewModel(
         try {
             com.bitchat.android.services.SeenMessageStore.getInstance(getApplication()).clear()
         } catch (_: Exception) { }
-        
+
         // Clear all mesh service data
         clearAllMeshServiceData()
         
@@ -1929,6 +1820,15 @@ class ChatViewModel(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to reset Nostr/geohash: ${e.message}")
         }
+
+        // Wipe persisted history + Simple/Family group + tap-added-contact state LAST — after the mesh
+        // (clearAllMeshServiceData) and Nostr (geohashViewModel.panicReset) receive pipelines are torn down —
+        // so no concurrent inbound event can re-persist wiped state, and before the fresh mesh service is
+        // recreated. Without wipePersisted(), this branch's on-disk history (chat_history_v1.json) would
+        // silently reappear on the next launch, defeating the emergency wipe.
+        try { com.bitchat.android.services.AppStateStore.wipePersisted() } catch (_: Exception) { }
+        try { com.bitchat.android.nostr.NostrGroupRegistry.clear() } catch (_: Exception) { }
+        try { com.bitchat.android.nostr.KnownNpubStore.clear() } catch (_: Exception) { }
 
         // Reset nickname
         val newNickname = "anon${Random.nextInt(1000, 9999)}"
@@ -2052,6 +1952,33 @@ class ChatViewModel(
         geohashViewModel.startGeohashDM(pubkeyHex) { convKey ->
             showPrivateChatSheet(convKey)
         }
+    }
+
+    /**
+     * Create (or re-open) an E2E "family group" conversation for [memberPubkeysHex] (account pubkey hexes)
+     * and make it the active private chat so a send fans out to the whole set. The groupId is DETERMINISTIC —
+     * sha256 of the sorted member set (incl. self) — so every member derives the identical thread with no
+     * setup round-trip. Returns the conversation key ("nostr_grp_<id>"). The transitive mutual-favorite
+     * trust gate lives in NostrDirectMessageHandler.onGiftWrap; the family group UI is in SimpleModeScreen.
+     */
+    fun startNostrGroup(memberPubkeysHex: List<String>, subject: String?): String {
+        val myHex = com.bitchat.android.nostr.NostrIdentityBridge
+            .getCurrentNostrIdentity(getApplication())?.publicKeyHex?.lowercase()
+        val hexes = (memberPubkeysHex.map { it.lowercase() } + listOfNotNull(myHex)).distinct().sorted()
+        val groupId = com.bitchat.android.nostr.NostrGroupRegistry.computeGroupId(hexes)
+        val convKey = "nostr_grp_$groupId"
+        // bgm tags must NOT carry local pet-names (favorites.peerNickname after rename) — that would
+        // leak private labels to every group member. Self uses our announced nickname; others omit name
+        // (hex-only bgm) so receivers resolve display-time via ContactDisplayName / their own favorites.
+        val members = hexes.map { hex ->
+            com.bitchat.android.nostr.NostrGroupRegistry.GroupMember(
+                hex,
+                if (hex == myHex) state.getNicknameValue() else null
+            )
+        }
+        com.bitchat.android.nostr.NostrGroupRegistry.put(convKey, groupId, members, subject)
+        startPrivateChat(convKey)
+        return convKey
     }
 
     fun startGeohashDMByNickname(nickname: String) {

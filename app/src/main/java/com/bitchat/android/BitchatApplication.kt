@@ -30,6 +30,13 @@ class BitchatApplication : Application() {
             com.bitchat.android.favorites.FavoritesPersistenceService.initialize(this)
         } catch (_: Exception) { }
 
+        // Restore persisted chat history (DMs + channels) BEFORE any UI subscribes to AppStateStore, so the
+        // first emission already carries history instead of starting empty after a process kill.
+        try {
+            com.bitchat.android.services.AppStateStore.init(this)
+            com.bitchat.android.services.AppStateStore.load()
+        } catch (_: Exception) { }
+
         // Warm up Nostr identity to ensure npub is available for favorite notifications
         try {
             com.bitchat.android.nostr.NostrIdentityBridge.getCurrentNostrIdentity(this)
@@ -37,6 +44,10 @@ class BitchatApplication : Application() {
 
         // Initialize theme preference
         ThemePreferenceManager.init(this)
+
+        // Initialize the app profile (Power vs Simple/Family). Defaults to POWER so existing installs
+        // are unaffected until a profile is explicitly chosen during onboarding.
+        try { com.bitchat.android.profile.ProfilePreferenceManager.init(this) } catch (_: Exception) { }
 
         // Initialize debug preference manager (persists debug toggles)
         try { com.bitchat.android.ui.debug.DebugPreferenceManager.init(this) } catch (_: Exception) { }
@@ -51,6 +62,8 @@ class BitchatApplication : Application() {
         try {
             com.bitchat.android.nostr.GeohashAliasRegistry.initialize(this)
             com.bitchat.android.nostr.GeohashConversationRegistry.initialize(this)
+            com.bitchat.android.nostr.NostrGroupRegistry.initialize(this)
+            com.bitchat.android.nostr.KnownNpubStore.initialize(this)
         } catch (_: Exception) { }
 
         // Initialize mesh service preferences

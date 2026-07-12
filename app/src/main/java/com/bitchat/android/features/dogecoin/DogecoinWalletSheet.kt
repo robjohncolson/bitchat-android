@@ -62,6 +62,7 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,6 +89,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,6 +106,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
@@ -124,10 +127,14 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -135,12 +142,13 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Which focal flow the wallet is showing — the "Coin" one-thing-at-a-time view-state. */
 private enum class DogeWalletAction { NONE, SEND, RECEIVE, SETTINGS, ACTIVITY }
 
 /** Backend-agnostic transaction row for the pending cards + full activity list (presentation-only). */
-private data class WalletTxRow(
+internal data class WalletTxRow(
     val txid: String,
     val incoming: Boolean,
     val amountKoinu: Long,
@@ -148,29 +156,204 @@ private data class WalletTxRow(
     val timeSeconds: Long?
 )
 
+/** Binds presentation-only confirmation depth to its txid so receipts can never inherit stale progress. */
+private data class DogecoinConfirmationObservation(
+    val txid: String,
+    val depth: Int
+)
+
+private data class DogecoinWalletBootstrapData(
+    val snapshot: DogecoinWalletSnapshot,
+    val persistedBackend: DogecoinBackend,
+    val wifCopyState: DogecoinWifCopyState,
+    val practiceNudgeDismissed: Boolean,
+    val advertiseAddressEnabled: Boolean,
+    val helperEnabled: Boolean,
+    val helperFavoritesOnly: Boolean,
+    val onChainCorroborationEnabled: Boolean,
+    val explorerUrlTemplate: String,
+    val savedAddresses: List<DogecoinSavedAddress>
+)
+
+private sealed interface DogecoinWalletBootstrapState {
+    data object Loading : DogecoinWalletBootstrapState
+    data class Ready(val data: DogecoinWalletBootstrapData) : DogecoinWalletBootstrapState
+    data object Failed : DogecoinWalletBootstrapState
+}
+
+// Every conditional sheet mount creates a new Compose scope. Serialize the blocking encrypted-prefs/key bootstrap
+// across rapid reopen attempts so a canceled open cannot fan out many competing keystore operations.
+private val dogecoinWalletBootstrapMutex = Mutex()
+
+// Sheet-scoped mutexes disappear on dismiss. This process mutex keeps rapid reopen attempts from queuing
+// blocking DogecoinSpvService.start/stop monitor acquisitions on many Dispatchers.IO workers at once.
+private val dogecoinSpvLifecycleMutex = Mutex()
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DogecoinWalletBootstrapSheet(
+    modifier: Modifier,
+    failed: Boolean,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    BitchatBottomSheet(
+        modifier = modifier,
+        onDismissRequest = onDismiss
+    ) {
+        DogecoinWalletTheme {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 80.dp, start = 24.dp, end = 24.dp, bottom = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AccountBalanceWallet,
+                            contentDescription = null,
+                            tint = dogeWalletColors.gold,
+                            modifier = Modifier.size(30.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.dogecoin_wallet_title),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(56.dp))
+                    if (failed) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_wallet_open_failed),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center
+                        )
+                        Button(onClick = onRetry) {
+                            Text(stringResource(R.string.retry))
+                        }
+                    } else {
+                        CircularProgressIndicator(color = dogeWalletColors.gold)
+                        Text(
+                            text = stringResource(R.string.dogecoin_wallet_opening),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = dogeWalletColors.muted,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                CloseButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 24.dp, end = 20.dp)
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DogecoinWalletSheet(
     isPresented: Boolean,
     onDismiss: () -> Unit,
     onShareToChat: (String) -> Unit,
+    onPaymentReceiptClaimed: (DogepaidPaymentContext, DogepaidBroadcastClaim) -> Unit = { _, _ -> },
     onAdvertisedAddressChanged: () -> Unit = {},
     onHelperEnabledChanged: () -> Unit = {},
-    onRequestPeerBroadcast: (DogecoinSignedTransaction) -> Unit = {},
+    onRequestPeerBroadcast: (DogecoinSignedTransaction, DogepaidPaymentContext?) -> Unit = { _, _ -> },
     peerBroadcastState: PeerBroadcastUiState = PeerBroadcastUiState.Idle,
     hasHelperCandidate: Boolean = false,
     onClearPeerBroadcast: () -> Unit = {},
     paymentRequest: DogecoinPaymentRequest? = null,
+    paymentReceiptContext: DogepaidPaymentContext? = null,
+    isSimpleProfile: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (!isPresented) return
 
     val context = LocalContext.current
+    val repository = remember(context.applicationContext) { DogecoinWalletRepository(context) }
+    val bootstrapNetwork = remember { paymentRequest?.network }
+    var bootstrapAttempt by remember { mutableStateOf(0) }
+    var bootstrapState by remember { mutableStateOf<DogecoinWalletBootstrapState>(DogecoinWalletBootstrapState.Loading) }
+
+    // Render the lightweight title/close shell first. Only after that frame do encrypted preferences, legacy
+    // migration, and wallet-key reconstruction run on IO. Rapidly canceled opens queue behind one process mutex.
+    LaunchedEffect(bootstrapAttempt) {
+        val attempt = bootstrapAttempt
+        withFrameNanos { }
+        val loaded = try {
+            withContext(Dispatchers.IO) {
+                dogecoinWalletBootstrapMutex.withLock {
+                    if (bootstrapNetwork != null) repository.saveSelectedNetwork(bootstrapNetwork)
+                    val snapshot = repository.loadOrCreateWallet(
+                        bootstrapNetwork ?: repository.loadSelectedNetwork()
+                    )
+                    val network = snapshot.key.network
+                    DogecoinWalletBootstrapState.Ready(
+                        DogecoinWalletBootstrapData(
+                            snapshot = snapshot,
+                            persistedBackend = repository.resolveBackend(network),
+                            wifCopyState = repository.loadWifCopyState(snapshot.key),
+                            practiceNudgeDismissed = repository.loadPracticeNudgeDismissed(),
+                            advertiseAddressEnabled = repository.loadAdvertiseAddressEnabled(),
+                            helperEnabled = repository.loadHelperEnabled(network),
+                            helperFavoritesOnly = repository.loadHelperFavoritesOnly(),
+                            onChainCorroborationEnabled = repository.loadOnChainCorroborationEnabled(network),
+                            explorerUrlTemplate = repository.loadExplorerUrlTemplate(network).orEmpty(),
+                            savedAddresses = repository.loadSavedAddresses(network)
+                        )
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            DogecoinWalletBootstrapState.Failed
+        }
+        // A timeout is an honest visible warning, not a cancellation primitive for encrypted-prefs/key work.
+        // Let a successful current attempt recover automatically; only a superseding Retry may reject it.
+        if (bootstrapAttempt == attempt) {
+            bootstrapState = loaded
+        }
+    }
+    LaunchedEffect(bootstrapAttempt) {
+        delay(DOGECOIN_WALLET_BOOTSTRAP_TIMEOUT_MS)
+        if (bootstrapState == DogecoinWalletBootstrapState.Loading) {
+            bootstrapState = DogecoinWalletBootstrapState.Failed
+        }
+    }
+
+    val bootstrapData = (bootstrapState as? DogecoinWalletBootstrapState.Ready)?.data
+    if (bootstrapData == null) {
+        DogecoinWalletBootstrapSheet(
+            modifier = modifier,
+            failed = bootstrapState == DogecoinWalletBootstrapState.Failed,
+            onRetry = {
+                bootstrapState = DogecoinWalletBootstrapState.Loading
+                bootstrapAttempt += 1
+            },
+            onDismiss = onDismiss
+        )
+        return
+    }
+    val initialSnapshot = bootstrapData.snapshot
+
     val clipboardManager = LocalClipboardManager.current
-    val repository = remember(context) { DogecoinWalletRepository(context) }
     val rpcClient = remember { DogecoinRpcClient() }
+    // Synchronous, thread-safe lease generation checked inside DogecoinRpcClient before every request.
+    // Saving/switching/stopping a route revokes multi-call workflows before their next HTTP request.
+    val rpcRequestGeneration = remember { AtomicInteger(0) }
     // Phase 2: the on-device SPV light client (process singleton — shared with the debug console). Read-only;
-    // started on demand when the user selects the "Built-in" backend, stopped on close. See walletReadSource.
+    // started on demand for "Built-in" and retained across sheet dismissal for fast reopen. See walletReadSource.
     val spvService = remember { DogecoinSpvService.getInstance(context, repository) }
     val spvStatus by spvService.status.collectAsState()
     val spvDataSource = remember(spvService) { DogecoinSpvDataSource(spvService) }
@@ -182,6 +365,7 @@ fun DogecoinWalletSheet(
         torStatus.bootstrapPercent >= 100 &&
         torStatus.state == com.bitchat.android.net.ArtiTorManager.TorState.RUNNING
     val coroutineScope = rememberCoroutineScope()
+    val walletIoSession = remember { DogecoinWalletIoSession() }
     val listState = rememberLazyListState()
     // Only mainnet and testnet are user-selectable in release builds. Debug builds also expose
     // regtest for on-device testing against a local regtest node (REGTEST is never shown in release).
@@ -193,39 +377,58 @@ fun DogecoinWalletSheet(
         }
     }
 
-    var snapshot by remember { mutableStateOf(repository.loadOrCreateWallet()) }
+    var snapshot by remember { mutableStateOf(initialSnapshot) }
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
     // Phase 2 backend selector: which source serves balance/UTXO reads for the selected network. Default RPC.
     // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
     // Default to "Built-in" (SPV) when no node is configured and SPV is practical, so a no-node user sees
     // their balance without digging into settings; an explicit selector choice persists and wins.
-    var dogecoinBackend by remember(selectedNetwork) { mutableStateOf(repository.resolveBackend(selectedNetwork)) }
+    var persistedBackend by remember { mutableStateOf(bootstrapData.persistedBackend) }
+    // Home-node assist (spec R-C3/R-C4a): while the built-in light client is still syncing, reads and
+    // broadcast can ride the already-configured node for THIS session only. Session-only by construction:
+    // nothing here calls saveBackend (only the Connection selector does), so kill+relaunch resolves the
+    // persisted backend exactly as before. The SPV lifecycle keys on persistedBackend, so the light client
+    // KEEPS syncing in the background while assist is active. Mainnet is excluded in v1 — mainnet reads
+    // from a node require the explicit pin flow (spec R-C2) — and the RPC path re-runs its full gate
+    // ladder (chain match, relay ready, testmempoolaccept, txid-vs-bytes) exactly as a normal node send.
+    var nodeAssist by remember(selectedNetwork) { mutableStateOf(false) }
+    val dogecoinBackend =
+        if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
-    fun walletReadSource(rpcConfig: DogecoinRpcConfig): DogecoinWalletDataSource =
-        if (dogecoinBackend == DogecoinBackend.SPV) spvDataSource else DogecoinRpcDataSource(rpcClient, rpcConfig)
-    var wifCopyState by remember { mutableStateOf(repository.loadWifCopyState(snapshot.key)) }
-    var practiceNudgeDismissed by remember { mutableStateOf(repository.loadPracticeNudgeDismissed()) }
-    var advertiseAddressEnabled by remember { mutableStateOf(repository.loadAdvertiseAddressEnabled()) }
-    var helperEnabled by remember(selectedNetwork) { mutableStateOf(repository.loadHelperEnabled(selectedNetwork)) }
-    var helperFavoritesOnly by remember { mutableStateOf(repository.loadHelperFavoritesOnly()) }
+    fun walletReadSource(
+        rpcConfig: DogecoinRpcConfig,
+        activeRpcClient: DogecoinRpcClient = rpcClient
+    ): DogecoinWalletDataSource =
+        if (dogecoinBackend == DogecoinBackend.SPV) spvDataSource
+        else DogecoinRpcDataSource(activeRpcClient, rpcConfig)
+    var wifCopyState by remember { mutableStateOf(bootstrapData.wifCopyState) }
+    var practiceNudgeDismissed by remember { mutableStateOf(bootstrapData.practiceNudgeDismissed) }
+    var advertiseAddressEnabled by remember { mutableStateOf(bootstrapData.advertiseAddressEnabled) }
+    var helperEnabled by remember { mutableStateOf(bootstrapData.helperEnabled) }
+    var helperFavoritesOnly by remember { mutableStateOf(bootstrapData.helperFavoritesOnly) }
     var helperMainnetConsent by remember(selectedNetwork) { mutableStateOf(false) }
     // 3b.1 sender-side: independent on-chain corroboration of a single-helper Claimed peer broadcast.
-    var onChainCorroborationEnabled by remember(selectedNetwork) {
-        mutableStateOf(repository.loadOnChainCorroborationEnabled(selectedNetwork))
+    var onChainCorroborationEnabled by remember {
+        mutableStateOf(bootstrapData.onChainCorroborationEnabled)
     }
-    var explorerUrlTemplate by remember(selectedNetwork) {
-        mutableStateOf(repository.loadExplorerUrlTemplate(selectedNetwork).orEmpty())
-    }
+    var explorerUrlTemplate by remember { mutableStateOf(bootstrapData.explorerUrlTemplate) }
     var peerBroadcastAck by remember { mutableStateOf(false) }
-    var savedAddresses by remember { mutableStateOf(repository.loadSavedAddresses(snapshot.key.network)) }
+    var savedAddresses by remember { mutableStateOf(bootstrapData.savedAddresses) }
+    // Node settings are edited as an in-memory DRAFT (rpcUrl/rpcUsername/rpcPassword/rpcWalletName).
+    // NOTHING is persisted and draft edits never trigger network I/O; savedRpcConfig is the persisted ACTIVE
+    // config that lifecycle/explicit node reads and sends use, updated only by the explicit Save action.
     var rpcUrl by remember { mutableStateOf(snapshot.rpcConfig.url) }
     var rpcUsername by remember { mutableStateOf(snapshot.rpcConfig.username) }
     var rpcPassword by remember { mutableStateOf(snapshot.rpcConfig.password) }
     var rpcWalletName by remember { mutableStateOf(snapshot.rpcConfig.walletName) }
+    var savedRpcConfig by remember { mutableStateOf(snapshot.rpcConfig) }
     var rpcConfigRevision by remember { mutableStateOf(0) }
-    var rpcConfigNeedsRecheck by remember { mutableStateOf(false) }
+    // One-shot "Test connection" result for the current DRAFT (never persisted, never gates money paths).
+    var draftTestStatus by remember { mutableStateOf<DogecoinNodeStatus?>(null) }
+    var draftTesting by remember { mutableStateOf(false) }
+    val draftTestGeneration = remember { AtomicInteger(0) }
     var amount by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("bitchat") }
     var requestMessage by remember { mutableStateOf("") }
@@ -250,6 +453,12 @@ fun DogecoinWalletSheet(
     var sendError by remember { mutableStateOf<String?>(null) }
     var sentReceipt by remember { mutableStateOf<DogecoinBroadcastReceipt?>(null) }
     var pendingTransaction by remember { mutableStateOf<DogecoinSignedTransaction?>(null) }
+    var pendingPaymentReceiptContext by remember { mutableStateOf<DogepaidPaymentContext?>(null) }
+    // One-shot within this sheet instance. Keeping the parent prop unchanged must not let a second send
+    // reuse the original conversation/request binding after the first transaction succeeds.
+    var availablePaymentReceiptContext by remember(paymentReceiptContext) {
+        mutableStateOf(paymentReceiptContext)
+    }
     var mainnetBroadcastAcknowledged by remember { mutableStateOf(false) }
     var highFeeAcknowledged by remember { mutableStateOf(false) }
     var policyUnavailableAcknowledged by remember { mutableStateOf(false) }
@@ -283,6 +492,10 @@ fun DogecoinWalletSheet(
     val rpcUrlValid = remember(rpcUrl, selectedNetwork) {
         !rpcUrlBlank && DogecoinRpcConfig(url = rpcUrl).hasValidUrl(selectedNetwork)
     }
+    // Trust classification of the ACTIVE (saved) endpoint — the only thing that may authorize node I/O.
+    // URL syntax validity above is presentation-only and never a trust decision.
+    val savedEndpointClass = remember(savedRpcConfig) { classifyDogecoinRpcEndpoint(savedRpcConfig.url) }
+    val savedEndpointTrusted = savedEndpointClass.isTrustedRpcRoute
     val nodeReady = nodeStatus?.isReadyFor(selectedNetwork) == true
     val broadcastNodeReady = nodeStatus?.canBroadcastFor(selectedNetwork) == true
     val canRescanWalletHistory = nodeStatus?.supportsHistoricalRescanFor(selectedNetwork) == true
@@ -326,8 +539,9 @@ fun DogecoinWalletSheet(
         ).normalized(selectedNetwork)
     }
 
-    fun persistRpcConfig() {
-        repository.saveRpcConfig(selectedNetwork, currentRpcConfig())
+    // True when the on-screen draft differs from the persisted active config (Save required to use it).
+    val rpcDraftDirty = remember(rpcUrl, rpcUsername, rpcPassword, rpcWalletName, savedRpcConfig, selectedNetwork) {
+        currentRpcConfig() != savedRpcConfig
     }
 
     fun isValidSelectedFeeRate(value: String): Boolean {
@@ -340,14 +554,26 @@ fun DogecoinWalletSheet(
         return DogecoinAmount.toKoinu(value) >= minimumSendOutputKoinu
     }
 
-    fun invalidateRpcRuntimeState() {
+    fun revokeActiveRpcRequests() {
+        rpcRequestGeneration.incrementAndGet()
         rpcConfigRevision += 1
-        rpcConfigNeedsRecheck = true
+    }
+
+    fun guardedRpcClient(generation: Int): DogecoinRpcClient = rpcClient.guardedBy {
+        check(rpcRequestGeneration.get() == generation) {
+            "Dogecoin node route changed; the pending RPC workflow was stopped before its next request."
+        }
+    }
+
+    fun invalidateRpcRuntimeState() {
+        revokeActiveRpcRequests()
         nodeStatus = null
         refreshing = false
+        walletBalance = null
         walletBalanceError = null
         addressWatchStatus = null
         addressWatchStatusError = null
+        walletActivity = emptyList()
         walletActivityError = null
         refreshingBalance = false
         rescanning = false
@@ -355,18 +581,33 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
         pendingTransaction = null
+        pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
+        sending = false
         exportingRawTransaction = false
         pendingWatchImportAction = null
     }
 
+    fun invalidateDraftTestState() {
+        draftTestGeneration.incrementAndGet()
+        draftTestStatus = null
+        draftTesting = false
+    }
+
+    fun setNodeAssistEnabled(enabled: Boolean) {
+        if (nodeAssist == enabled) return
+        invalidateRpcRuntimeState()
+        nodeAssist = enabled
+    }
+
+    // Field edits mutate ONLY the in-memory draft: nothing is persisted and no I/O happens until the
+    // explicit Save action. The active (saved) config — and anything in flight against it — is untouched.
     fun updateRpcUrl(value: String) {
         if (rpcUrl == value) return
         rpcUrl = value
-        invalidateRpcRuntimeState()
-        persistRpcConfig()
+        invalidateDraftTestState()
     }
 
     fun updateRpcUsername(value: String) {
@@ -378,42 +619,108 @@ fun DogecoinWalletSheet(
             rpcUsername = parsedAuth.first
             rpcPassword = parsedAuth.second
         }
-        invalidateRpcRuntimeState()
-        persistRpcConfig()
+        invalidateDraftTestState()
     }
 
     fun updateRpcPassword(value: String) {
         if (rpcPassword == value) return
         rpcPassword = value
-        invalidateRpcRuntimeState()
-        persistRpcConfig()
+        invalidateDraftTestState()
     }
 
     fun updateRpcWalletName(value: String) {
         if (rpcWalletName == value) return
         rpcWalletName = value
+        invalidateDraftTestState()
+    }
+
+    /**
+     * Explicit Save: the ONLY place draft node settings are persisted and become the active config.
+     * Stops a session-only node assist (the endpoint it was authorized for no longer exists) and
+     * re-resolves the backend so an untrusted endpoint lands on Built-in SPV, never on a probed node.
+     */
+    fun saveNodeSettings() {
+        // Revoke the old active route BEFORE committing the replacement. Any in-flight multi-call RPC
+        // workflow may finish its current HTTP exchange, but cannot issue another request afterward.
         invalidateRpcRuntimeState()
-        persistRpcConfig()
+        invalidateDraftTestState()
+        nodeAssist = false
+        repository.saveRpcConfig(selectedNetwork, currentRpcConfig())
+        val persisted = repository.loadRpcConfig(selectedNetwork)
+        savedRpcConfig = persisted
+        // Reflect normalization (trimming, user:pass token split) back into the draft fields.
+        rpcUrl = persisted.url
+        rpcUsername = persisted.username
+        rpcPassword = persisted.password
+        rpcWalletName = persisted.walletName
+        persistedBackend = repository.resolveBackend(selectedNetwork)
+        val helperStillEligible = repository.loadHelperEnabled(selectedNetwork)
+        if (helperEnabled != helperStillEligible) {
+            helperEnabled = helperStillEligible
+            onHelperEnabledChanged()
+        }
+    }
+
+    /**
+     * Explicit "Test connection" for the DRAFT: one-shot status probe, zero persistence, and it never
+     * sends the wallet address (no watch lookup/import). Untrusted endpoints are refused with the
+     * classifier's reason before any request is built.
+     */
+    fun testDraftConnection() {
+        val config = currentRpcConfig()
+        if (config.url.isBlank()) return
+        val testGeneration = draftTestGeneration.incrementAndGet()
+        val endpointClass = classifyDogecoinRpcEndpoint(config.url)
+        if (!endpointClass.isTrustedRpcRoute) {
+            draftTesting = false
+            draftTestStatus = DogecoinNodeStatus(
+                connected = false,
+                expectedNetwork = selectedNetwork,
+                error = dogecoinEndpointBlockedReason(endpointClass, context)
+            )
+            return
+        }
+        draftTesting = true
+        draftTestStatus = null
+        val network = selectedNetwork
+        val draftRpcClient = rpcClient.guardedBy {
+            check(draftTestGeneration.get() == testGeneration) {
+                "Dogecoin node draft changed; the connection test was stopped before its next request."
+            }
+        }
+        coroutineScope.launch {
+            val status = draftRpcClient.getBlockchainStatus(config, network)
+            if (selectedNetwork == network && draftTestGeneration.get() == testGeneration) {
+                draftTestStatus = status
+                draftTesting = false
+            }
+        }
     }
 
     fun switchNetwork(network: DogecoinNetwork) {
         if (network == selectedNetwork) return
 
-        repository.saveRpcConfig(selectedNetwork, currentRpcConfig())
+        // An unsaved node-settings draft is intentionally discarded: only an explicit Save persists it.
+        revokeActiveRpcRequests()
+        invalidateDraftTestState()
+        nodeAssist = false
         repository.saveSelectedNetwork(network)
         selectedNetwork = network
-        rpcConfigRevision += 1
-        rpcConfigNeedsRecheck = false
 
         val nextSnapshot = repository.loadOrCreateWallet(network)
         snapshot = nextSnapshot
+        persistedBackend = repository.resolveBackend(network)
         wifCopyState = repository.loadWifCopyState(nextSnapshot.key)
         practiceNudgeDismissed = repository.loadPracticeNudgeDismissed()
+        helperEnabled = repository.loadHelperEnabled(network)
+        onChainCorroborationEnabled = repository.loadOnChainCorroborationEnabled(network)
+        explorerUrlTemplate = repository.loadExplorerUrlTemplate(network).orEmpty()
         savedAddresses = repository.loadSavedAddresses(network)
         rpcUrl = nextSnapshot.rpcConfig.url
         rpcUsername = nextSnapshot.rpcConfig.username
         rpcPassword = nextSnapshot.rpcConfig.password
         rpcWalletName = nextSnapshot.rpcConfig.walletName
+        savedRpcConfig = nextSnapshot.rpcConfig
         nodeStatus = null
         refreshing = false
         walletBalance = null
@@ -433,6 +740,7 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
         pendingTransaction = null
+        pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
@@ -461,11 +769,15 @@ fun DogecoinWalletSheet(
     }
 
     fun clearWalletRuntimeState() {
+        revokeActiveRpcRequests()
+        invalidateDraftTestState()
+        nodeAssist = false
         nodeStatus = null
-        rpcConfigNeedsRecheck = false
         refreshing = false
         walletBalance = null
         walletBalanceError = null
+        addressWatchStatus = null
+        addressWatchStatusError = null
         walletActivity = emptyList()
         walletActivityError = null
         refreshingBalance = false
@@ -479,9 +791,11 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
         pendingTransaction = null
+        pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
+        pendingWatchImportAction = null
         rescanStartHeightInput = ""
         importWifRevealed = false
         paymentRequestLabel = null
@@ -495,15 +809,18 @@ fun DogecoinWalletSheet(
     }
 
     suspend fun refreshAddressWatchStatusFromNode(
+        activeRpcClient: DogecoinRpcClient,
         config: DogecoinRpcConfig,
         address: String,
         network: DogecoinNetwork,
         configRevision: Int
     ) {
+        val sessionGeneration = walletIoSession.captureGeneration()
         runCatching {
-            rpcClient.getAddressWatchStatus(config, address, network)
+            activeRpcClient.getAddressWatchStatus(config, address, network)
         }.onSuccess { watchStatus ->
             if (
+                walletIoSession.isCurrent(sessionGeneration) &&
                 selectedNetwork == network &&
                 snapshot.key.address == address &&
                 rpcConfigRevision == configRevision
@@ -513,6 +830,7 @@ fun DogecoinWalletSheet(
             }
         }.onFailure { watchError ->
             if (
+                walletIoSession.isCurrent(sessionGeneration) &&
                 selectedNetwork == network &&
                 snapshot.key.address == address &&
                 rpcConfigRevision == configRevision
@@ -537,37 +855,48 @@ fun DogecoinWalletSheet(
         }
     }
 
-    fun refreshNodeStatus() {
-        if (rpcUrlBlank) {
+    fun refreshNodeStatus(): Job? {
+        // Explicit action against the ACTIVE (saved) config only. The draft has its own Test action.
+        val config = savedRpcConfig
+        if (config.url.isBlank()) {
             nodeStatus = null
             refreshing = false
-            return
+            return null
         }
-        if (!rpcUrlValid) {
+        if (!savedEndpointTrusted) {
+            // Untrusted endpoint: zero I/O — the classifier's reason is the whole status.
             nodeStatus = DogecoinNodeStatus(
                 connected = false,
                 expectedNetwork = selectedNetwork,
-                error = context.getString(R.string.dogecoin_rpc_url_invalid)
+                error = dogecoinEndpointBlockedReason(savedEndpointClass, context)
             )
-            return
+            refreshing = false
+            return null
         }
 
         refreshing = true
         val network = selectedNetwork
         val address = snapshot.key.address
-        val config = currentRpcConfig()
         val configRevision = rpcConfigRevision
-        repository.saveRpcConfig(network, config)
-        coroutineScope.launch {
-            val status = rpcClient.getBlockchainStatus(config, network)
-            val watchStatusResult = if (status.isReadyFor(network)) {
-                runCatching { rpcClient.getAddressWatchStatus(config, address, network) }
-            } else {
-                null
+        val requestGeneration = rpcRequestGeneration.get()
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
+        return coroutineScope.launch {
+            val (status, watchStatusResult) = walletIoSession.serialized {
+                val currentStatus = activeRpcClient.getBlockchainStatus(config, network)
+                val currentWatchStatus = if (currentStatus.isReadyFor(network)) {
+                    runCatching { activeRpcClient.getAddressWatchStatus(config, address, network) }
+                } else {
+                    null
+                }
+                currentStatus to currentWatchStatus
             }
-            if (selectedNetwork == network && rpcConfigRevision == configRevision) {
+            if (
+                walletIoSession.isCurrent(sessionGeneration) &&
+                selectedNetwork == network &&
+                rpcConfigRevision == configRevision
+            ) {
                 nodeStatus = status
-                rpcConfigNeedsRecheck = false
                 if (snapshot.key.address == address) {
                     addressWatchStatus = watchStatusResult?.getOrNull()
                     addressWatchStatusError = watchStatusResult?.exceptionOrNull()?.message
@@ -577,22 +906,33 @@ fun DogecoinWalletSheet(
         }
     }
 
-    fun refreshWalletBalance() {
+    fun refreshWalletBalance(): Job? {
         if (dogecoinBackend == DogecoinBackend.SPV) {
             // SPV: balance comes from the light-client wallet (driven reactively by the sync-status effect);
             // pull a fresh snapshot here too. Skip the RPC-only watch/activity calls entirely.
             val net = selectedNetwork
             val addr = snapshot.key.address
-            coroutineScope.launch {
-                runCatching { spvDataSource.getBalance(addr, net) }
-                    .onSuccess {
-                        if (selectedNetwork == net && snapshot.key.address == addr) {
-                            walletBalance = it; walletBalanceError = null
-                            walletActivity = emptyList(); walletActivityError = null
-                        }
-                    }  // onFailure: not synced yet — the sync-status card shows progress
+            val sessionGeneration = walletIoSession.captureGeneration()
+            return coroutineScope.launch {
+                val balance = try {
+                    walletIoSession.serialized { spvDataSource.getBalance(addr, net) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    null
+                }
+                if (
+                    balance != null &&
+                    walletIoSession.isCurrent(sessionGeneration) &&
+                    selectedNetwork == net &&
+                    snapshot.key.address == addr
+                ) {
+                    walletBalance = balance
+                    walletBalanceError = null
+                    walletActivity = emptyList()
+                    walletActivityError = null
+                }
             }
-            return
         }
         refreshingBalance = true
         walletBalanceError = null
@@ -600,60 +940,60 @@ fun DogecoinWalletSheet(
         rescanError = null
         val network = selectedNetwork
         val address = snapshot.key.address
-        val config = currentRpcConfig()
+        val config = savedRpcConfig
         val configRevision = rpcConfigRevision
-        repository.saveRpcConfig(network, config)
-        coroutineScope.launch {
-            runCatching {
-                walletReadSource(config).getBalance(address, network)
-            }.onSuccess {
-                if (
-                    selectedNetwork == network &&
-                    snapshot.key.address == address &&
-                    rpcConfigRevision == configRevision
-                ) {
-                    walletBalance = it
-                    refreshAddressWatchStatusFromNode(config, address, network, configRevision)
-                    runCatching {
-                        rpcClient.getWalletActivity(config, address, network)
-                    }.onSuccess { activity ->
-                        if (
-                            selectedNetwork == network &&
-                            snapshot.key.address == address &&
-                            rpcConfigRevision == configRevision
-                        ) {
-                            walletActivity = activity
-                        }
-                    }.onFailure { activityError ->
-                        if (
-                            selectedNetwork == network &&
-                            snapshot.key.address == address &&
-                            rpcConfigRevision == configRevision
-                        ) {
-                            walletActivity = emptyList()
-                            walletActivityError = activityError.message
-                                ?: context.getString(R.string.dogecoin_activity_unavailable)
-                        }
+        val requestGeneration = rpcRequestGeneration.get()
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
+        return coroutineScope.launch {
+            val result = try {
+                Result.success(walletIoSession.serialized {
+                    val balance = walletReadSource(config, activeRpcClient).getBalance(address, network)
+                    val watchStatus = runCatching {
+                        activeRpcClient.getAddressWatchStatus(config, address, network)
                     }
-                }
-            }.onFailure {
-                if (
-                    selectedNetwork == network &&
-                    snapshot.key.address == address &&
-                    rpcConfigRevision == configRevision
-                ) {
-                    walletBalanceError = it.message ?: context.getString(R.string.dogecoin_balance_unavailable)
-                    addressWatchStatus = null
-                    addressWatchStatusError = null
-                    walletActivity = emptyList()
-                    walletActivityError = null
-                }
+                    val activity = runCatching {
+                        activeRpcClient.getWalletActivity(config, address, network)
+                    }
+                    Triple(balance, watchStatus, activity)
+                })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                Result.failure(failure)
             }
-            if (
+            val stillCurrent = walletIoSession.isCurrent(sessionGeneration) &&
                 selectedNetwork == network &&
                 snapshot.key.address == address &&
                 rpcConfigRevision == configRevision
-            ) {
+            result.onSuccess { loaded ->
+                if (!stillCurrent) return@onSuccess
+                walletBalance = loaded.first
+                loaded.second.onSuccess { watchStatus ->
+                    addressWatchStatus = watchStatus
+                    addressWatchStatusError = null
+                }.onFailure { watchError ->
+                    addressWatchStatus = null
+                    addressWatchStatusError = watchError.message
+                }
+                loaded.third.onSuccess { activity ->
+                    walletActivity = activity
+                    walletActivityError = null
+                }.onFailure { activityError ->
+                    walletActivity = emptyList()
+                    walletActivityError = activityError.message
+                        ?: context.getString(R.string.dogecoin_activity_unavailable)
+                }
+                walletBalanceError = null
+            }.onFailure { failure ->
+                if (!stillCurrent) return@onFailure
+                walletBalanceError = failure.message ?: context.getString(R.string.dogecoin_balance_unavailable)
+                addressWatchStatus = null
+                addressWatchStatusError = null
+                walletActivity = emptyList()
+                walletActivityError = null
+            }
+            if (stillCurrent) {
                 refreshingBalance = false
             }
         }
@@ -671,22 +1011,25 @@ fun DogecoinWalletSheet(
         walletActivityError = null
         rescanError = null
         val address = snapshot.key.address
-        val config = currentRpcConfig()
+        val config = savedRpcConfig
         val configRevision = rpcConfigRevision
-        repository.saveRpcConfig(network, config)
+        val requestGeneration = rpcRequestGeneration.get()
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
         coroutineScope.launch {
             runCatching {
-                rpcClient.rescanWalletHistory(config, address, network, startHeight)
-                val balance = walletReadSource(config).getBalance(address, network)
+                activeRpcClient.rescanWalletHistory(config, address, network, startHeight)
+                val balance = walletReadSource(config, activeRpcClient).getBalance(address, network)
                 val watchStatus = runCatching {
-                    rpcClient.getAddressWatchStatus(config, address, network)
+                    activeRpcClient.getAddressWatchStatus(config, address, network)
                 }
                 val activity = runCatching {
-                    rpcClient.getWalletActivity(config, address, network)
+                    activeRpcClient.getWalletActivity(config, address, network)
                 }
                 Triple(balance, watchStatus, activity)
             }.onSuccess {
                 if (
+                    walletIoSession.isCurrent(sessionGeneration) &&
                     selectedNetwork == network &&
                     snapshot.key.address == address &&
                     rpcConfigRevision == configRevision
@@ -713,6 +1056,7 @@ fun DogecoinWalletSheet(
                 }
             }.onFailure {
                 if (
+                    walletIoSession.isCurrent(sessionGeneration) &&
                     selectedNetwork == network &&
                     snapshot.key.address == address &&
                     rpcConfigRevision == configRevision
@@ -721,6 +1065,7 @@ fun DogecoinWalletSheet(
                 }
             }
             if (
+                walletIoSession.isCurrent(sessionGeneration) &&
                 selectedNetwork == network &&
                 snapshot.key.address == address &&
                 rpcConfigRevision == configRevision
@@ -775,18 +1120,32 @@ fun DogecoinWalletSheet(
         sending = true
         val network = selectedNetwork
         val wallet = snapshot.key
-        val config = currentRpcConfig()
+        val config = savedRpcConfig
         val configRevision = rpcConfigRevision
+        val requestGeneration = rpcRequestGeneration.get()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
         val feePerKbKoinu = DogecoinAmount.toKoinu(feeRate)
         val minimumOutputKoinu = minimumSendOutputKoinu
         val requestLabel = paymentRequestLabel
         val requestMessage = paymentRequestMessage
-        repository.saveRpcConfig(network, config)
+        // The target itself was captured at Pay tap. Bind it to this reviewed transaction only when the
+        // originating request still matches the actual network/address; an edited recipient gets no receipt.
+        val reviewedPaymentReceiptContext = availablePaymentReceiptContext?.takeIf { receiptContext ->
+            DogecoinPaymentRequest.parse(receiptContext.paymentUri)?.let { request ->
+                request.network == network && request.address == recipient
+            } == true
+        }
         coroutineScope.launch {
             runCatching {
-                val utxos = walletReadSource(config).listUnspent(wallet.address, network)
+                val utxos = walletReadSource(config, activeRpcClient).listUnspent(wallet.address, network)
                 if (dogecoinBackend != DogecoinBackend.SPV) {
-                    refreshAddressWatchStatusFromNode(config, wallet.address, network, configRevision)
+                    refreshAddressWatchStatusFromNode(
+                        activeRpcClient,
+                        config,
+                        wallet.address,
+                        network,
+                        configRevision
+                    )
                 }
                 val signedTransaction = DogecoinTransactionBuilder.createSignedTransaction(
                     wallet = wallet,
@@ -803,7 +1162,7 @@ fun DogecoinWalletSheet(
                     // requiresPolicyUnavailableAcknowledgement() is MAINNET-gated, so no ack pops on testnet.
                     DogecoinMempoolAcceptance(checked = false, allowed = null)
                 } else {
-                    rpcClient.testMempoolAcceptance(
+                    activeRpcClient.testMempoolAcceptance(
                         config = config,
                         rawTransactionHex = signedTransaction.rawTransactionHex,
                         network = network
@@ -827,6 +1186,7 @@ fun DogecoinWalletSheet(
                     highFeeAcknowledged = false
                     policyUnavailableAcknowledged = false
                     pendingTransaction = it
+                    pendingPaymentReceiptContext = reviewedPaymentReceiptContext
                 }
             }.onFailure {
                 if (
@@ -859,6 +1219,7 @@ fun DogecoinWalletSheet(
         }
         if (transaction.network != selectedNetwork) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -867,6 +1228,7 @@ fun DogecoinWalletSheet(
         }
         if (transaction.isExpired(nowMillis, DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS)) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -875,6 +1237,7 @@ fun DogecoinWalletSheet(
         }
         if (!transaction.hasConsistentRawTransactionId()) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -905,13 +1268,17 @@ fun DogecoinWalletSheet(
         sendError = null
         val network = selectedNetwork
         val address = snapshot.key.address
-        val config = currentRpcConfig()
+        val config = savedRpcConfig
         val configRevision = rpcConfigRevision
-        repository.saveRpcConfig(network, config)
+        val requestGeneration = rpcRequestGeneration.get()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
+        val claimedPaymentReceiptContext = pendingPaymentReceiptContext.takeIf {
+            pendingTransaction?.txid == transaction.txid
+        }
         coroutineScope.launch {
             runCatching {
                 transaction.requireConsistentRawTransactionId()
-                val currentUtxos = walletReadSource(config).listUnspent(address, network)
+                val currentUtxos = walletReadSource(config, activeRpcClient).listUnspent(address, network)
                 transaction.requireSelectedInputsStillSpendable(currentUtxos)
                 if (dogecoinBackend == DogecoinBackend.SPV) {
                     // Built-in light client: peers relay only; a returned txid is CLAIMED, not accepted.
@@ -921,8 +1288,14 @@ fun DogecoinWalletSheet(
                     // policy-unavailable acknowledgements enforced by canExportOrBroadcastSignedDogecoinTransaction.
                     spvDataSource.broadcast(transaction.rawTransactionHex, network, mainnetAuthorized = true)
                 } else {
-                    refreshAddressWatchStatusFromNode(config, address, network, configRevision)
-                    rpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
+                    refreshAddressWatchStatusFromNode(
+                        activeRpcClient,
+                        config,
+                        address,
+                        network,
+                        configRevision
+                    )
+                    activeRpcClient.sendRawTransaction(config, transaction.rawTransactionHex, network)
                 }
             }.onSuccess { txid ->
                 if (
@@ -944,18 +1317,46 @@ fun DogecoinWalletSheet(
                         changeAddress = transaction.changeAddress,
                         requestLabel = transaction.requestLabel,
                         requestMessage = transaction.requestMessage,
+                        // Keep the structured manual-share path behind the same byte-derived txid equality
+                        // required by automatic emission. The legacy human receipt remains unchanged.
+                        paymentContext = claimedPaymentReceiptContext.takeIf { txid == transaction.txid },
                         viaSpvClaimedOnly = dogecoinBackend == DogecoinBackend.SPV
                     )
+                    if (txid == transaction.txid && claimedPaymentReceiptContext != null) {
+                        onPaymentReceiptClaimed(
+                            claimedPaymentReceiptContext,
+                            DogepaidBroadcastClaim(
+                                network = transaction.network,
+                                txid = txid,
+                                amountKoinu = transaction.sendAmountKoinu,
+                                recipientAddress = transaction.recipientAddress
+                            )
+                        )
+                    }
+                    if (claimedPaymentReceiptContext != null) {
+                        // Any successful backend return consumes this Pay session, including the defensive
+                        // impossible/mismatched-txid branch where structured emission is intentionally refused.
+                        availablePaymentReceiptContext = null
+                    }
+                    pendingPaymentReceiptContext = null
                     if (dogecoinBackend == DogecoinBackend.SPV && txid == transaction.txid) {
                         // Claimed -> Confirmed corroboration from our OWN synced chain (no third party).
                         // Leaves the receipt Claimed if depth never reaches 1 within the poll budget.
+                        val sessionGeneration = walletIoSession.captureGeneration()
                         coroutineScope.launch {
                             repeat(DOGECOIN_SPV_CORROBORATION_POLLS) {
                                 // Stop promptly if the receipt was dismissed/replaced or the backend switched.
-                                if (dogecoinBackend != DogecoinBackend.SPV || sentReceipt?.txid != txid) return@launch
-                                val depth = withContext(Dispatchers.IO) {
-                                    spvService.confirmationDepth(network, txid)
+                                if (
+                                    !walletIoSession.isCurrent(sessionGeneration) ||
+                                    dogecoinBackend != DogecoinBackend.SPV ||
+                                    sentReceipt?.txid != txid
+                                ) return@launch
+                                val depth = walletIoSession.serialized {
+                                    withContext(Dispatchers.IO) {
+                                        spvService.confirmationDepth(network, txid)
+                                    }
                                 }
+                                if (!walletIoSession.isCurrent(sessionGeneration)) return@launch
                                 if (depth != null && depth >= 1) {
                                     val latest = sentReceipt
                                     if (selectedNetwork == network && snapshot.key.address == address &&
@@ -978,44 +1379,6 @@ fun DogecoinWalletSheet(
                         context.getString(R.string.dogecoin_transaction_broadcast),
                         Toast.LENGTH_SHORT
                     ).show()
-                    runCatching {
-                        walletReadSource(config).getBalance(address, network)
-                    }.onSuccess { balance ->
-                        if (
-                            selectedNetwork == network &&
-                            snapshot.key.address == address &&
-                            rpcConfigRevision == configRevision
-                        ) {
-                            walletBalance = balance
-                            walletBalanceError = null
-                            if (dogecoinBackend != DogecoinBackend.SPV) {
-                                refreshAddressWatchStatusFromNode(config, address, network, configRevision)
-                            }
-                            runCatching {
-                                if (dogecoinBackend == DogecoinBackend.SPV) emptyList()
-                                else rpcClient.getWalletActivity(config, address, network)
-                            }.onSuccess { activity ->
-                                if (
-                                    selectedNetwork == network &&
-                                    snapshot.key.address == address &&
-                                    rpcConfigRevision == configRevision
-                                ) {
-                                    walletActivity = activity
-                                    walletActivityError = null
-                                }
-                            }.onFailure { activityError ->
-                                if (
-                                    selectedNetwork == network &&
-                                    snapshot.key.address == address &&
-                                    rpcConfigRevision == configRevision
-                                ) {
-                                    walletActivity = emptyList()
-                                    walletActivityError = activityError.message
-                                        ?: context.getString(R.string.dogecoin_activity_unavailable)
-                                }
-                            }
-                        }
-                    }
                 }
             }.onFailure {
                 if (
@@ -1065,6 +1428,7 @@ fun DogecoinWalletSheet(
         val nowMillis = System.currentTimeMillis()
         if (transaction.network != selectedNetwork) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -1073,6 +1437,7 @@ fun DogecoinWalletSheet(
         }
         if (transaction.isExpired(nowMillis, DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS)) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -1081,6 +1446,7 @@ fun DogecoinWalletSheet(
         }
         if (!transaction.hasConsistentRawTransactionId()) {
             pendingTransaction = null
+            pendingPaymentReceiptContext = null
             mainnetBroadcastAcknowledged = false
             highFeeAcknowledged = false
             policyUnavailableAcknowledged = false
@@ -1114,15 +1480,22 @@ fun DogecoinWalletSheet(
         sendError = null
         val network = selectedNetwork
         val address = snapshot.key.address
-        val config = currentRpcConfig()
+        val config = savedRpcConfig
         val configRevision = rpcConfigRevision
-        repository.saveRpcConfig(network, config)
+        val requestGeneration = rpcRequestGeneration.get()
+        val activeRpcClient = guardedRpcClient(requestGeneration)
         coroutineScope.launch {
             runCatching {
                 transaction.requireConsistentRawTransactionId()
-                val currentUtxos = walletReadSource(config).listUnspent(address, network)
+                val currentUtxos = walletReadSource(config, activeRpcClient).listUnspent(address, network)
                 transaction.requireSelectedInputsStillSpendable(currentUtxos)
-                refreshAddressWatchStatusFromNode(config, address, network, configRevision)
+                refreshAddressWatchStatusFromNode(
+                    activeRpcClient,
+                    config,
+                    address,
+                    network,
+                    configRevision
+                )
                 when (action) {
                     DogecoinRawTransactionExportAction.COPY -> copy(
                         transaction.rawTransactionHex,
@@ -1166,6 +1539,7 @@ fun DogecoinWalletSheet(
     fun clearReviewedSendState() {
         sentReceipt = null
         pendingTransaction = null
+        pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
@@ -1215,6 +1589,11 @@ fun DogecoinWalletSheet(
     }
 
     fun applyPaymentRequest(request: DogecoinPaymentRequest, revealSend: Boolean = true) {
+        // A QR/clipboard/address-field request is a different origin. Even if it happens to reuse the
+        // same address, it must not inherit the chat conversation or reqRef captured by an earlier Pay tap.
+        if (availablePaymentReceiptContext?.paymentUri != request.uri) {
+            availablePaymentReceiptContext = null
+        }
         if (request.network != selectedNetwork) {
             switchNetwork(request.network)
         }
@@ -1340,36 +1719,106 @@ fun DogecoinWalletSheet(
         }
     }
 
-    LaunchedEffect(selectedNetwork, snapshot.key.address, rpcConfigRevision) {
-        if (rpcConfigNeedsRecheck) {
-            delay(DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS)
-        }
-        if (rpcUrlBlank || !rpcUrlValid) {
-            // Nothing to revalidate against a blank/invalid URL; clear the pending-recheck hint
-            // so the "revalidating" balance/node notice does not stick when the URL is cleared.
-            rpcConfigNeedsRecheck = false
-            return@LaunchedEffect
-        }
-        refreshNodeStatus()
-    }
-
     LaunchedEffect(paymentRequest?.uri) {
         val request = paymentRequest ?: return@LaunchedEffect
         applyPaymentRequest(request)
     }
 
-    // Phase 2 SPV lifecycle: start the built-in light client when selected (and supported), stop otherwise.
-    // Sync-on-demand — also stopped when the sheet leaves composition.
-    LaunchedEffect(dogecoinBackend, selectedNetwork) {
-        if (dogecoinBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
-            walletBalance = null  // show "syncing" until the light client reads a balance
-            // start() opens the mmap block store + loads checkpoints + builds the chain — keep it off Main.
-            withContext(Dispatchers.IO) { spvService.start(selectedNetwork) }
+    // Start the built-in client only after the bootstrap shell has already rendered. Keep it process-scoped
+    // across sheet dismissal; stop only when the persisted backend/network explicitly moves away from SPV.
+    // Keyed on persistedBackend (NOT the assist-effective backend): home-node assist must leave the light
+    // client syncing in the background, so enabling assist never stops SPV here.
+    var spvStartAttempt by remember { mutableStateOf(0) }
+    var spvStarting by remember { mutableStateOf(false) }
+    var spvStartFailed by remember { mutableStateOf(false) }
+    LaunchedEffect(persistedBackend, selectedNetwork, spvStartAttempt) {
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val startAttempt = spvStartAttempt
+        if (persistedBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
+            if (!nodeAssist) walletBalance = null  // show "syncing" until the light client reads a balance
+            // Every SPV owner reserves a newer desired generation, even if the service is already running. This
+            // cancels an older queued teardown from a rapid RPC→SPV switch before taking the idempotent fast path.
+            val startRequest = spvService.reserveStartRequest()
+            // Reserve the desired start BEFORE waiting on process serialization. A backend switch can then
+            // supersede this token even if this canceled coroutine reaches the blocking start a moment later.
+            spvStarting = true
+            spvStartFailed = false
+            try {
+                // The process mutex is acquired while still cancellable; only its single holder enters the
+                // service monitor on IO. Reopen waiters suspend without tying up IO threads and disappear on dismiss.
+                val startApplied = dogecoinSpvLifecycleMutex.withLock {
+                    withContext(Dispatchers.IO) {
+                        walletIoSession.serialized {
+                            spvService.startForRequest(selectedNetwork, startRequest)
+                        }
+                    }
+                }
+                if (
+                    walletIoSession.isCurrent(sessionGeneration) &&
+                    spvStartAttempt == startAttempt
+                ) spvStartFailed = !startApplied
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                if (
+                    walletIoSession.isCurrent(sessionGeneration) &&
+                    spvStartAttempt == startAttempt
+                ) spvStartFailed = true
+            } finally {
+                if (
+                    walletIoSession.isCurrent(sessionGeneration) &&
+                    spvStartAttempt == startAttempt
+                ) spvStarting = false
+            }
         } else {
-            withContext(Dispatchers.IO) { spvService.stop() }
+            spvStarting = false
+            spvStartFailed = false
+            // Process-owned request survives sheet dismissal. If a slow old start is still finishing, it is
+            // stopped afterward; a later SPV start supersedes this request inside the service.
+            spvService.requestStop()
         }
     }
-    DisposableEffect(Unit) { onDispose { spvService.stop() } }
+    LaunchedEffect(spvStarting, spvStartAttempt) {
+        if (!spvStarting) return@LaunchedEffect
+        delay(DOGECOIN_SPV_START_TIMEOUT_MS)
+        if (spvStarting) {
+            spvStarting = false
+            spvStartFailed = true
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            walletIoSession.invalidate()
+            rpcRequestGeneration.incrementAndGet()
+            draftTestGeneration.incrementAndGet()
+            // OkHttp execute() is blocking; revoke the next-call lease AND cancel this sheet client's current
+            // calls. SPV deliberately remains alive for fast reopen and continued sync.
+            rpcClient.cancelActiveRequests()
+        }
+    }
+
+    // After the shell's first frame/bootstrap, load the effective RPC route sequentially: status/watch first,
+    // then balance/activity. This supersedes the older no-auto-probe-on-open behavior for SAVED trusted routes;
+    // drafts and untrusted endpoints still perform zero I/O. Backend flips (including assist) follow the same path.
+    LaunchedEffect(dogecoinBackend, selectedNetwork, rpcConfigRevision) {
+        walletBalance = null
+        walletBalanceError = null
+        if (
+            dogecoinBackend != DogecoinBackend.SPV &&
+            savedRpcConfig.url.isNotBlank() &&
+            savedEndpointTrusted
+        ) {
+            val sessionGeneration = walletIoSession.captureGeneration()
+            refreshNodeStatus()?.join()
+            if (
+                walletIoSession.isCurrent(sessionGeneration) &&
+                dogecoinBackend != DogecoinBackend.SPV
+            ) {
+                refreshWalletBalance()?.join()
+            }
+        }
+        // On revert the SPV reactive-balance effect repopulates (it restarts on the backend flip).
+    }
 
     // Reactively pull the SPV balance/UTXOs as the light client syncs (chainHeight climbs as it finds our
     // funding txs). RPC/explorer balances are driven by refreshWalletBalance() instead.
@@ -1377,15 +1826,25 @@ fun DogecoinWalletSheet(
         if (dogecoinBackend != DogecoinBackend.SPV) return@LaunchedEffect
         val net = selectedNetwork
         val addr = snapshot.key.address
-        runCatching { spvDataSource.getBalance(addr, net) }
-            .onSuccess {
-                if (selectedNetwork == net && snapshot.key.address == addr) {
-                    walletBalance = it
-                    walletBalanceError = null
-                    walletActivity = emptyList()  // SPV has no rich activity history yet
-                    walletActivityError = null
-                }
-            }  // onFailure: not synced/active enough to read yet — the sync status conveys progress
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val balance = try {
+            walletIoSession.serialized { spvDataSource.getBalance(addr, net) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+        if (
+            balance != null &&
+            walletIoSession.isCurrent(sessionGeneration) &&
+            selectedNetwork == net &&
+            snapshot.key.address == addr
+        ) {
+            walletBalance = balance
+            walletBalanceError = null
+            walletActivity = emptyList()  // SPV has no rich activity history yet
+            walletActivityError = null
+        }
     }
 
     // Sync ETA (presentation-only): while syncing, average headers/sec since this run's anchor and surface the
@@ -1427,28 +1886,116 @@ fun DogecoinWalletSheet(
         }
     }
 
-    // Confirmation ring fill (presentation-only): track an SPV-sent tx's depth 0..target so the focal ring can
-    // fill 0->6 as blocks land. Independent of the receipt's Claimed->Confirmed corroboration poll above (which
-    // flips at depth 1); this one runs to the target. Bounded so a never-confirming tx eventually reverts the
-    // ring to the idle balance. Reads only confirmationDepth() — never touches the money path.
-    var confirmingDepth by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(sentReceipt?.txid, dogecoinBackend, selectedNetwork) {
+    // Confirmation ring fill (presentation-only): observe the just-sent tx through the effective backend.
+    // SPV keeps its existing validated-chain depth; RPC/home-node assist asks the wallet-scoped node for this
+    // exact txid. Neither result feeds coin selection, signing, policy checks, or broadcast authorization.
+    var confirmationObservation by remember { mutableStateOf<DogecoinConfirmationObservation?>(null) }
+    val confirmingDepth = confirmationObservation
+        ?.takeIf { observation -> observation.txid.equals(sentReceipt?.txid, ignoreCase = true) }
+        ?.depth
+    val confirmationProgressSource = dogecoinConfirmationProgressSource(dogecoinBackend)
+    LaunchedEffect(
+        sentReceipt?.txid,
+        dogecoinBackend,
+        selectedNetwork,
+        snapshot.key.address,
+        savedRpcConfig,
+        rpcConfigRevision
+    ) {
         val receipt = sentReceipt
-        if (receipt == null || dogecoinBackend != DogecoinBackend.SPV || receipt.network != selectedNetwork) {
-            confirmingDepth = null
+        if (receipt == null || receipt.network != selectedNetwork) {
+            confirmationObservation = null
             return@LaunchedEffect
         }
         val txid = receipt.txid
-        repeat(DOGECOIN_SPV_CONFIRM_POLLS) {
-            // null = the tx isn't (yet) known to the SPV wallet (e.g. lost/replaced) — show NO confirming ring
-            // rather than a fake, never-progressing "0 of 6"; a known tx reports depth 0..target and drives the fill.
-            val depth = withContext(Dispatchers.IO) { spvService.confirmationDepth(selectedNetwork, txid) }
-            confirmingDepth = depth?.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET)
-            if (depth != null && depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
-            delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+        val sessionGeneration = walletIoSession.captureGeneration()
+        confirmationObservation = null
+        when (confirmationProgressSource) {
+            DogecoinConfirmationProgressSource.SPV -> repeat(DOGECOIN_SPV_CONFIRM_POLLS) {
+                // null = the tx isn't (yet) known to the SPV wallet (e.g. lost/replaced) — show NO confirming ring
+                // rather than a fake, never-progressing 0 of 6; a known tx reports depth 0..target and drives it.
+                val depth = walletIoSession.serialized {
+                    withContext(Dispatchers.IO) {
+                        spvService.confirmationDepth(selectedNetwork, txid)
+                    }
+                }
+                if (!walletIoSession.isCurrent(sessionGeneration)) return@LaunchedEffect
+                confirmationObservation = depth?.let {
+                    DogecoinConfirmationObservation(txid, it.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET))
+                }
+                if (depth != null && depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
+                delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
+            }
+
+            DogecoinConfirmationProgressSource.RPC -> {
+                val network = selectedNetwork
+                val address = snapshot.key.address
+                val config = savedRpcConfig
+                val configRevision = rpcConfigRevision
+                val requestGeneration = rpcRequestGeneration.get()
+                val activeRpcClient = guardedRpcClient(requestGeneration)
+                repeat(DOGECOIN_RPC_CONFIRM_POLLS) {
+                    // A missing/error response is UNKNOWN, not zero. Keep polling without inventing progress.
+                    val depth = try {
+                        walletIoSession.serialized {
+                            activeRpcClient.getTransactionConfirmations(config, txid, network)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    val stillRelevant = walletIoSession.isCurrent(sessionGeneration) &&
+                        sentReceipt?.txid == txid &&
+                        sentReceipt?.network == network &&
+                        selectedNetwork == network &&
+                        snapshot.key.address == address &&
+                        rpcConfigRevision == configRevision &&
+                        dogecoinConfirmationProgressSource(dogecoinBackend) ==
+                        DogecoinConfirmationProgressSource.RPC
+                    if (!stillRelevant) return@LaunchedEffect
+                    if (depth != null) {
+                        confirmationObservation = DogecoinConfirmationObservation(
+                            txid,
+                            depth.coerceIn(0, DOGECOIN_SPV_CONFIRM_TARGET)
+                        )
+                        if (depth >= DOGECOIN_SPV_CONFIRM_TARGET) return@LaunchedEffect
+                    } else {
+                        // The node's current answer is unknown; do not keep presenting an older node claim.
+                        confirmationObservation = null
+                    }
+                    delay(DOGECOIN_RPC_CONFIRM_INTERVAL_MS)
+                }
+            }
         }
         // Budget exhausted without reaching the target — stop showing a stale count; revert to idle/balance.
-        confirmingDepth = null
+        if (confirmationObservation?.txid.equals(txid, ignoreCase = true)) {
+            confirmationObservation = null
+        }
+    }
+
+    // Refresh the coarse balance/watch/activity snapshot only after the active-send tracker has had first use
+    // of the serialized IO lane. This preserves CONF-RPC's fast initial 0/6 observation instead of putting it
+    // behind several node calls. UNKNOWN is bounded: after six seconds the normal refresh proceeds anyway.
+    LaunchedEffect(sentReceipt?.txid, dogecoinBackend, selectedNetwork, rpcConfigRevision) {
+        val receipt = sentReceipt?.takeIf { it.network == selectedNetwork } ?: return@LaunchedEffect
+        val sessionGeneration = walletIoSession.captureGeneration()
+        val deadlineMillis = android.os.SystemClock.elapsedRealtime() + 6_000L
+        while (
+            walletIoSession.isCurrent(sessionGeneration) &&
+            sentReceipt?.txid == receipt.txid &&
+            confirmationObservation?.txid != receipt.txid &&
+            android.os.SystemClock.elapsedRealtime() < deadlineMillis
+        ) {
+            delay(100L)
+        }
+        if (
+            walletIoSession.isCurrent(sessionGeneration) &&
+            sentReceipt?.txid == receipt.txid &&
+            selectedNetwork == receipt.network
+        ) {
+            refreshWalletBalance()?.join()
+        }
     }
 
     // Activity / pending list (SPV): poll the READ-ONLY wallet-tx snapshot so the pending cards + full activity
@@ -1460,19 +2007,38 @@ fun DogecoinWalletSheet(
             spvTxs = emptyList()
             return@LaunchedEffect
         }
+        val network = selectedNetwork
+        val sessionGeneration = walletIoSession.captureGeneration()
         while (true) {
-            spvTxs = withContext(Dispatchers.IO) {
-                spvService.snapshotTransactions(selectedNetwork) ?: emptyList()
+            val transactions = walletIoSession.serialized {
+                withContext(Dispatchers.IO) {
+                    spvService.snapshotTransactions(network) ?: emptyList()
+                }
+            }
+            if (
+                walletIoSession.isCurrent(sessionGeneration) &&
+                dogecoinBackend == DogecoinBackend.SPV &&
+                selectedNetwork == network
+            ) {
+                spvTxs = transactions
             }
             delay(DOGECOIN_SPV_CORROBORATION_INTERVAL_MS)
         }
     }
-    // Backend-agnostic rows: SPV from the wallet snapshot, RPC from getWalletActivity (already polled below).
-    val txRows: List<WalletTxRow> = remember(spvTxs, walletActivity, dogecoinBackend) {
-        if (dogecoinBackend == DogecoinBackend.SPV) {
+    // Backend-agnostic rows: SPV from the wallet snapshot, RPC from wallet activity plus an exact, actively
+    // polled sent-receipt row. The overlay survives through depth 6 so Pending transitions into history/detail.
+    val txRows: List<WalletTxRow> = remember(
+        spvTxs,
+        walletActivity,
+        dogecoinBackend,
+        sentReceipt,
+        confirmingDepth,
+        selectedNetwork
+    ) {
+        if (confirmationProgressSource == DogecoinConfirmationProgressSource.SPV) {
             spvTxs.map { WalletTxRow(it.txid, it.incoming, it.amountKoinu, it.confirmations, it.timeSeconds) }
         } else {
-            walletActivity.map {
+            val baseRows = walletActivity.map {
                 WalletTxRow(
                     txid = it.txid,
                     incoming = !it.category.equals("send", ignoreCase = true),
@@ -1480,6 +2046,29 @@ fun DogecoinWalletSheet(
                     confirmations = it.confirmations.coerceAtLeast(0),
                     timeSeconds = it.timeSeconds
                 )
+            }
+            val receipt = sentReceipt?.takeIf { it.network == selectedNetwork }
+            val depth = confirmingDepth
+            // The targeted lookup owns the active receipt's truth. Never fall back to a stale/coerced activity
+            // row for that txid while its exact status is unknown (including a conflict reported as negative).
+            val baseRowsWithoutActiveReceipt = if (receipt != null) {
+                baseRows.filterNot { it.txid.equals(receipt.txid, ignoreCase = true) }
+            } else {
+                baseRows
+            }
+            if (receipt != null && depth != null) {
+                // The active receipt is authoritatively an outgoing send from this UI. Core activity may expose
+                // the same self-send/change txid as a receive row, so do not let that flip the presentation.
+                val trackedRow = WalletTxRow(
+                    txid = receipt.txid,
+                    incoming = false,
+                    amountKoinu = receipt.sendAmountKoinu,
+                    confirmations = depth,
+                    timeSeconds = null
+                )
+                listOf(trackedRow) + baseRowsWithoutActiveReceipt
+            } else {
+                baseRowsWithoutActiveReceipt
             }
         }
     }
@@ -1503,7 +2092,9 @@ fun DogecoinWalletSheet(
 
     BitchatBottomSheet(
         modifier = modifier,
-        onDismissRequest = onDismiss
+        // Keep the Compose-owned local broadcast coroutine alive until it reports success/failure. Helper
+        // broadcasts are app-scope in ChatViewModel and do not rely on this guard.
+        onDismissRequest = { if (!sending) onDismiss() }
     ) {
         // Scope the wallet to its own Rams/Dogecoin palette (gold/ink/paper); the rest of the app keeps green.
         DogecoinWalletTheme {
@@ -1559,7 +2150,10 @@ fun DogecoinWalletSheet(
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            if (walletAction == DogeWalletAction.NONE) {
+                            // The settings gear (network / backend / advanced) is hidden in the SIMPLE profile so a
+                            // non-technical user can't change the network or break connectivity. The money-path
+                            // gates (WIF backup, mainnet/high-fee/policy acks, fail-closed verifier) are unaffected.
+                            if (walletAction == DogeWalletAction.NONE && !isSimpleProfile) {
                                 IconButton(onClick = { walletAction = DogeWalletAction.SETTINGS }) {
                                     Icon(
                                         imageVector = Icons.Filled.Settings,
@@ -1604,15 +2198,17 @@ fun DogecoinWalletSheet(
                     val spv = dogecoinBackend == DogecoinBackend.SPV
                     val s = spvStatus
                     val colors = dogeWalletColors
-                    // A pending SPV send fills the ring 0..target as confirmations land. The depth comes from our
-                    // OWN chain head (confirmationDepth()), accurate regardless of peer count — so show CONFIRMING
-                    // even when the strict `synced` flag momentarily flaps (a peer dip below the floor, or a fresh
-                    // block a block or two ahead), as long as we're effectively at the tip. A genuine backlog
-                    // (> DOGECOIN_SPV_NEARTIP_BLOCKS) keeps it in SYNCING.
+                    // A pending send fills the ring from the effective route: our validated SPV chain, or the
+                    // configured home node while RPC/assist is active. SPV keeps its synced/near-tip presentation
+                    // gate; node progress deliberately does not depend on the background SPV sync state.
                     val confDepth = confirmingDepth
-                    val hasPending = spv && confDepth != null && confDepth < DOGECOIN_SPV_CONFIRM_TARGET
                     val nearTip = s.bestPeerHeight > 0L && s.blocksBehind <= DOGECOIN_SPV_NEARTIP_BLOCKS
-                    val confirming = hasPending && (s.synced || nearTip)
+                    val confirming = shouldShowDogecoinConfirmingRing(
+                        effectiveBackend = dogecoinBackend,
+                        hasActiveReceipt = sentReceipt?.network == selectedNetwork,
+                        confirmationDepth = confDepth,
+                        spvSyncedOrNearTip = s.synced || nearTip
+                    )
                     // Mutually exclusive with confirming: only show Syncing when behind AND not filling the ring.
                     val syncing = spv && s.running && !s.synced && !confirming
                     val syncProgress = if (syncing) {
@@ -1707,10 +2303,81 @@ fun DogecoinWalletSheet(
                             add(if (spv) "Built-in" else "My node")
                             // Mirror the ring's own state so the strip can never contradict it (confirming/syncing
                             // are the same locals that drive ringMode; "synced" == the ring showing the idle balance).
-                            if (spv) add(if (confirming) "confirming" else if (syncing) "syncing" else if (s.running) "synced" else "starting")
+                            if (spv && !spvStartFailed) {
+                                add(if (confirming) "confirming" else if (syncing) "syncing" else if (s.running) "synced" else "starting")
+                            }
                             if (s.overTor && torReady) add("Tor on") else if (torIntentOn) add("Tor starting")
                         }.joinToString("   ·   ")
                         Text(strip, style = MaterialTheme.typography.labelMedium, color = colors.muted)
+                        if (!spv && (refreshing || refreshingBalance)) {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_node_checking,
+                                    selectedNetwork.displayName
+                                ),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.muted,
+                                textAlign = TextAlign.Center
+                            )
+                        } else if (!spv && walletBalanceError != null) {
+                            Text(
+                                text = walletBalanceError.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.danger,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        if (spv && spvStarting) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_spv_starting),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.muted
+                            )
+                        }
+                        if (spv && spvStartFailed) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_spv_start_failed),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.danger,
+                                textAlign = TextAlign.Center
+                            )
+                            TextButton(onClick = {
+                                spvStartFailed = false
+                                spvStartAttempt += 1
+                            }) {
+                                Text(stringResource(R.string.retry))
+                            }
+                        }
+                        // Provenance (P0-3): a node-backed balance ("My node" or active home-node assist) is
+                        // reported by the node and NOT independently verified by this device. SPV reads come
+                        // from our own validated headers, so they carry no such caption.
+                        if (!spv) {
+                            Text(
+                                text = if (confirming) {
+                                    stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        confDepth!!,
+                                        DOGECOIN_SPV_CONFIRM_TARGET
+                                    )
+                                } else {
+                                    stringResource(R.string.dogecoin_node_reported_provenance)
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.muted
+                            )
+                            // Distinguish "node reachable but reports nothing for this address" (e.g. a
+                            // watch-only address the node hasn't caught up on) from an actual read error,
+                            // which surfaces separately as walletBalanceError.
+                            if (bal != null && bal.confirmedKoinu == 0L && bal.unconfirmedKoinu == 0L && bal.utxoCount == 0) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_node_empty_watch),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.muted,
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
                         if (selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
                             Surface(
                                 color = colors.danger.copy(alpha = 0.14f),
@@ -1730,6 +2397,28 @@ fun DogecoinWalletSheet(
                     }
                 }
 
+                // Home-node assist (R-C3): offered while the light client is behind and a TRUSTED node
+                // endpoint is already SAVED; testnet/regtest only (mainnet reads require the explicit pin
+                // flow). Classifier-gated: an unverified public HTTPS / .onion / invalid URL never renders
+                // the offer, so it can never be activated (URL syntax is not a trust decision).
+                run {
+                    val offerVisible = persistedBackend == DogecoinBackend.SPV && !spvStatus.synced &&
+                        dogecoinNodeAssistEligible(selectedNetwork, savedEndpointClass)
+                    if (nodeAssist || offerVisible) {
+                        item(key = "node_assist") {
+                            NodeAssistCard(
+                                active = nodeAssist,
+                                blocksBehind = spvStatus.blocksBehind,
+                                notOverTor = torIntentOn,
+                                // Status + balance refresh in LaunchedEffect(nodeAssist) after recomposition;
+                                // refreshing HERE would capture this composition's pre-flip SPV backend.
+                                onUse = { setNodeAssistEnabled(true) },
+                                onStop = { setNodeAssistEnabled(false) }
+                            )
+                        }
+                    }
+                }
+
                 // In-flight payments (sent or received) each with their own 0->target fill, right under the
                 // balance so confirmation progress is visible without opening anything.
                 if (pendingTxRows.isNotEmpty()) {
@@ -1742,6 +2431,25 @@ fun DogecoinWalletSheet(
                             )
                             pendingTxRows.take(DOGECOIN_PENDING_CARDS_LIMIT).forEach { row ->
                                 WalletTxRowView(row) { walletTxDetailId = row.txid }
+                            }
+                            val activeReceipt = sentReceipt
+                            val activeRpcDepth = confirmingDepth
+                            if (
+                                confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                activeReceipt?.network == selectedNetwork &&
+                                activeRpcDepth != null &&
+                                activeRpcDepth < DOGECOIN_SPV_CONFIRM_TARGET
+                            ) {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        activeRpcDepth,
+                                        DOGECOIN_SPV_CONFIRM_TARGET
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = dogeWalletColors.muted,
+                                    lineHeight = 16.sp
+                                )
                             }
                             val morePending = pendingTxRows.size - DOGECOIN_PENDING_CARDS_LIMIT
                             if (morePending > 0) {
@@ -1809,6 +2517,26 @@ fun DogecoinWalletSheet(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = rc.muted
                                 )
+                                val activeRpcDepth = confirmingDepth
+                                if (
+                                    confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                    receipt.network == selectedNetwork
+                                ) {
+                                    Text(
+                                        text = if (activeRpcDepth != null) {
+                                            stringResource(
+                                                R.string.dogecoin_rpc_confirmation_provenance,
+                                                activeRpcDepth,
+                                                DOGECOIN_SPV_CONFIRM_TARGET
+                                            )
+                                        } else {
+                                            stringResource(R.string.dogecoin_rpc_confirmation_unavailable_provenance)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = rc.muted,
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 SelectionContainer {
                                     Text(
                                         text = receipt.txid.take(10) + "…" + receipt.txid.takeLast(8),
@@ -1891,13 +2619,17 @@ fun DogecoinWalletSheet(
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             backendOptions.forEachIndexed { index, option ->
                                 SegmentedButton(
-                                    selected = dogecoinBackend == option.first,
+                                    selected = persistedBackend == option.first,
                                     onClick = {
-                                        dogecoinBackend = option.first
+                                        if (persistedBackend != option.first || nodeAssist) {
+                                            invalidateRpcRuntimeState()
+                                        }
+                                        persistedBackend = option.first
+                                        // An explicit selector choice supersedes any session-only assist.
+                                        nodeAssist = false
                                         repository.saveBackend(selectedNetwork, option.first)
-                                        // SPV is driven by its own lifecycle/sync effects; for a node backend
-                                        // re-pull the balance immediately on switch.
-                                        if (option.first != DogecoinBackend.SPV) refreshWalletBalance()
+                                        // The keyed effective-backend effect performs the serialized status then
+                                        // balance reload after recomposition. Do not read through the old backend.
                                     },
                                     shape = SegmentedButtonDefaults.itemShape(index = index, count = backendOptions.size)
                                 ) { Text(option.second) }
@@ -2116,6 +2848,71 @@ fun DogecoinWalletSheet(
                                 Text(stringResource(R.string.dogecoin_node_conf_copy))
                             }
                         }
+                        // Draft-first controls: editing performs zero I/O; Test probes the draft once
+                        // (never persisted), Save is the ONLY way the draft becomes the active config.
+                        if (rpcDraftDirty) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_node_draft_unsaved),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { testDraftConnection() },
+                                enabled = !draftTesting && rpcUrl.trim().isNotEmpty(),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(stringResource(R.string.dogecoin_node_test_connection))
+                            }
+                            Button(
+                                onClick = { saveNodeSettings() },
+                                enabled = rpcDraftDirty,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(stringResource(R.string.dogecoin_node_save_settings))
+                            }
+                        }
+                        // P0-3: make the draft-vs-saved split explicit so a failed draft Test is not mistaken
+                        // for a broken wallet — the saved config (used by real reads/sends) is unaffected until Save.
+                        Text(
+                            text = stringResource(R.string.dogecoin_node_test_hint),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                            lineHeight = 16.sp
+                        )
+                        if (draftTesting) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_node_testing),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 18.sp
+                            )
+                        }
+                        draftTestStatus?.let { testStatus ->
+                            Text(
+                                text = stringResource(R.string.dogecoin_node_draft_test_note),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                            NodeStatusRow(
+                                status = testStatus,
+                                refreshing = false,
+                                network = selectedNetwork
+                            )
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                        // When the on-screen draft differs from the saved config, the status below (and the
+                        // real reads/sends) still reflect the SAVED settings — say so to avoid confusion.
+                        if (rpcDraftDirty) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_node_status_reflects_saved),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                lineHeight = 16.sp
+                            )
+                        }
                         NodeStatusRow(
                             status = nodeStatus,
                             refreshing = refreshing,
@@ -2123,18 +2920,18 @@ fun DogecoinWalletSheet(
                         )
                         when {
                             refreshing -> Text(
-                                text = stringResource(R.string.dogecoin_node_auto_rechecking),
+                                text = stringResource(R.string.dogecoin_node_checking, selectedNetwork.displayName),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                                 lineHeight = 18.sp
                             )
-                            rpcConfigNeedsRecheck && !rpcUrlBlank && rpcUrlValid -> Text(
-                                text = stringResource(R.string.dogecoin_node_revalidating),
+                            savedRpcConfig.url.isNotBlank() && !savedEndpointTrusted -> Text(
+                                text = dogecoinEndpointBlockedReason(savedEndpointClass, context),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.tertiary,
+                                color = MaterialTheme.colorScheme.error,
                                 lineHeight = 18.sp
                             )
-                            nodeStatus == null && !rpcUrlBlank -> Text(
+                            nodeStatus == null && savedRpcConfig.url.isNotBlank() -> Text(
                                 text = stringResource(R.string.dogecoin_node_recheck_required),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
@@ -2143,7 +2940,7 @@ fun DogecoinWalletSheet(
                         }
                         Button(
                             onClick = { refreshNodeStatus() },
-                            enabled = !refreshing && rpcUrlValid,
+                            enabled = !refreshing && savedRpcConfig.url.isNotBlank() && savedEndpointTrusted,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -2255,7 +3052,25 @@ fun DogecoinWalletSheet(
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                                 lineHeight = 18.sp
                             )
-                            if (rpcConfigNeedsRecheck || refreshing) {
+                            // P0-3 provenance: a node-backed balance is node-reported, not independently
+                            // verified; an all-zero node read means the node sees nothing for this address
+                            // yet (distinct from a read error, which sets walletBalanceError above).
+                            if (dogecoinBackend != DogecoinBackend.SPV) {
+                                Text(
+                                    text = stringResource(R.string.dogecoin_node_reported_provenance),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                if (balance.confirmedKoinu == 0L && balance.unconfirmedKoinu == 0L && balance.utxoCount == 0) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_node_empty_watch),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                            }
+                            if (refreshing) {
                                 Text(
                                     text = stringResource(R.string.dogecoin_balance_revalidating),
                                     style = MaterialTheme.typography.bodySmall,
@@ -2975,6 +3790,26 @@ fun DogecoinWalletSheet(
                                         lineHeight = 16.sp
                                     )
                                 }
+                                val activeRpcDepth = confirmingDepth
+                                if (
+                                    confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
+                                    receipt.network == selectedNetwork
+                                ) {
+                                    Text(
+                                        text = if (activeRpcDepth != null) {
+                                            stringResource(
+                                                R.string.dogecoin_rpc_confirmation_provenance,
+                                                activeRpcDepth,
+                                                DOGECOIN_SPV_CONFIRM_TARGET
+                                            )
+                                        } else {
+                                            stringResource(R.string.dogecoin_rpc_confirmation_unavailable_provenance)
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 SelectionContainer {
                                     Text(
                                         text = receiptText,
@@ -3015,10 +3850,31 @@ fun DogecoinWalletSheet(
                                 }
                                 TextButton(
                                     onClick = {
-                                        onShareToChat(receiptText)
+                                        val paymentContext = receipt.paymentContext
+                                        if (paymentContext != null) {
+                                            // Manual share and automatic share converge on the ViewModel's
+                                            // persisted (network, txid) reservation, so they cannot duplicate.
+                                            onPaymentReceiptClaimed(
+                                                paymentContext,
+                                                DogepaidBroadcastClaim(
+                                                    network = receipt.network,
+                                                    txid = receipt.txid,
+                                                    amountKoinu = receipt.sendAmountKoinu,
+                                                    recipientAddress = receipt.recipientAddress
+                                                )
+                                            )
+                                        } else {
+                                            onShareToChat(receiptText)
+                                        }
                                         Toast.makeText(
                                             context,
-                                            context.getString(R.string.dogecoin_receipt_shared),
+                                            context.getString(
+                                                if (paymentContext != null) {
+                                                    R.string.dogepaid_receipt_share_queued
+                                                } else {
+                                                    R.string.dogecoin_receipt_shared
+                                                }
+                                            ),
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
@@ -3045,12 +3901,15 @@ fun DogecoinWalletSheet(
                         }
                         // Phase 4: mainnet SPV sending is enabled. The mainnet-specific safety gates (WIF-backup
                         // + mainnet/high-fee/policy-unavailable acks) are enforced in reviewSend()/the broadcast
-                        // flow, mirroring the configured-node mainnet path — so the button only needs a synced SPV.
-                        val spvSendReady = dogecoinBackend == DogecoinBackend.SPV && spvStatus.synced
+                        // flow. Route readiness mirrors the effective backend here; Confirm remains stricter.
+                        val reviewSendRouteReady = canReviewDogecoinSend(
+                            effectiveBackend = dogecoinBackend,
+                            spvSynced = spvStatus.synced,
+                            nodeReady = nodeReady
+                        )
                         Button(
                             onClick = { reviewSend() },
-                            enabled = !sending && !rescanning &&
-                                ((dogecoinBackend != DogecoinBackend.SPV && nodeReady) || spvSendReady),
+                            enabled = !sending && !rescanning && reviewSendRouteReady,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -3070,6 +3929,12 @@ fun DogecoinWalletSheet(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 lineHeight = 18.sp
+                            )
+                        } else if (dogecoinBackend != DogecoinBackend.SPV && !nodeReady) {
+                            NodeStatusRow(
+                                status = nodeStatus,
+                                refreshing = refreshing,
+                                network = selectedNetwork
                             )
                         }
                     }
@@ -3092,8 +3957,13 @@ fun DogecoinWalletSheet(
                             Switch(
                                 checked = helperEnabled,
                                 enabled = helperEnabled ||
-                                    selectedNetwork != DogecoinNetwork.MAINNET ||
-                                    helperMainnetConsent,
+                                    (
+                                        savedEndpointTrusted &&
+                                            (
+                                                selectedNetwork != DogecoinNetwork.MAINNET ||
+                                                    helperMainnetConsent
+                                                )
+                                        ),
                                 onCheckedChange = { enabled ->
                                     helperEnabled = enabled
                                     repository.saveHelperEnabled(selectedNetwork, enabled)
@@ -3300,7 +4170,7 @@ fun DogecoinWalletSheet(
             }
 
             CloseButton(
-                onClick = onDismiss,
+                onClick = { if (!sending) onDismiss() },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(16.dp)
@@ -3388,6 +4258,7 @@ fun DogecoinWalletSheet(
             // peer-broadcast result (dialog dismissed while pending, then a different tx opened on the
             // same network) could pair another tx's txid with this tx's amounts and mark it "sent".
             if (resultTxid != transaction.txid) return@LaunchedEffect
+            val receiptPaymentContext = pendingPaymentReceiptContext
             sentReceipt = DogecoinBroadcastReceipt(
                 txid = resultTxid,
                 network = transaction.network,
@@ -3398,9 +4269,16 @@ fun DogecoinWalletSheet(
                 changeAddress = transaction.changeAddress,
                 requestLabel = transaction.requestLabel,
                 requestMessage = transaction.requestMessage,
+                paymentContext = receiptPaymentContext,
                 viaPeer = true,
                 peerCorroborated = corroborated
             )
+            if (receiptPaymentContext != null) {
+                // ChatViewModel owns automatic emission for helper broadcasts so it survives sheet dismissal.
+                // This local effect only consumes the one-shot UI context and builds the existing receipt.
+                availablePaymentReceiptContext = null
+            }
+            pendingPaymentReceiptContext = null
             sendAmount = ""
             // Return to the focal/balance view (where the receipt + txid-copy now live) after a successful
             // peer broadcast — same as the local path. Guarded by resultTxid == transaction.txid above.
@@ -3451,6 +4329,7 @@ fun DogecoinWalletSheet(
             onDismissRequest = {
                 if (!sending) {
                     pendingTransaction = null
+                    pendingPaymentReceiptContext = null
                     mainnetBroadcastAcknowledged = false
                     highFeeAcknowledged = false
                     policyUnavailableAcknowledged = false
@@ -3783,7 +4662,7 @@ fun DogecoinWalletSheet(
                             )
                         }
                         Button(
-                            onClick = { onRequestPeerBroadcast(transaction) },
+                            onClick = { onRequestPeerBroadcast(transaction, pendingPaymentReceiptContext) },
                             enabled = !sending &&
                                 canExportOrBroadcastAfterAcknowledgements &&
                                 peerBroadcastAck &&
@@ -3819,6 +4698,7 @@ fun DogecoinWalletSheet(
                 TextButton(
                     onClick = {
                         pendingTransaction = null
+                        pendingPaymentReceiptContext = null
                         mainnetBroadcastAcknowledged = false
                         highFeeAcknowledged = false
                         policyUnavailableAcknowledged = false
@@ -3887,6 +4767,25 @@ fun DogecoinWalletSheet(
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
                                 color = dogeWalletColors.muted
+                            )
+                        }
+                        if (confirmationProgressSource == DogecoinConfirmationProgressSource.RPC) {
+                            val isActiveReceipt = sentReceipt?.network == selectedNetwork &&
+                                sentReceipt?.txid.equals(txDetailRow.txid, ignoreCase = true)
+                            Text(
+                                text = if (isActiveReceipt) {
+                                    stringResource(
+                                        R.string.dogecoin_rpc_confirmation_provenance,
+                                        txDetailRow.confirmations,
+                                        target
+                                    )
+                                } else {
+                                    stringResource(R.string.dogecoin_node_reported_provenance)
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = dogeWalletColors.muted,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 16.sp
                             )
                         }
                     }
@@ -4064,6 +4963,7 @@ fun DogecoinWalletSheet(
             confirmButton = {
                 Button(
                     onClick = {
+                        clearWalletRuntimeState()
                         val resetSnapshot = repository.resetWallet(network)
                         snapshot = resetSnapshot
                         wifCopyState = repository.loadWifCopyState(resetSnapshot.key)
@@ -4074,7 +4974,6 @@ fun DogecoinWalletSheet(
                         importWifRevealed = false
                         importWifError = null
                         pendingResetNetwork = null
-                        clearWalletRuntimeState()
                         Toast.makeText(
                             context,
                             context.getString(R.string.dogecoin_wallet_reset),
@@ -4283,6 +5182,7 @@ fun DogecoinWalletSheet(
             confirmButton = {
                 Button(
                     onClick = {
+                        clearWalletRuntimeState()
                         val importedSnapshot = repository.importWalletFromWif(key.network, importWif)
                         snapshot = importedSnapshot
                         wifCopyState = repository.loadWifCopyState(importedSnapshot.key)
@@ -4291,7 +5191,6 @@ fun DogecoinWalletSheet(
                         importWifError = null
                         pendingImportKey = null
                         mainnetWifImportAcknowledged = false
-                        clearWalletRuntimeState()
                         Toast.makeText(
                             context,
                             context.getString(R.string.dogecoin_import_wif_complete),
@@ -4316,677 +5215,5 @@ fun DogecoinWalletSheet(
             }
         )
         }
-    }
-}
-
-@Composable
-private fun WalletCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            content = content
-        )
-    }
-}
-
-/**
- * One transaction row: direction arrow + signed amount + confirmation status. Pending txs show the small
- * 0->target ConfirmationRing (the same ornament as the focal hero) so progress reads at a glance; once at
- * the target it collapses to a gold check. Presentation-only.
- */
-@Composable
-private fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
-    val colors = dogeWalletColors
-    val incomingGreen = Color(0xFF2E7D32)
-    val confirmed = row.confirmations >= DOGECOIN_SPV_CONFIRM_TARGET
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text(
-            text = if (row.incoming) "↓" else "↑",
-            style = MaterialTheme.typography.titleMedium,
-            color = if (row.incoming) incomingGreen else colors.ink
-        )
-        Text(
-            text = (if (row.incoming) "+" else "−") + DogecoinAmount.formatKoinu(row.amountKoinu) + " DOGE",
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-            color = colors.ink,
-            maxLines = 1,
-            modifier = Modifier.weight(1f)
-        )
-        if (confirmed) {
-            Text("✓", style = MaterialTheme.typography.titleMedium, color = colors.gold)
-        } else {
-            ConfirmationRing(
-                mode = RingMode.CONFIRMING,
-                progress = row.confirmations.toFloat() / DOGECOIN_SPV_CONFIRM_TARGET,
-                diameter = 24.dp,
-                strokeWidth = 3.dp,
-                segments = DOGECOIN_SPV_CONFIRM_TARGET,
-                contentDescription = "${row.confirmations} of $DOGECOIN_SPV_CONFIRM_TARGET confirmations"
-            )
-            Text(
-                text = "${row.confirmations}/$DOGECOIN_SPV_CONFIRM_TARGET",
-                style = MaterialTheme.typography.labelMedium,
-                color = colors.muted
-            )
-        }
-    }
-}
-
-@Composable
-private fun SecureWindowFlagEffect(enabled: Boolean) {
-    val view = LocalView.current
-    DisposableEffect(enabled, view) {
-        if (!enabled) return@DisposableEffect onDispose { }
-
-        val window = (view.context as? Activity)?.window
-        val windowFlags = window?.attributes?.flags ?: 0
-        val hadSecureFlag = (windowFlags and WindowManager.LayoutParams.FLAG_SECURE) != 0
-        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-
-        onDispose {
-            if (window != null && !hadSecureFlag) {
-                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            }
-        }
-    }
-}
-
-@Composable
-private fun NodeStatusRow(
-    status: DogecoinNodeStatus?,
-    refreshing: Boolean,
-    network: DogecoinNetwork
-) {
-    val colorScheme = MaterialTheme.colorScheme
-    val readyForNetwork = status?.isReadyFor(network) == true
-    val usableForNetwork = status?.isUsableFor(network) == true
-    val text = when {
-        refreshing -> stringResource(R.string.dogecoin_node_checking, network.displayName)
-        status == null -> stringResource(R.string.dogecoin_node_not_checked)
-        usableForNetwork && status.walletReady == false -> stringResource(
-            R.string.dogecoin_node_wallet_unavailable,
-            network.displayName,
-            status.walletError ?: stringResource(R.string.dogecoin_node_wallet_unknown_error)
-        )
-        usableForNetwork && status.relayReady == false -> stringResource(
-            R.string.dogecoin_node_relay_unavailable,
-            network.displayName,
-            status.relayError ?: stringResource(R.string.dogecoin_node_relay_unknown_error)
-        )
-        readyForNetwork -> stringResource(
-            if (status.pruned == true) {
-                R.string.dogecoin_node_connected_pruned
-            } else {
-                R.string.dogecoin_node_connected
-            },
-            network.displayName,
-            status.blocks ?: 0,
-            status.headers ?: 0,
-            status.peerCount ?: 0
-        )
-        usableForNetwork && status.initialBlockDownload == true -> stringResource(
-            R.string.dogecoin_node_syncing,
-            network.displayName,
-            status.blocks ?: 0,
-            status.headers ?: 0,
-            ((status.verificationProgress ?: 0.0) * 100.0).coerceIn(0.0, 100.0)
-        )
-        status.chain != null -> stringResource(
-            R.string.dogecoin_node_wrong_chain,
-            status.chain,
-            network.displayName
-        )
-        else -> status.error ?: stringResource(R.string.dogecoin_node_unreachable, network.displayName)
-    }
-
-    val color = when {
-        refreshing -> colorScheme.primary
-        usableForNetwork && status?.walletReady == false -> colorScheme.error
-        usableForNetwork && status?.relayReady == false -> colorScheme.error
-        readyForNetwork && status?.pruned == true -> colorScheme.tertiary
-        readyForNetwork -> colorScheme.primary
-        else -> colorScheme.error
-    }
-
-    val policyCheckText = when {
-        readyForNetwork && status?.policyCheckAvailable == true ->
-            stringResource(R.string.dogecoin_node_policy_check_available)
-        readyForNetwork && status?.policyCheckAvailable == false ->
-            status.policyCheckError ?: stringResource(R.string.dogecoin_node_policy_check_unavailable)
-        else -> null
-    }
-    val rescanBlockchainText = when {
-        readyForNetwork && status?.rescanBlockchainAvailable == false ->
-            status.rescanBlockchainError ?: stringResource(R.string.dogecoin_node_rescanblockchain_unavailable)
-        else -> null
-    }
-
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = color,
-        lineHeight = 18.sp
-    )
-    policyCheckText?.let {
-        Text(
-            text = it,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (status?.policyCheckAvailable == true) {
-                colorScheme.onSurface.copy(alpha = 0.65f)
-            } else {
-                colorScheme.tertiary
-            },
-            lineHeight = 18.sp
-        )
-    }
-    rescanBlockchainText?.let {
-        Text(
-            text = it,
-            style = MaterialTheme.typography.bodySmall,
-            color = colorScheme.tertiary,
-            lineHeight = 18.sp
-        )
-    }
-}
-
-@Composable
-private fun DogecoinUtxoSection(
-    title: String,
-    utxos: List<DogecoinUtxo>,
-    limit: Int = DOGECOIN_UTXO_PREVIEW_LIMIT
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-        )
-        utxos.take(limit).forEach { utxo ->
-            SelectionContainer {
-                Text(
-                    text = stringResource(
-                        R.string.dogecoin_utxo_row,
-                        shortDogecoinTxid(utxo.txid),
-                        utxo.vout,
-                        DogecoinAmount.formatKoinu(utxo.amountKoinu),
-                        utxo.confirmations
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                    lineHeight = 18.sp
-                )
-            }
-        }
-        val hiddenCount = utxos.size - limit
-        if (hiddenCount > 0) {
-            Text(
-                text = stringResource(R.string.dogecoin_utxo_more, hiddenCount),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                lineHeight = 18.sp
-            )
-        }
-    }
-}
-
-@Composable
-private fun DogecoinActivitySection(
-    activity: List<DogecoinWalletActivity>,
-    error: String?,
-    onCopyTxid: (String) -> Unit,
-    onShareTxid: (String) -> Unit,
-    onShareTxidToChat: (String) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = stringResource(R.string.dogecoin_activity_title),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-        )
-        when {
-            error != null -> Text(
-                text = error,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                lineHeight = 18.sp
-            )
-            activity.isEmpty() -> Text(
-                text = stringResource(R.string.dogecoin_activity_empty),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                lineHeight = 18.sp
-            )
-            else -> activity.take(DOGECOIN_ACTIVITY_PREVIEW_LIMIT).forEach { item ->
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SelectionContainer {
-                        Text(
-                            text = stringResource(
-                                R.string.dogecoin_activity_row,
-                                item.category,
-                                formatSignedDogecoin(item.amountKoinu),
-                                shortDogecoinTxid(item.txid),
-                                item.confirmations,
-                                formatDogecoinActivityTime(item.timeSeconds, stringResource(R.string.unknown))
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                            lineHeight = 18.sp
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { onCopyTxid(item.txid) }) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.dogecoin_copy_txid))
-                        }
-                        TextButton(onClick = { onShareTxid(item.txid) }) {
-                            Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.dogecoin_share_txid))
-                        }
-                    }
-                    TextButton(onClick = { onShareTxidToChat(item.txid) }) {
-                        Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(stringResource(R.string.share_to_chat))
-                    }
-                }
-            }
-        }
-
-        val hiddenCount = activity.size - DOGECOIN_ACTIVITY_PREVIEW_LIMIT
-        if (hiddenCount > 0) {
-            Text(
-                text = stringResource(R.string.dogecoin_activity_more, hiddenCount),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                lineHeight = 18.sp
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalPermissionsApi::class)
-@Composable
-private fun DogecoinPaymentQrScannerDialog(
-    title: String,
-    prompt: String,
-    error: String?,
-    onDismiss: () -> Unit,
-    onScan: (String) -> Unit
-) {
-    val permissionState = rememberPermissionState(Manifest.permission.CAMERA)
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (permissionState.status.isGranted) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(320.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color.Black),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        DogecoinQrScannerView(onScan = onScan)
-                        Box(
-                            modifier = Modifier
-                                .size(220.dp)
-                                .border(
-                                    width = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                        )
-                        Text(
-                            text = prompt,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(16.dp)
-                                .background(Color.Black.copy(alpha = 0.64f), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                        )
-                    }
-                } else {
-                    Text(
-                        text = stringResource(R.string.dogecoin_scan_camera_permission),
-                        style = MaterialTheme.typography.bodyMedium,
-                        lineHeight = 20.sp
-                    )
-                    Button(onClick = { permissionState.launchPermissionRequest() }) {
-                        Text(stringResource(R.string.dogecoin_scan_request_camera))
-                    }
-                }
-
-                error?.let {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        lineHeight = 18.sp
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.cancel))
-            }
-        }
-    )
-}
-
-@Composable
-private fun DogecoinQrScannerView(
-    onScan: (String) -> Unit
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var lastValid by remember { mutableStateOf<String?>(null) }
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    val cameraExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
-    val surfaceRequests = remember { MutableStateFlow<SurfaceRequest?>(null) }
-    val surfaceRequest by surfaceRequests.collectAsState(initial = null)
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
-
-    val onScanState = rememberUpdatedState(onScan)
-    val analyzer = remember {
-        DogecoinQrCodeAnalyzer { text ->
-            mainHandler.post {
-                if (text == lastValid) return@post
-                lastValid = text
-                onScanState.value(text)
-            }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        val executor = ContextCompat.getMainExecutor(context)
-        var cameraProvider: ProcessCameraProvider? = null
-
-        cameraProviderFuture.addListener(
-            {
-                val provider = cameraProviderFuture.get()
-                cameraProvider = provider
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider { request -> surfaceRequests.value = request }
-                }
-                val analysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also { it.setAnalyzer(cameraExecutor, analyzer) }
-
-                runCatching {
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis
-                    )
-                }.onFailure {
-                    Log.w("DogecoinWalletSheet", "Failed to bind camera: ${it.message}")
-                }
-            },
-            executor
-        )
-
-        onDispose {
-            surfaceRequests.value = null
-            runCatching { cameraProvider?.unbindAll() }
-            analyzer.close()
-            cameraExecutor.shutdown()
-        }
-    }
-
-    surfaceRequest?.let { request ->
-        CameraXViewfinder(
-            surfaceRequest = request,
-            implementationMode = ImplementationMode.EMBEDDED,
-            modifier = Modifier.fillMaxSize()
-        )
-    }
-}
-
-@Composable
-private fun DogecoinQrCodeImage(
-    data: String,
-    contentDescription: String,
-    size: Dp,
-    modifier: Modifier = Modifier
-) {
-    val sizePx = with(LocalDensity.current) { size.toPx().toInt() }
-    val bitmap = remember(data, sizePx) { generateDogecoinQrBitmap(data, sizePx) }
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = contentDescription,
-            modifier = modifier.size(size)
-        )
-    }
-}
-
-private fun generateDogecoinQrBitmap(data: String, sizePx: Int): Bitmap? {
-    if (data.isBlank() || sizePx <= 0) return null
-    return runCatching {
-        val matrix = QRCodeWriter().encode(data, BarcodeFormat.QR_CODE, sizePx, sizePx)
-        bitmapFromQrMatrix(matrix)
-    }.getOrNull()
-}
-
-private fun bitmapFromQrMatrix(matrix: BitMatrix): Bitmap {
-    val width = matrix.width
-    val height = matrix.height
-    val pixels = IntArray(width * height)
-    for (y in 0 until height) {
-        for (x in 0 until width) {
-            pixels[y * width + x] =
-                if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
-        }
-    }
-
-    return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
-        setPixels(pixels, 0, width, 0, 0, width, height)
-    }
-}
-
-private fun previewDogecoinHex(value: String, maxChars: Int = 96): String {
-    return if (value.length <= maxChars) value else value.take(maxChars) + "..."
-}
-
-private fun shortDogecoinTxid(txid: String): String {
-    return if (txid.length <= 18) txid else txid.take(8) + "..." + txid.takeLast(8)
-}
-
-private fun shortDogecoinAddress(address: String): String {
-    return if (address.length <= 18) address else address.take(8) + "..." + address.takeLast(8)
-}
-
-private fun formatSignedDogecoin(koinu: Long): String {
-    return when {
-        koinu > 0 -> "+${DogecoinAmount.formatKoinu(koinu)}"
-        koinu < 0 -> "-${DogecoinAmount.formatKoinu(-koinu)}"
-        else -> "0"
-    }
-}
-
-private fun formatDogecoinActivityTime(timeSeconds: Long?, fallback: String): String {
-    if (timeSeconds == null) return fallback
-    val millis = runCatching { Math.multiplyExact(timeSeconds, 1000L) }.getOrNull() ?: return fallback
-    return SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }.format(Date(millis))
-}
-
-private fun formatDogecoinWalletTime(timeMillis: Long): String {
-    return SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }.format(Date(timeMillis))
-}
-
-private data class DogecoinBroadcastReceipt(
-    val txid: String,
-    val network: DogecoinNetwork,
-    val recipientAddress: String,
-    val sendAmountKoinu: Long,
-    val feeKoinu: Long,
-    val changeKoinu: Long,
-    val changeAddress: String?,
-    val requestLabel: String?,
-    val requestMessage: String?,
-    val viaPeer: Boolean = false,  // 3b: broadcast was relayed by a peer's node, not this device's node
-    // 3b.1: when relayed by a peer, whether two or more helpers independently corroborated it. A single
-    // helper's claim (false) is not chain-verified by this device and gets the stronger "verify" warning.
-    val peerCorroborated: Boolean = false,
-    // Phase 3: SPV self-broadcast was relayed to peers but is not yet chain-confirmed. Renders "Claimed"
-    // until the on-chain confirmationDepth poll flips it to false (then it shows as a normal receipt).
-    val viaSpvClaimedOnly: Boolean = false
-) {
-    val totalDebitKoinu: Long
-        get() = dogecoinSaturatingAddKoinu(sendAmountKoinu, feeKoinu)
-}
-
-private enum class DogecoinWatchImportAction {
-    REFRESH_BALANCE,
-    REVIEW_SEND
-}
-
-private enum class DogecoinRawTransactionExportAction {
-    COPY,
-    SHARE
-}
-
-private enum class DogecoinFeePreset(val labelResId: Int) {
-    SLOW(R.string.dogecoin_send_fee_preset_slow),
-    NORMAL(R.string.dogecoin_send_fee_preset_normal),
-    FAST(R.string.dogecoin_send_fee_preset_fast)
-}
-
-private data class DogecoinFeePresetOption(
-    val preset: DogecoinFeePreset,
-    val feePerKbKoinu: Long
-)
-
-private fun dogecoinFeePresetOptions(
-    minimumFeePerKbKoinu: Long,
-    incrementalFeePerKbKoinu: Long?
-): List<DogecoinFeePresetOption> {
-    val slow = maxOf(DogecoinProtocol.MIN_TX_FEE_KOINU, minimumFeePerKbKoinu)
-    val feeStep = incrementalFeePerKbKoinu
-        ?.takeIf { it > 0L }
-        ?: slow
-    val normal = dogecoinSaturatingAddKoinu(slow, feeStep)
-    val fast = dogecoinSaturatingAddKoinu(slow, dogecoinSaturatingMultiplyKoinu(feeStep, 2L))
-    return listOf(
-        DogecoinFeePresetOption(DogecoinFeePreset.SLOW, slow),
-        DogecoinFeePresetOption(DogecoinFeePreset.NORMAL, maxOf(slow, normal)),
-        DogecoinFeePresetOption(DogecoinFeePreset.FAST, maxOf(normal, fast))
-    )
-}
-
-private fun dogecoinSaturatingMultiplyKoinu(left: Long, right: Long): Long {
-    require(left >= 0L && right >= 0L) { "Dogecoin amounts must be non-negative" }
-    return try {
-        Math.multiplyExact(left, right)
-    } catch (_: ArithmeticException) {
-        Long.MAX_VALUE
-    }
-}
-
-private fun dogecoinConfSnippet(
-    network: DogecoinNetwork,
-    username: String,
-    password: String
-): String {
-    val rpcUser = dogecoinConfValue(username, "bitchat")
-    val rpcPassword = dogecoinConfValue(password, "choose-a-long-password")
-    val networkLine = when (network) {
-        DogecoinNetwork.MAINNET -> null
-        DogecoinNetwork.TESTNET -> "testnet=1"
-        DogecoinNetwork.REGTEST -> "regtest=1"
-    }
-    return buildList {
-        networkLine?.let { add(it) }
-        add("server=1")
-        add("rpcuser=$rpcUser")
-        add("rpcpassword=$rpcPassword")
-        add("rpcbind=0.0.0.0")
-        add("rpcallowip=10.0.0.0/8")
-        add("rpcallowip=172.16.0.0/12")
-        add("rpcallowip=192.168.0.0/16")
-        add("rpcport=${network.rpcPort}")
-    }.joinToString("\n")
-}
-
-private fun dogecoinConfValue(value: String, fallback: String): String {
-    return value.trim().replace(Regex("\\s+"), "-").ifEmpty { fallback }
-}
-
-private const val DOGECOIN_UTXO_PREVIEW_LIMIT = 5
-private const val DOGECOIN_CONFIRM_UTXO_PREVIEW_LIMIT = 3
-private const val DOGECOIN_ACTIVITY_PREVIEW_LIMIT = 5
-// Pending cards shown on the main screen; the rest fold into "View all activity". Full list is capped so a
-// long history can't balloon a single LazyColumn item.
-private const val DOGECOIN_PENDING_CARDS_LIMIT = 4
-private const val DOGECOIN_ACTIVITY_FULL_LIMIT = 50
-private const val DOGECOIN_SEND_ITEM_INDEX = 6
-private const val DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS = 10L * 60L * 1000L
-private const val DOGECOIN_SPV_CORROBORATION_POLLS = 40
-private const val DOGECOIN_SPV_CORROBORATION_INTERVAL_MS = 15_000L
-// Focal-ring confirmation fill (presentation-only): how many confirmations the ring shows as "done" (a full
-// gold ring), and the poll budget before a never-confirming tx reverts the ring to the idle balance.
-private const val DOGECOIN_SPV_CONFIRM_TARGET = 6
-private const val DOGECOIN_SPV_CONFIRM_POLLS = 80
-// Presentation-only: show the confirmation fill (not "Syncing") for a pending tx while within this many blocks
-// of the tip, so a momentary `synced` flap (peer dip / a fresh block) can't mask it. confirmationDepth is read
-// from our own chain head, so it stays accurate this close to the tip.
-private const val DOGECOIN_SPV_NEARTIP_BLOCKS = 6
-private const val DOGECOIN_RPC_RECHECK_DEBOUNCE_MILLIS = 650L
-
-private class DogecoinQrCodeAnalyzer(
-    private val onCode: (String) -> Unit
-) : ImageAnalysis.Analyzer {
-    private val scanner = BarcodeScanning.getClient(
-        BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-    )
-
-    @ExperimentalGetImage
-    override fun analyze(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image ?: run {
-            imageProxy.close()
-            return
-        }
-        val input = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-        scanner.process(input)
-            .addOnSuccessListener { barcodes ->
-                val text = barcodes.firstOrNull()?.rawValue
-                if (!text.isNullOrBlank()) onCode(text)
-            }
-            .addOnCompleteListener { imageProxy.close() }
-    }
-
-    fun close() {
-        scanner.close()
     }
 }

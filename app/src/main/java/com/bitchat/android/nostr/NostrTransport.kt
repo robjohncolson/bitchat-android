@@ -474,7 +474,90 @@ class NostrTransport(
             }
         }
     }
-    
+
+    /**
+     * Send an E2E "family group" message: N NIP-17 1:1 gift wraps (one per member INCLUDING a self-copy)
+     * that all carry the same [groupId] + member set sealed inside the rumor (never in the public wrap), so
+     * every member's existing account-DM subscription threads them under `nostr_grp_<groupId>`. No new
+     * crypto, no new relay subscription, forward secrecy preserved (each wrap mints its own ephemeral key).
+     * The embedded `bitchat1:` PM is built ONCE so [messageID] is identical across all wraps (dedup-stable).
+     * Uses the ACCOUNT identity — the same one the global account-DM subscription listens on.
+     */
+    fun sendGroupMessage(
+        groupId: String,
+        members: List<NostrGroupRegistry.GroupMember>,
+        content: String,
+        messageID: String,
+        subject: String? = null
+    ) {
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: run {
+            Log.e(TAG, "sendGroupMessage: no account identity")
+            return
+        }
+        // Normalize + dedup by lowercased hex, and guarantee a self entry (the self-copy lets the sender see
+        // their own group messages — 1:1 NIP-17 has no self-copy).
+        val byHex = LinkedHashMap<String, NostrGroupRegistry.GroupMember>()
+        (members + NostrGroupRegistry.GroupMember(identity.publicKeyHex)).forEach { m ->
+            val hex = m.pubkeyHex.lowercase()
+            val name = m.name?.takeIf { it.isNotBlank() } ?: byHex[hex]?.name
+            byHex[hex] = NostrGroupRegistry.GroupMember(hex, name)
+        }
+        val memberList = byHex.values.toList()
+        transportScope.launch {
+            try {
+                val embedded = NostrEmbeddedBitChat.encodePMForNostrNoRecipient(
+                    content = content,
+                    messageID = messageID,
+                    senderPeerID = senderPeerID
+                ) ?: run {
+                    Log.e(TAG, "sendGroupMessage: failed to embed group PM packet")
+                    return@launch
+                }
+                // Sealed-inside-the-rumor group metadata: groupId + (optional) subject + per-member identity
+                // ("bgm" = bitchat-group-member: account-pubkey hex + display name) for discovery. createPrivateMessage
+                // still prepends the per-recipient ["p", recipientHex] NIP-17 routing tag.
+                val groupTags = NostrGroupRegistry.buildGroupTags(groupId, subject, memberList)
+                memberList.forEach { m ->
+                    NostrProtocol.createPrivateMessage(embedded, m.pubkeyHex, identity, groupTags).forEach { event ->
+                        NostrRelayManager.registerPendingGiftWrap(event.id)
+                        NostrRelayManager.getInstance(context).sendEvent(event)
+                    }
+                }
+                Log.d(TAG, "sendGroupMessage: group=${groupId.take(8)}… members=${memberList.size} mid=${messageID.take(8)}…")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send group message: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Send a 1:1 account DM directly to a raw account pubkey (no favorite + no geohash context needed) via
+     * the ACCOUNT identity. Used to message a tap-added npub-only contact (KnownNpubStore) — a plain NIP-17
+     * private message (NO group tag), so the recipient threads it as an ordinary 1:1.
+     */
+    fun sendPrivateMessageToPubkey(content: String, recipientPubkeyHex: String, messageID: String) {
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: run {
+            Log.e(TAG, "sendPrivateMessageToPubkey: no account identity")
+            return
+        }
+        transportScope.launch {
+            try {
+                val embedded = NostrEmbeddedBitChat.encodePMForNostrNoRecipient(
+                    content = content, messageID = messageID, senderPeerID = senderPeerID
+                ) ?: run {
+                    Log.e(TAG, "sendPrivateMessageToPubkey: failed to embed PM")
+                    return@launch
+                }
+                NostrProtocol.createPrivateMessage(embedded, recipientPubkeyHex, identity).forEach { event ->
+                    NostrRelayManager.registerPendingGiftWrap(event.id)
+                    NostrRelayManager.getInstance(context).sendEvent(event)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send account private message: ${e.message}")
+            }
+        }
+    }
+
     // MARK: - Broadcast-over-mesh (Milestone 3b.1) Nostr fallback
 
     /**

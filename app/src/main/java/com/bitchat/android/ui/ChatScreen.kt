@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bitchat.android.features.dogecoin.DogepaidPaymentContext
 import com.bitchat.android.features.dogecoin.DogecoinPaymentRequest
 import com.bitchat.android.features.dogecoin.DogecoinWalletSheet
 import com.bitchat.android.model.BitchatMessage
@@ -82,11 +83,36 @@ fun ChatScreen(
     var isScrolledUp by remember { mutableStateOf(false) }
     var showDogecoinWalletSheet by remember { mutableStateOf(false) }
     var dogecoinPaymentRequest by remember { mutableStateOf<DogecoinPaymentRequest?>(null) }
+    var dogecoinPaymentReceiptContext by remember { mutableStateOf<DogepaidPaymentContext?>(null) }
     var showRequestDogeDialog by remember { mutableStateOf(false) }
     var requestDogeRequiresPublicConfirmation by remember { mutableStateOf(true) }
+    val dogecoinWalletNetwork = remember(showDogecoinWalletSheet) {
+        viewModel.currentDogecoinNetwork()
+    }
 
-    fun openDogecoinPaymentUri(uri: String) {
+    fun openDogecoinPaymentUri(
+        uri: String,
+        sourceMessage: BitchatMessage? = null,
+        privateConversationKey: String? = null
+    ) {
         DogecoinPaymentRequest.parse(uri)?.let { request ->
+            // Only a Pay tap inside a known private thread gets a receipt route. Main timeline/channel,
+            // contact-card, and external deep-link opens intentionally carry no route. Capture the route at
+            // tap time so completion cannot follow mutable selected-chat state. A private group routes 1:1
+            // to its structural sender key; it never posts amount/address/txid back to the group.
+            dogecoinPaymentReceiptContext = if (
+                sourceMessage != null &&
+                sourceMessage.senderPeerID != viewModel.myPeerID &&
+                privateConversationKey != null
+            ) {
+                if (privateConversationKey.startsWith("nostr_grp_")) {
+                    DogepaidPaymentContext.forGroupRequester(request, sourceMessage.senderNostrPubkey)
+                } else {
+                    DogepaidPaymentContext.forPrivateConversation(request, privateConversationKey)
+                }
+            } else {
+                null
+            }
             dogecoinPaymentRequest = request
             showDogecoinWalletSheet = true
         }
@@ -99,6 +125,7 @@ fun ChatScreen(
 
     LaunchedEffect(externalDogecoinPaymentRequest?.uri) {
         val request = externalDogecoinPaymentRequest ?: return@LaunchedEffect
+        dogecoinPaymentReceiptContext = null
         dogecoinPaymentRequest = request
         showDogecoinWalletSheet = true
         onDogecoinPaymentRequestConsumed()
@@ -167,6 +194,13 @@ fun ChatScreen(
                 forceScrollToBottom = forceScrollToBottom,
                 onScrolledUpChanged = { isUp -> isScrolledUp = isUp },
                 onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
+                onDogecoinPaymentRequestClick = { uri, message ->
+                    // The main list is public/channel/mesh; payment is still allowed, but auto-receipt has
+                    // no private destination and therefore remains disabled.
+                    openDogecoinPaymentUri(uri, message, privateConversationKey = null)
+                },
+                onCheckDogepaidReceipt = viewModel::checkDogepaidReceipt,
+                dogecoinWalletNetwork = dogecoinWalletNetwork,
                 onNicknameClick = { fullSenderName ->
                     // Single click - mention user in text input
                     val currentText = messageText.text
@@ -396,18 +430,24 @@ fun ChatScreen(
         onMeshPeerListDismiss = viewModel::hideMeshPeerList,
         showDogecoinWalletSheet = showDogecoinWalletSheet,
         dogecoinPaymentRequest = dogecoinPaymentRequest,
+        dogecoinPaymentReceiptContext = dogecoinPaymentReceiptContext,
         onShowDogecoinWallet = {
             dogecoinPaymentRequest = null
+            dogecoinPaymentReceiptContext = null
             showDogecoinWalletSheet = true
             // Proactive: start helper Noise handshakes now so a BLE session is ready by send time (the BLE
             // handshake can take many seconds — too slow to start only at send). See docs/dogecoin-offline-mesh-relay-findings.md.
             viewModel.prewarmBroadcastHelperSessions()
         },
         onDogecoinUriClick = { uri -> openDogecoinPaymentUri(uri) },
+        onDogecoinPaymentRequestClick = { uri, message, privateConversationKey ->
+            openDogecoinPaymentUri(uri, message, privateConversationKey)
+        },
         onPrivateRequestDoge = { openRequestDogeDialog(requiresPublicConfirmation = false) },
         onDogecoinWalletDismiss = {
             showDogecoinWalletSheet = false
             dogecoinPaymentRequest = null
+            dogecoinPaymentReceiptContext = null
         },
     )
 }
@@ -559,8 +599,10 @@ private fun ChatDialogs(
     onMeshPeerListDismiss: () -> Unit,
     showDogecoinWalletSheet: Boolean,
     dogecoinPaymentRequest: DogecoinPaymentRequest?,
+    dogecoinPaymentReceiptContext: DogepaidPaymentContext?,
     onShowDogecoinWallet: () -> Unit,
     onDogecoinUriClick: (String) -> Unit,
+    onDogecoinPaymentRequestClick: (String, BitchatMessage, String) -> Unit,
     onPrivateRequestDoge: () -> Unit,
     onDogecoinWalletDismiss: () -> Unit,
 ) {
@@ -599,11 +641,15 @@ private fun ChatDialogs(
             onHelperEnabledChanged = {
                 viewModel.reannounceIdentity()
             },
-            onRequestPeerBroadcast = { signedTx -> viewModel.requestPeerBroadcast(signedTx) },
+            onRequestPeerBroadcast = { signedTx, receiptContext ->
+                viewModel.requestPeerBroadcast(signedTx, receiptContext)
+            },
             peerBroadcastState = peerBroadcastState,
             hasHelperCandidate = viewModel.hasBroadcastHelperCandidate(),
             onClearPeerBroadcast = { viewModel.clearPeerBroadcastState() },
-            paymentRequest = dogecoinPaymentRequest
+            paymentRequest = dogecoinPaymentRequest,
+            paymentReceiptContext = dogecoinPaymentReceiptContext,
+            onPaymentReceiptClaimed = viewModel::postDogepaidReceipt
         )
     }
     if (showDebugSheet) {
@@ -678,6 +724,7 @@ private fun ChatDialogs(
             peerID = privateChatSheetPeer!!,
             viewModel = viewModel,
             onDogecoinUriClick = onDogecoinUriClick,
+            onDogecoinPaymentRequestClick = onDogecoinPaymentRequestClick,
             onRequestDoge = onPrivateRequestDoge,
             onDismiss = {
                 viewModel.hidePrivateChatSheet()

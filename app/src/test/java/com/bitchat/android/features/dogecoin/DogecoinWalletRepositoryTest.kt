@@ -11,6 +11,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class DogecoinWalletRepositoryTest {
@@ -165,6 +168,108 @@ class DogecoinWalletRepositoryTest {
     }
 
     @Test
+    fun `resolveDogecoinBackend routes untrusted endpoints to SPV and treats malformed choices as unset`() {
+        // Guardrail: a saved RPC choice pointing at an UNTRUSTED endpoint resolves to Built-in SPV — the
+        // untrusted node is never probed or used.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = true
+            )
+        )
+        // Fail closed even without a recent SPV checkpoint: an untrusted RPC route never remains resolved.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = false
+            )
+        )
+        // Trusted endpoint + explicit RPC choice: respected.
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = "RPC",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Explicit SPV choice always stands.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "SPV",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Malformed saved value: falls through to the soft default instead of silently meaning RPC.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = "garbage",
+                nodeConfigured = false,
+                nodeEndpointTrusted = false,
+                spvAvailable = true
+            )
+        )
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = "garbage",
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+        // Soft default: a configured-but-untrusted node always resolves away from RPC.
+        assertEquals(
+            DogecoinBackend.SPV,
+            resolveDogecoinBackend(
+                savedBackendName = null,
+                nodeConfigured = true,
+                nodeEndpointTrusted = false,
+                spvAvailable = false
+            )
+        )
+        assertEquals(
+            DogecoinBackend.RPC,
+            resolveDogecoinBackend(
+                savedBackendName = null,
+                nodeConfigured = true,
+                nodeEndpointTrusted = true,
+                spvAvailable = true
+            )
+        )
+    }
+
+    @Test
+    fun `resolveBackend never selects a saved RPC node with an untrusted endpoint for probing`() {
+        val repository = DogecoinWalletRepository(context)
+        // Saved node URL is unverified public HTTPS. Resolution fails closed to SPV even when this unit-test
+        // context has no checkpoint asset; the route may never remain selected merely because SPV is slower.
+        repository.saveRpcConfig(DogecoinNetwork.TESTNET, DogecoinRpcConfig(url = "https://rpc.example.com"))
+        repository.saveHelperEnabled(DogecoinNetwork.TESTNET, true)
+        assertFalse(
+            classifyDogecoinRpcEndpoint(
+                repository.loadRpcConfig(DogecoinNetwork.TESTNET).url
+            ).isTrustedRpcRoute
+        )
+        assertEquals(DogecoinBackend.SPV, repository.resolveBackend(DogecoinNetwork.TESTNET))
+        assertFalse(repository.loadHelperEnabled(DogecoinNetwork.TESTNET))
+
+        repository.saveRpcConfig(DogecoinNetwork.TESTNET, DogecoinRpcConfig(url = "http://127.0.0.1:44555"))
+        assertTrue(repository.loadHelperEnabled(DogecoinNetwork.TESTNET))
+    }
+
+    @Test
     fun `spv birthdate is generation time for a generated key and the conservative floor for an import`() {
         val conservativeFloorMillis = 1609459200000L // 2021-01-01 UTC, the import default
         val repository = DogecoinWalletRepository(context)
@@ -233,6 +338,73 @@ class DogecoinWalletRepositoryTest {
         // Advertising is enabled but no mainnet key exists: must return null without generating one.
         assertNull(DogecoinIdentityAnnouncement.currentReceiveAddress(context))
         assertNull(repository.loadWalletIfPresent(DogecoinNetwork.MAINNET))
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation accepts first canonical txid and rejects repeats and invalid txids`() {
+        val repository = DogecoinWalletRepository(context)
+        val txid = "a".repeat(64)
+
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, ""))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, "a".repeat(63)))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, "g".repeat(64)))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid.uppercase()))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, " $txid "))
+
+        // The invalid variants above must not normalize to, or reserve, the canonical lowercase txid.
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation persists across repository instances`() {
+        val txid = "b".repeat(64)
+
+        assertTrue(
+            DogecoinWalletRepository(context)
+                .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+        )
+        assertFalse(
+            DogecoinWalletRepository(context)
+                .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+        )
+    }
+
+    @Test
+    fun `outgoing payment receipt reservation is scoped by network`() {
+        val repository = DogecoinWalletRepository(context)
+        val txid = "c".repeat(64)
+
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.MAINNET, txid))
+        assertTrue(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.MAINNET, txid))
+        assertFalse(repository.reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid))
+    }
+
+    @Test
+    fun `concurrent outgoing payment receipt reservation has exactly one winner across repository instances`() {
+        val repositories = List(8) { DogecoinWalletRepository(context) }
+        // Initialize encrypted preference wrappers serially so the race under test is only the reservation.
+        repositories.forEach { it.loadAdvertiseAddressEnabled() }
+        val txid = "d".repeat(64)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(repositories.size)
+
+        try {
+            val attempts = List(32) { index ->
+                executor.submit<Boolean> {
+                    start.await()
+                    repositories[index % repositories.size]
+                        .reserveOutgoingPaymentReceipt(DogecoinNetwork.TESTNET, txid)
+                }
+            }
+            start.countDown()
+
+            val winners = attempts.count { it.get(10, TimeUnit.SECONDS) }
+            assertEquals(1, winners)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     private fun clearDogecoinPrefs() {

@@ -7,6 +7,7 @@ import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -14,6 +15,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 data class DogecoinNodeStatus(
@@ -124,17 +126,69 @@ data class DogecoinMempoolAcceptance(
         get() = checked && allowed == true
 }
 
-class DogecoinRpcClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.SECONDS)
-        .build(),
-    private val gson: Gson = Gson()
+private class DogecoinRpcActiveCalls {
+    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    @Volatile private var cancelled = false
+
+    fun register(call: Call) {
+        calls.add(call)
+        // Close the small race where dismissal revokes the request lease after beforeRequest(), but before
+        // this Call is registered. This client family is sheet-owned and never reused after cancellation.
+        if (cancelled) call.cancel()
+    }
+
+    fun unregister(call: Call) {
+        calls.remove(call)
+    }
+
+    fun cancelAll() {
+        cancelled = true
+        calls.toList().forEach(Call::cancel)
+    }
+}
+
+class DogecoinRpcClient private constructor(
+    httpClient: OkHttpClient,
+    private val gson: Gson,
+    private val beforeRequest: () -> Unit,
+    private val activeCalls: DogecoinRpcActiveCalls
 ) {
-    private val rescanHttpClient = httpClient.newBuilder()
+    constructor(
+        httpClient: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .writeTimeout(5, TimeUnit.SECONDS)
+            .build(),
+        gson: Gson = Gson(),
+        beforeRequest: () -> Unit = {}
+    ) : this(httpClient, gson, beforeRequest, DogecoinRpcActiveCalls())
+
+    // Hardened unconditionally (even for an injected client): redirects are never followed, so RPC Basic
+    // credentials can never be forwarded to a changed origin.
+    private val httpClient: OkHttpClient = hardenedDogecoinRpcHttpClient(httpClient)
+    private val rescanHttpClient = this.httpClient.newBuilder()
         .readTimeout(30, TimeUnit.MINUTES)
         .build()
+
+    /**
+     * Return a client sharing this client's connection pool/timeouts but bound to a revocable caller
+     * lease. [beforeRequest] runs at the central chokepoint before every RPC in a multi-call workflow.
+     */
+    internal fun guardedBy(requestGuard: () -> Unit): DogecoinRpcClient =
+        DogecoinRpcClient(
+            httpClient = httpClient,
+            gson = gson,
+            beforeRequest = {
+                beforeRequest()
+                requestGuard()
+            },
+            activeCalls = activeCalls
+        )
+
+    /** Cancel only calls issued by this client family (base plus guarded workflow clones). */
+    internal fun cancelActiveRequests() {
+        activeCalls.cancelAll()
+    }
 
     suspend fun getBlockchainStatus(
         config: DogecoinRpcConfig,
@@ -154,7 +208,8 @@ class DogecoinRpcClient(
             require(blocks == null || headers == null || headers >= blocks) {
                 "RPC getblockchaininfo returned headers below the current block height."
             }
-            val verificationProgress = parseOptionalFraction(result, "verificationprogress", "getblockchaininfo")
+            val verificationProgress =
+                parseOptionalProgressFraction(result, "verificationprogress", "getblockchaininfo")
             val pruned = parseOptionalBoolean(result, "pruned", "getblockchaininfo")
             val walletStatus = if (chain == network.chainName && initialBlockDownload != true) {
                 getWalletInfoStatus(rpcConfig)
@@ -364,6 +419,41 @@ class DogecoinRpcClient(
                 .take(requestedCount)
         }
 
+    /**
+     * Read-only confirmation observation for one just-broadcast wallet transaction. This never feeds coin
+     * selection or signing; it exists so RPC/home-node confirmation UI can follow the effective backend.
+     */
+    internal suspend fun getTransactionConfirmations(
+        config: DogecoinRpcConfig,
+        txid: String,
+        network: DogecoinNetwork = DogecoinNetwork.DEFAULT
+    ): Int = withContext(Dispatchers.IO) {
+        val rpcConfig = normalizedRpcConfig(config, network)
+        val expectedTxid = txid.trim().lowercase()
+        require(txidRegex.matches(expectedTxid)) {
+            "Dogecoin transaction id must be exactly 64 hexadecimal characters."
+        }
+        requireNetworkReady(rpcConfig, network)
+
+        val result = callObject(
+            rpcConfig,
+            "gettransaction",
+            JsonArray().apply {
+                add(expectedTxid)
+                add(true)
+            }
+        )
+        val returnedTxid = parseOptionalString(result, "txid", "gettransaction")
+            ?.trim()
+            ?.lowercase()
+            ?: throw IllegalArgumentException("RPC gettransaction returned no valid txid.")
+        require(returnedTxid == expectedTxid) {
+            "RPC gettransaction returned a different txid."
+        }
+        parseOptionalNonNegativeInt(result, "confirmations", "gettransaction")
+            ?: throw IllegalArgumentException("RPC gettransaction returned no valid confirmations.")
+    }
+
     suspend fun sendRawTransaction(
         config: DogecoinRpcConfig,
         rawTransactionHex: String,
@@ -386,7 +476,11 @@ class DogecoinRpcClient(
                 callElement(
                     rpcConfig,
                     "sendrawtransaction",
-                    JsonArray().apply { add(normalizedRawTransactionHex) }
+                    JsonArray().apply { add(normalizedRawTransactionHex) },
+                    // Once submitted, canceling the response wait cannot revoke the transaction and can create
+                    // dangerous accepted-but-unknown retry ambiguity. Normal UI dismissal is already disabled
+                    // while sending, so let this one money-path call finish; all preparatory/read RPCs cancel.
+                    cancelOnOwnerDispose = false
                 ),
                 method = "sendrawtransaction",
                 invalidMessage = "RPC sendrawtransaction returned an invalid txid."
@@ -1086,7 +1180,16 @@ class DogecoinRpcClient(
         return parsed
     }
 
-    private fun parseOptionalFraction(result: JsonObject, fieldName: String, method: String): Double? {
+    /**
+     * Parses a display-only progress fraction. Dogecoin Core 1.14 can report a tiny floating-point
+     * overshoot above 1.0 at tip, so plausible finite values are clamped for storage/display. This helper
+     * must not be reused for monetary amounts, which stay on the exact decimal-to-koinu path.
+     */
+    private fun parseOptionalProgressFraction(
+        result: JsonObject,
+        fieldName: String,
+        method: String
+    ): Double? {
         val value = result.get(fieldName)?.takeUnless { it.isJsonNull } ?: return null
         val primitive = value.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
         require(primitive?.isNumber == true) {
@@ -1094,10 +1197,13 @@ class DogecoinRpcClient(
         }
         val parsed = runCatching { primitive.asDouble }.getOrNull()
             ?: throw IllegalArgumentException("RPC $method returned an invalid $fieldName.")
-        require(!parsed.isNaN() && !parsed.isInfinite() && parsed in 0.0..1.0) {
+        require(parsed.isFinite()) {
+            "RPC $method returned a non-finite $fieldName."
+        }
+        require(parsed in 0.0..2.0) {
             "RPC $method returned an out-of-range $fieldName."
         }
-        return parsed
+        return parsed.coerceIn(0.0, 1.0)
     }
 
     private fun parseOptionalBoolean(result: JsonObject, fieldName: String, method: String): Boolean? {
@@ -1172,8 +1278,16 @@ class DogecoinRpcClient(
         config: DogecoinRpcConfig,
         method: String,
         params: JsonArray = JsonArray(),
-        longRunning: Boolean = false
+        longRunning: Boolean = false,
+        cancelOnOwnerDispose: Boolean = true
     ): JsonElement {
+        // Route-policy chokepoint: no request object is even built for an untrusted endpoint, so every
+        // caller (wallet UI, broadcast helper, debug console) inherits the same trust classification.
+        requireTrustedDogecoinRpcRoute(config)
+        // A wallet workflow may carry a generation-specific lease. Saving/switching/stopping the route
+        // revokes it synchronously, preventing a multi-call method from issuing its next HTTP request.
+        beforeRequest()
+
         val requestJson = JsonObject().apply {
             addProperty("jsonrpc", "1.0")
             addProperty("id", "bitchat-dogecoin")
@@ -1190,27 +1304,55 @@ class DogecoinRpcClient(
         }
 
         val client = if (longRunning) rescanHttpClient else httpClient
-        client.newCall(requestBuilder.build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            // Dogecoin Core returns JSON-RPC errors with HTTP 500 and the structured error in the
-            // body, so the body must be inspected before the HTTP status. Otherwise every node-level
-            // error (insufficient fee, missing inputs, already-imported watch address, unknown method)
-            // collapses to a generic "HTTP 500" and the specific guidance/recovery handling is skipped.
-            val json = runCatching { gson.fromJson(body, JsonObject::class.java) }.getOrNull()
-            val error = json?.get("error")?.takeUnless { it.isJsonNull }
-            if (error != null) {
-                throw IllegalStateException(rpcErrorMessage(method, error))
-            }
-            if (!response.isSuccessful) {
-                throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
-            }
+        val call = client.newCall(requestBuilder.build())
+        if (cancelOnOwnerDispose) activeCalls.register(call)
+        try {
+            call.execute().use { response ->
+                // A redirect is a transport-policy failure regardless of attacker-controlled JSON content.
+                // Check it before reading/parsing so every 3xx has the same explicit non-following result.
+                if (response.code in 300..399) {
+                    throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
+                }
+                val body = readBoundedRpcBody(response, method)
+                // Dogecoin Core returns JSON-RPC errors with HTTP 500 and the structured error in the
+                // body, so the body must be inspected before the HTTP status. Otherwise every node-level
+                // error (insufficient fee, missing inputs, already-imported watch address, unknown method)
+                // collapses to a generic "HTTP 500" and the specific guidance/recovery handling is skipped.
+                val json = runCatching { gson.fromJson(body, JsonObject::class.java) }.getOrNull()
+                val error = json?.get("error")?.takeUnless { it.isJsonNull }
+                if (error != null) {
+                    throw IllegalStateException(rpcErrorMessage(method, error))
+                }
+                if (!response.isSuccessful) {
+                    throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
+                }
 
-            return json?.get("result") ?: JsonNull.INSTANCE
+                return json?.get("result") ?: JsonNull.INSTANCE
+            }
+        } finally {
+            if (cancelOnOwnerDispose) activeCalls.unregister(call)
         }
+    }
+
+    /**
+     * Read the response body with a hard size cap. A node/gateway response larger than
+     * [DOGECOIN_RPC_MAX_RESPONSE_BYTES] aborts the call instead of buffering unbounded data — the cap
+     * comfortably fits every RPC this client issues (listunspent/activity for one address included).
+     */
+    private fun readBoundedRpcBody(response: okhttp3.Response, method: String): String {
+        val source = response.body?.source() ?: return ""
+        if (source.request(DOGECOIN_RPC_MAX_RESPONSE_BYTES + 1)) {
+            throw IllegalStateException(
+                "Dogecoin RPC $method response exceeded ${DOGECOIN_RPC_MAX_RESPONSE_BYTES / (1024 * 1024)} MB and was refused."
+            )
+        }
+        return source.readUtf8()
     }
 
     private fun httpRpcErrorMessage(method: String, code: Int, message: String): String {
         return when (code) {
+            in 300..399 -> "Dogecoin RPC $method was redirected (HTTP $code). Redirects are never followed, so RPC " +
+                "credentials are not forwarded; point the app directly at the node's real address."
             401 -> "Dogecoin RPC authentication failed for $method. Check the RPC username and password. " +
                 "If Dogecoin Core is using cookie auth for dogecoin-cli, configure rpcuser/rpcpassword or rpcauth " +
                 "for this node and enter those credentials in the app."
@@ -1380,16 +1522,20 @@ class DogecoinRpcClient(
                 )
     }
 
-    private companion object {
-        val txidRegex = Regex("^[0-9a-f]{64}$")
-        val walletRpcMethods = setOf(
+    companion object {
+        private val txidRegex = Regex("^[0-9a-f]{64}$")
+        private val walletRpcMethods = setOf(
             "getwalletinfo",
             "importaddress",
+            "gettransaction",
             "listunspent",
             "listtransactions",
             "rescanblockchain",
             "validateaddress"
         )
+
+        /** Hard cap on any single RPC response body; larger responses abort the call. */
+        internal const val DOGECOIN_RPC_MAX_RESPONSE_BYTES = 5L * 1024L * 1024L
     }
 
     private data class WalletInfoStatus(
@@ -1436,3 +1582,14 @@ class DogecoinRpcClient(
         }
     }
 }
+
+/**
+ * Apply the non-negotiable transport hardening for Dogecoin RPC: redirects (plain and cross-scheme) are
+ * never followed, so Basic credentials can never be replayed to a redirect target. Applied to every
+ * client — including injected ones — by [DogecoinRpcClient]'s constructor.
+ */
+internal fun hardenedDogecoinRpcHttpClient(base: OkHttpClient): OkHttpClient =
+    base.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()

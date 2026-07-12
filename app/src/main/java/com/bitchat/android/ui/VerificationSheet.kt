@@ -559,8 +559,9 @@ private fun ScanTabContent(
     }
 }
 
+/** Reusable CameraX + ML Kit QR scanner viewfinder. Also used by the SIMPLE profile's Add-family flow. */
 @Composable
-private fun ScannerView(
+internal fun ScannerView(
     onScan: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -630,8 +631,9 @@ private fun ScannerView(
     }
 }
 
+/** Reusable QR-code image (zxing). Also used by the SIMPLE profile's Add-family flow. */
 @Composable
-private fun QRCodeImage(data: String, size: Dp) {
+internal fun QRCodeImage(data: String, size: Dp) {
     val sizePx = with(LocalDensity.current) { size.toPx().toInt() }
     val bitmap = remember(data, sizePx) { generateQrBitmap(data, sizePx) }
     if (bitmap != null) {

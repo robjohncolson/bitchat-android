@@ -2,6 +2,11 @@ package com.bitchat.android.features.dogecoin
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import okhttp3.Credentials
 import okhttp3.Interceptor
@@ -108,13 +113,48 @@ class DogecoinRpcClientTest {
     ).joinToString("")
 
     @Test
-    fun `blockchain status reports ready mainnet node`() = runTest {
+    fun `cancel active requests aborts a guarded clone call`() = runTest {
+        val entered = CountDownLatch(1)
+        val sawCancellation = CountDownLatch(1)
+        val blockingHttpClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                entered.countDown()
+                val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                while (!chain.call().isCanceled() && System.nanoTime() < deadlineNanos) {
+                    Thread.sleep(5)
+                }
+                if (!chain.call().isCanceled()) throw IOException("Test call was not canceled")
+                sawCancellation.countDown()
+                throw IOException("Canceled by wallet dismissal")
+            })
+            .build()
+        val client = DogecoinRpcClient(httpClient = blockingHttpClient)
+        val guardedClient = client.guardedBy { }
+
+        val result = async(Dispatchers.IO) {
+            guardedClient.getBlockchainStatus(
+                DogecoinRpcConfig(url = "http://dogecoin.local"),
+                DogecoinNetwork.TESTNET
+            )
+        }
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+
+        client.cancelActiveRequests()
+        val status = result.await()
+
+        assertTrue(sawCancellation.await(2, TimeUnit.SECONDS))
+        assertFalse(status.connected)
+        assertTrue(status.error.orEmpty().contains("Canceled by wallet dismissal"))
+    }
+
+    @Test
+    fun `blockchain status clamps Core progress overshoot and reports ready mainnet node`() = runTest {
         val methods = mutableListOf<String>()
         val client = DogecoinRpcClient(
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":1.0}"""
+                        """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":1.000000079}"""
                     )
                     "getwalletinfo" -> rpcResponse("""{"walletname":"main-wallet"}""")
                     "getnetworkinfo" -> rpcResponse(
@@ -153,6 +193,7 @@ class DogecoinRpcClientTest {
         assertEquals(null, status.rescanBlockchainError)
         assertEquals(5_000_000, status.blocks)
         assertEquals(5_000_000, status.headers)
+        assertEquals(1.0, status.verificationProgress)
     }
 
     @Test
@@ -234,13 +275,13 @@ class DogecoinRpcClientTest {
     }
 
     @Test
-    fun `blockchain status keeps syncing mainnet node unavailable for wallet actions`() = runTest {
+    fun `blockchain status preserves ordinary progress while keeping IBD unavailable`() = runTest {
         val methods = mutableListOf<String>()
         val client = DogecoinRpcClient(
             httpClient = stubRpcClient(methods) { method ->
                 when (method) {
                     "getblockchaininfo" -> rpcResponse(
-                        """{"chain":"main","blocks":4990000,"headers":5000000,"initialblockdownload":true,"verificationprogress":0.99}"""
+                        """{"chain":"main","blocks":4990000,"headers":5000000,"initialblockdownload":true,"verificationprogress":0.5}"""
                     )
                     else -> error("Unexpected RPC method $method")
                 }
@@ -260,6 +301,7 @@ class DogecoinRpcClientTest {
         assertEquals(true, status.initialBlockDownload)
         assertEquals(4_990_000, status.blocks)
         assertEquals(5_000_000, status.headers)
+        assertEquals(0.5, status.verificationProgress)
     }
 
     @Test
@@ -356,6 +398,32 @@ class DogecoinRpcClientTest {
         assertEquals(listOf("getblockchaininfo"), methods)
         assertFalse(status.connected)
         assertTrue(status.error.orEmpty().contains("invalid verificationprogress"))
+    }
+
+    @Test
+    fun `blockchain status rejects implausible or non-finite verification progress`() = runTest {
+        listOf("-0.01", "2.000001", "1e999").forEach { rawProgress ->
+            val methods = mutableListOf<String>()
+            val client = DogecoinRpcClient(
+                httpClient = stubRpcClient(methods) { method ->
+                    when (method) {
+                        "getblockchaininfo" -> rpcResponse(
+                            """{"chain":"main","blocks":5000000,"headers":5000000,"initialblockdownload":false,"verificationprogress":$rawProgress}"""
+                        )
+                        else -> error("Unexpected RPC method $method")
+                    }
+                }
+            )
+
+            val status = client.getBlockchainStatus(
+                config = DogecoinRpcConfig(url = "http://dogecoin.local"),
+                network = DogecoinNetwork.MAINNET
+            )
+
+            assertEquals(listOf("getblockchaininfo"), methods)
+            assertFalse("progress=$rawProgress must fail status parsing", status.connected)
+            assertTrue(status.error.orEmpty().contains("verificationprogress"))
+        }
     }
 
     @Test
@@ -1941,6 +2009,109 @@ class DogecoinRpcClientTest {
     }
 
     @Test
+    fun `transaction confirmation lookup follows wallet route and parses zero to two`() = runTest {
+        val txid = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        val requests = mutableListOf<Triple<String, String, String>>()
+        var nextDepth = 0
+        val client = DogecoinRpcClient(
+            httpClient = stubRpcClientWithPathAndParams(requests) { method ->
+                when (method) {
+                    "getblockchaininfo" -> rpcResponse(
+                        """{"chain":"test","initialblockdownload":false}"""
+                    )
+                    "gettransaction" -> rpcResponse(
+                        """{"txid":"$txid","confirmations":${nextDepth++}}"""
+                    )
+                    else -> error("Unexpected RPC method $method")
+                }
+            }
+        )
+        val config = DogecoinRpcConfig(
+            url = "http://dogecoin.local:44555/rpc",
+            walletName = "bitchat watch"
+        )
+
+        val depths = List(3) {
+            client.getTransactionConfirmations(config, txid, DogecoinNetwork.TESTNET)
+        }
+
+        assertEquals(listOf(0, 1, 2), depths)
+        assertEquals(
+            listOf(
+                Triple("getblockchaininfo", "/rpc", "[]"),
+                Triple("gettransaction", "/rpc/wallet/bitchat%20watch", "[\"$txid\",true]"),
+                Triple("getblockchaininfo", "/rpc", "[]"),
+                Triple("gettransaction", "/rpc/wallet/bitchat%20watch", "[\"$txid\",true]"),
+                Triple("getblockchaininfo", "/rpc", "[]"),
+                Triple("gettransaction", "/rpc/wallet/bitchat%20watch", "[\"$txid\",true]")
+            ),
+            requests
+        )
+    }
+
+    @Test
+    fun `transaction confirmation lookup rejects negative node depth`() = runTest {
+        val txid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        val methods = mutableListOf<String>()
+        val client = DogecoinRpcClient(
+            httpClient = stubRpcClient(methods) { method ->
+                when (method) {
+                    "getblockchaininfo" -> rpcResponse(
+                        """{"chain":"test","initialblockdownload":false}"""
+                    )
+                    "gettransaction" -> rpcResponse(
+                        """{"txid":"$txid","confirmations":-1}"""
+                    )
+                    else -> error("Unexpected RPC method $method")
+                }
+            }
+        )
+
+        try {
+            client.getTransactionConfirmations(
+                DogecoinRpcConfig(url = "http://dogecoin.local:44555"),
+                txid,
+                DogecoinNetwork.TESTNET
+            )
+            fail("Expected negative confirmations rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("negative confirmations"))
+        }
+        assertEquals(listOf("getblockchaininfo", "gettransaction"), methods)
+    }
+
+    @Test
+    fun `transaction confirmation lookup rejects a different returned txid`() = runTest {
+        val requestedTxid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        val methods = mutableListOf<String>()
+        val client = DogecoinRpcClient(
+            httpClient = stubRpcClient(methods) { method ->
+                when (method) {
+                    "getblockchaininfo" -> rpcResponse(
+                        """{"chain":"test","initialblockdownload":false}"""
+                    )
+                    "gettransaction" -> rpcResponse(
+                        """{"txid":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","confirmations":1}"""
+                    )
+                    else -> error("Unexpected RPC method $method")
+                }
+            }
+        )
+
+        try {
+            client.getTransactionConfirmations(
+                DogecoinRpcConfig(url = "http://dogecoin.local:44555"),
+                requestedTxid,
+                DogecoinNetwork.TESTNET
+            )
+            fail("Expected mismatched transaction id rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message.orEmpty().contains("different txid"))
+        }
+        assertEquals(listOf("getblockchaininfo", "gettransaction"), methods)
+    }
+
+    @Test
     fun `wallet activity rejects malformed transaction id from node`() = runTest {
         val wallet = DogecoinKeyGenerator.fromPrivateKeyHex(
             "0000000000000000000000000000000000000000000000000000000000000001"
@@ -3370,6 +3541,26 @@ class DogecoinRpcClientTest {
                 val body = chain.request().body
                 val method = rpcMethod(body)
                 requests.add(method to rpcParams(body))
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(resultForMethod(method).toResponseBody("application/json".toMediaType()))
+                    .build()
+            })
+            .build()
+    }
+
+    private fun stubRpcClientWithPathAndParams(
+        requests: MutableList<Triple<String, String, String>>,
+        resultForMethod: (String) -> String
+    ): OkHttpClient {
+        return OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                val body = chain.request().body
+                val method = rpcMethod(body)
+                requests.add(Triple(method, chain.request().url.encodedPath, rpcParams(body)))
                 Response.Builder()
                     .request(chain.request())
                     .protocol(Protocol.HTTP_1_1)

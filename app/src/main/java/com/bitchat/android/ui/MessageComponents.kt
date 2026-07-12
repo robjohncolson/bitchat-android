@@ -44,6 +44,9 @@ import androidx.compose.foundation.shape.CircleShape
 import com.bitchat.android.ui.media.FileMessageItem
 import com.bitchat.android.model.BitchatMessageType
 import com.bitchat.android.R
+import com.bitchat.android.features.dogecoin.DogepaidReceipt
+import com.bitchat.android.features.dogecoin.DogepaidReceiptCheckResult
+import com.bitchat.android.features.dogecoin.DogecoinNetwork
 import androidx.compose.ui.res.stringResource
 
 
@@ -66,9 +69,16 @@ fun MessagesList(
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
     onImageClick: ((String, List<String>, Int) -> Unit)? = null,
-    onDogecoinUriClick: ((String) -> Unit)? = null
+    onDogecoinUriClick: ((String) -> Unit)? = null,
+    onDogecoinPaymentRequestClick: ((String, BitchatMessage) -> Unit)? = null,
+    onCheckDogepaidReceipt: ((DogepaidReceipt, (DogepaidReceiptCheckResult) -> Unit) -> Unit)? = null,
+    dogecoinWalletNetwork: DogecoinNetwork? = null,
+    onRetryDogepaidReceipt: ((BitchatMessage) -> Unit)? = null
 ) {
     val listState = rememberLazyListState()
+    val canonicalDogepaidReceiptIds = remember(messages) {
+        canonicalDogepaidReceiptMessageIds(messages)
+    }
     
     // Track if this is the first time messages are being loaded
     var hasScrolledToInitialPosition by remember { mutableStateOf(false) }
@@ -124,11 +134,16 @@ fun MessagesList(
                     messages = messages,
                     currentUserNickname = currentUserNickname,
                     meshService = meshService,
+                    canonicalDogepaidReceiptIds = canonicalDogepaidReceiptIds,
                     onNicknameClick = onNicknameClick,
                     onMessageLongPress = onMessageLongPress,
                     onCancelTransfer = onCancelTransfer,
                     onImageClick = onImageClick,
-                    onDogecoinUriClick = onDogecoinUriClick
+                    onDogecoinUriClick = onDogecoinUriClick,
+                    onDogecoinPaymentRequestClick = onDogecoinPaymentRequestClick,
+                    onCheckDogepaidReceipt = onCheckDogepaidReceipt,
+                    dogecoinWalletNetwork = dogecoinWalletNetwork,
+                    onRetryDogepaidReceipt = onRetryDogepaidReceipt
                 )
         }
     }
@@ -141,11 +156,16 @@ fun MessageItem(
     currentUserNickname: String,
     meshService: MeshService,
     messages: List<BitchatMessage> = emptyList(),
+    canonicalDogepaidReceiptIds: Set<String> = canonicalDogepaidReceiptMessageIds(messages),
     onNicknameClick: ((String) -> Unit)? = null,
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
     onImageClick: ((String, List<String>, Int) -> Unit)? = null,
-    onDogecoinUriClick: ((String) -> Unit)? = null
+    onDogecoinUriClick: ((String) -> Unit)? = null,
+    onDogecoinPaymentRequestClick: ((String, BitchatMessage) -> Unit)? = null,
+    onCheckDogepaidReceipt: ((DogepaidReceipt, (DogepaidReceiptCheckResult) -> Unit) -> Unit)? = null,
+    dogecoinWalletNetwork: DogecoinNetwork? = null,
+    onRetryDogepaidReceipt: ((BitchatMessage) -> Unit)? = null
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -168,6 +188,7 @@ fun MessageItem(
                     messages = messages,
                     currentUserNickname = currentUserNickname,
                     meshService = meshService,
+                    canonicalDogepaidReceiptIds = canonicalDogepaidReceiptIds,
                     colorScheme = colorScheme,
                     timeFormatter = timeFormatter,
                     onNicknameClick = onNicknameClick,
@@ -175,6 +196,10 @@ fun MessageItem(
                     onCancelTransfer = onCancelTransfer,
                     onImageClick = onImageClick,
                     onDogecoinUriClick = onDogecoinUriClick,
+                    onDogecoinPaymentRequestClick = onDogecoinPaymentRequestClick,
+                    onCheckDogepaidReceipt = onCheckDogepaidReceipt,
+                    dogecoinWalletNetwork = dogecoinWalletNetwork,
+                    onRetryDogepaidReceipt = onRetryDogepaidReceipt,
                     modifier = Modifier
                         .weight(1f)
                         .padding(end = endPad)
@@ -206,6 +231,7 @@ fun MessageItem(
         messages: List<BitchatMessage>,
         currentUserNickname: String,
         meshService: MeshService,
+        canonicalDogepaidReceiptIds: Set<String>,
         colorScheme: ColorScheme,
         timeFormatter: SimpleDateFormat,
         onNicknameClick: ((String) -> Unit)?,
@@ -213,6 +239,10 @@ fun MessageItem(
         onCancelTransfer: ((BitchatMessage) -> Unit)?,
         onImageClick: ((String, List<String>, Int) -> Unit)?,
         onDogecoinUriClick: ((String) -> Unit)?,
+        onDogecoinPaymentRequestClick: ((String, BitchatMessage) -> Unit)?,
+        onCheckDogepaidReceipt: ((DogepaidReceipt, (DogepaidReceiptCheckResult) -> Unit) -> Unit)?,
+        dogecoinWalletNetwork: DogecoinNetwork?,
+        onRetryDogepaidReceipt: ((BitchatMessage) -> Unit)?,
         modifier: Modifier = Modifier
     ) {
     // Image special rendering
@@ -354,6 +384,27 @@ fun MessageItem(
     // Check if this message should be animated during PoW mining
     val shouldAnimate = shouldAnimateMessage(message.id)
 
+    DogepaidReceipt.parse(message.content)?.let { receipt ->
+        DogepaidReceiptBubble(
+            message = message,
+            receipt = receipt,
+            currentUserNickname = currentUserNickname,
+            meshService = meshService,
+            colorScheme = colorScheme,
+            timeFormatter = timeFormatter,
+            duplicate = message.id !in canonicalDogepaidReceiptIds,
+            outgoing = message.senderPeerID?.let { it == meshService.myPeerID }
+                ?: (message.sender == currentUserNickname),
+            onCheckStatus = onCheckDogepaidReceipt,
+            onRetry = onRetryDogepaidReceipt,
+            walletNetwork = dogecoinWalletNetwork,
+            onNicknameClick = onNicknameClick,
+            onMessageLongPress = onMessageLongPress,
+            modifier = modifier
+        )
+        return
+    }
+
     DogecoinUri.wholeMessagePaymentUri(message.content)?.let { dogecoinUri ->
         DogecoinPaymentRequestBubble(
             message = message,
@@ -362,7 +413,13 @@ fun MessageItem(
             meshService = meshService,
             colorScheme = colorScheme,
             timeFormatter = timeFormatter,
-            onPayClick = onDogecoinUriClick,
+            onPayClick = { uri ->
+                if (onDogecoinPaymentRequestClick != null) {
+                    onDogecoinPaymentRequestClick(uri, message)
+                } else {
+                    onDogecoinUriClick?.invoke(uri)
+                }
+            },
             onNicknameClick = onNicknameClick,
             onMessageLongPress = onMessageLongPress,
             modifier = modifier

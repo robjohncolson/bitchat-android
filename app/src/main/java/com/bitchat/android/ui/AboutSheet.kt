@@ -15,7 +15,9 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -255,7 +257,8 @@ fun AboutSheet(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    
+    val profileSwitchScope = rememberCoroutineScope()
+
     // Get version name from package info
     val versionName = remember {
         try {
@@ -323,6 +326,33 @@ fun AboutSheet(
                                 color = colorScheme.onBackground.copy(alpha = 0.6f),
                                 modifier = Modifier.padding(top = 4.dp)
                             )
+                        }
+                    }
+
+                    // Prominent entry to the friendly "Family" experience, so switching a phone to the
+                    // simplified messenger doesn't require digging to the bottom of the settings list.
+                    item(key = "simple_mode") {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = colorScheme.surface,
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                SettingsActionRow(
+                                    icon = Icons.Filled.Person,
+                                    title = "Simple (Family) mode",
+                                    subtitle = "Switch to the friendly, simplified messenger — easy for family to use",
+                                    onClick = {
+                                        onDismiss()
+                                        profileSwitchScope.launch {
+                                            com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                                context.applicationContext as android.app.Application,
+                                                com.bitchat.android.profile.AppProfile.SIMPLE
+                                            )
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
 
@@ -518,6 +548,7 @@ fun AboutSheet(
                                             onClick = onShowDogecoinWallet
                                         )
                                     }
+
                                 }
                             }
                             

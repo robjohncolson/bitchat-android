@@ -205,6 +205,8 @@ class MainActivity : OrientationAwareActivity() {
         val isBluetoothLoading by mainViewModel.isBluetoothLoading.collectAsState()
         val isLocationLoading by mainViewModel.isLocationLoading.collectAsState()
         val isBatteryOptimizationLoading by mainViewModel.isBatteryOptimizationLoading.collectAsState()
+        val profileChosen by com.bitchat.android.profile.ProfilePreferenceManager.profileChosenFlow.collectAsState()
+        val appProfile by com.bitchat.android.profile.ProfilePreferenceManager.profileFlow.collectAsState()
 
         DisposableEffect(context, bluetoothStatusManager) {
 
@@ -330,11 +332,35 @@ class MainActivity : OrientationAwareActivity() {
 
                 // Add the callback - this will be automatically removed when the activity is destroyed
                 onBackPressedDispatcher.addCallback(this, backCallback)
-                ChatScreen(
-                    viewModel = chatViewModel,
-                    externalDogecoinPaymentRequest = pendingDogecoinPaymentRequest,
-                    onDogecoinPaymentRequestConsumed = ::clearPendingDogecoinPaymentRequest
-                )
+                if (onboardingState == OnboardingState.COMPLETE && !profileChosen) {
+                    // One-time profile pick on a fresh install (existing installs are migrated to chosen).
+                    com.bitchat.android.profile.ui.ProfilePickScreen(
+                        modifier = modifier,
+                        onPicked = { profile ->
+                            // Persist the chosen profile SYNCHRONOUSLY before marking the pick complete, so an
+                            // Activity death in this window can't strand a SIMPLE pick in the POWER UI with the
+                            // one-time picker gone forever (profile_chosen=true but app_profile still POWER). The
+                            // slow Tor/PoW/channel seeding still runs in the background.
+                            com.bitchat.android.profile.ProfilePreferenceManager.set(application, profile)
+                            com.bitchat.android.profile.ProfilePreferenceManager.markProfileChosen(applicationContext)
+                            lifecycleScope.launch {
+                                com.bitchat.android.profile.ProfileSetupCoordinator.applyProfileDefaults(
+                                    application,
+                                    profile
+                                )
+                            }
+                        }
+                    )
+                } else if (appProfile == com.bitchat.android.profile.AppProfile.SIMPLE) {
+                    // The friendly LINE-style "Family" surface, over the same ChatViewModel.
+                    com.bitchat.android.profile.ui.SimpleModeScreen(viewModel = chatViewModel)
+                } else {
+                    ChatScreen(
+                        viewModel = chatViewModel,
+                        externalDogecoinPaymentRequest = pendingDogecoinPaymentRequest,
+                        onDogecoinPaymentRequestConsumed = ::clearPendingDogecoinPaymentRequest
+                    )
+                }
             }
             
             OnboardingState.ERROR -> {
@@ -831,8 +857,14 @@ class MainActivity : OrientationAwareActivity() {
      * Handle intents from notification clicks - open specific private chat or geohash chat
      */
     private fun handleNotificationIntent(intent: Intent) {
+        // Ignore an intent redelivered on a Recents relaunch: after a notification tap, that intent becomes the
+        // task's launch intent, so the OS re-delivers it on every cold start from history — which would
+        // otherwise re-navigate into the same stale conversation each time (especially disruptive in SIMPLE,
+        // which force-navigates). A genuine fresh tap never carries FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+
         val shouldOpenPrivateChat = intent.getBooleanExtra(
-            com.bitchat.android.ui.NotificationManager.EXTRA_OPEN_PRIVATE_CHAT, 
+            com.bitchat.android.ui.NotificationManager.EXTRA_OPEN_PRIVATE_CHAT,
             false
         )
         
@@ -848,11 +880,19 @@ class MainActivity : OrientationAwareActivity() {
                 
                 if (peerID != null) {
                     Log.d("MainActivity", "Opening private chat with $senderNickname (peerID: $peerID) from notification")
-                    
-                    // Open the private chat sheet with this peer
-                    chatViewModel.showMeshPeerList()
-                    chatViewModel.showPrivateChatSheet(peerID)
-                    
+
+                    // SIMPLE renders its own screen (SimpleModeScreen observes requestOpenConversation and
+                    // navigates); POWER opens the private-chat sheet. Drive only the ACTIVE profile's path so a
+                    // tap in one mode never leaves stale state for the other (a stale sheet peer, or a stale
+                    // pending-conversation that fires on a later profile switch).
+                    if (com.bitchat.android.profile.ProfilePreferenceManager.get(applicationContext) ==
+                        com.bitchat.android.profile.AppProfile.SIMPLE) {
+                        chatViewModel.requestOpenConversation(peerID)
+                    } else {
+                        chatViewModel.showMeshPeerList()
+                        chatViewModel.showPrivateChatSheet(peerID)
+                    }
+
                     // Clear notifications for this sender since user is now viewing the chat
                     chatViewModel.clearNotificationsForSender(peerID)
                 }

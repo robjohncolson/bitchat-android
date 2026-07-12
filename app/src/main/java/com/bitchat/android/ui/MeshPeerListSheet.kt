@@ -31,6 +31,7 @@ import com.bitchat.android.core.ui.component.sheet.BitchatSheetCenterTopBar
 import com.bitchat.android.core.ui.component.sheet.BitchatSheetTitle
 import com.bitchat.android.core.ui.component.sheet.BitchatSheetTopBar
 import com.bitchat.android.geohash.ChannelID
+import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.ui.theme.BASE_FONT_SIZE
 import com.bitchat.android.nostr.GeohashAliasRegistry
 import com.bitchat.android.nostr.GeohashConversationRegistry
@@ -845,6 +846,7 @@ fun PrivateChatSheet(
     peerID: String,
     viewModel: ChatViewModel,
     onDogecoinUriClick: ((String) -> Unit)? = null,
+    onDogecoinPaymentRequestClick: ((String, BitchatMessage, String) -> Unit)? = null,
     onRequestDoge: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -942,7 +944,16 @@ fun PrivateChatSheet(
                         onMessageLongPress = { /* handle long press */ },
                         onCancelTransfer = { msg -> viewModel.cancelMediaSend(msg.id) },
                         onImageClick = { _, _, _ -> /* handle image click */ },
-                        onDogecoinUriClick = onDogecoinUriClick
+                        onDogecoinUriClick = onDogecoinUriClick,
+                        onDogecoinPaymentRequestClick = { uri, message ->
+                            onDogecoinPaymentRequestClick?.invoke(uri, message, peerID)
+                                ?: onDogecoinUriClick?.invoke(uri)
+                        },
+                        onCheckDogepaidReceipt = viewModel::checkDogepaidReceipt,
+                        dogecoinWalletNetwork = currentDogecoinNetwork,
+                        onRetryDogepaidReceipt = { message ->
+                            viewModel.retryDogepaidReceipt(message, peerID)
+                        }
                     )
 
                     HorizontalDivider(color = colorScheme.outline.copy(alpha = 0.3f))

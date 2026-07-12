@@ -1,4 +1,4 @@
-# Continuation Prompt: Bitchat Android Dogecoin Wallet
+# Continuation Prompt: Bitchat Android (Dogecoin wallet + Simple/Family profile)
 
 Continue work in:
 
@@ -6,11 +6,423 @@ Continue work in:
 C:\Users\rober\Downloads\Projects\bitchat-android
 ```
 
-Goal: continue the Dogecoin wallet integration in Bitchat Android. Work autonomously, inspect the
-relevant files first, keep changes focused, do not revert unrelated user changes, and verify with
-focused Gradle + on-device checks. **Money path + signed mesh protocol — review carefully.**
+Goal: continue work on Bitchat Android — the Dogecoin wallet (now merged to `main`) and the new
+Simple/Family profile (PR open). Work autonomously, inspect the relevant files first, keep changes
+focused, do not revert unrelated user changes, and verify with focused Gradle + on-device checks.
+**Money path + signed mesh protocol — review carefully.**
 
-## ▶️ NEXT SESSION — START HERE (HEAD `1f5e301`, branch `dogecoin-m2-pay-nickname`, pushed, tree clean, build green)
+## ▶️ NEXT SESSION — START HERE (2026-07-10): portable trusted node + RPC guardrails
+
+**This section is authoritative for Dogecoin node work and supersedes older LAN/RPC/Tor directions below.**
+Historical material is retained for context, but do not copy its broad `rpcbind`, `rpcallowip`, public-RPC,
+or Arti assumptions into new work.
+
+### Current product decision
+
+The user's actual goal is now concrete:
+
+- Android keeps the Dogecoin WIF/private key and remains the only signer.
+- A personally controlled laptop runs a fully validating Dogecoin Core node and watches only the phone's
+  public address for app funds.
+- When travelling together, the laptop can use the phone's mobile hotspot. The phone can query the already-synced
+  laptop for balance/UTXOs, locally sign, and ask the laptop to preflight/broadcast even when phone SPV is behind.
+- When the laptop is elsewhere, the first remote-access experiment is **Tailscale Serve over an exact HTTPS
+  `*.ts.net` hostname**, not public RPC and not the custom Tor gateway.
+- SPV stays the normal/default wallet backend. Node use remains explicit/session-only.
+
+**Approved next work:** the existing RPC guardrails, followed by a portable **testnet** laptop/Tailscale/hotspot
+proof.
+
+**Not approved for implementation:** the custom Rust gateway, OpenAPI service, Tor onion publication, or the
+12-item Arti rebuild/hardening program. Keep those as deferred reference architecture only.
+
+**Not built yet:** a mainnet `TRUSTED_PERSONAL_NODE` mode that is allowed to supply spend inputs while SPV is
+behind. That is a separate, explicit trust decision after the testnet proof.
+
+### Why the direction changed
+
+`docs/dogecoin-remote-node-access-spec.md` was independently reviewed. Its audit of the current code was accurate,
+including these confirmed defects:
+
+1. The one-tap Core help snippet emits `rpcbind=0.0.0.0` plus every RFC1918 range.
+2. RPC URL, username, password, and wallet name persist on every keystroke.
+3. The wallet auto-probes a valid saved URL after open/edit (650 ms debounce), sending Basic credentials and then
+   the wallet address even when SPV is selected.
+4. `DogecoinRpcClient` follows redirects and reads responses without an explicit size cap.
+5. `https://<v3>.onion` passes URL validation but would be attempted directly, potentially leaking the onion name.
+6. Helper and debug paths construct their own RPC clients, so UI-only trust checks are bypassable.
+
+The spec's Tor gateway prescription is disproportionate today. On mainnet it requires fully synced SPV before
+signing; at that point SPV can already broadcast. Unique value is mostly early node-reported reads/history, Core
+policy diagnostics, disagreement detection, and an optional redundant relay sink. Current Arti onion support is
+also not reproducibly buildable/proven across the four shipped ABIs.
+
+Two review corrections are locked in:
+
+- A failed Tor/remote assist must disable only the assist, never the wallet. SPV remains persisted and keeps
+  running.
+- Do **not** classify `100.64.0.0/10` as trusted cleartext. It is RFC 6598 shared carrier-NAT space, not proof that
+  Tailscale owns the active route. Use the exact Tailscale HTTPS hostname instead.
+
+### Worktree/doc state at this handoff
+
+- `docs/dogecoin-remote-node-access-spec.md` is untracked and remains a **proposed/deferred security reference**.
+- `docs/family-wallet-ux-learnings-spec.md` has an unstaged cross-reference to it.
+- Before committing the remote spec, amend it with: the mainnet-value honesty sentence; the BIP37-vs-home-operator
+  privacy tradeoff; explicit removal of legacy raw-RPC mainnet; the atomic resolver/offer gate; B0 payment-status
+  deltas; and a single-owner Tor lifecycle contract.
+- Unrelated existing modifications in the checkpoint asset/test and `tools/spv-spike/gradlew.bat` belong to the
+  user/background work. Preserve them.
+- Do not commit or stage anything unless the user explicitly asks.
+
+### Immediate code work: one atomic RPC-guardrail slice
+
+Do this before Tailscale or another node test. The resolver and trust/offer changes **must ship together**; applying
+only the soft-default fix makes an unverified public HTTPS URL eligible for the assist card.
+
+1. Replace the generated `dogecoin.conf` snippet. Never emit `rpcbind=0.0.0.0` or broad RFC1918 allowlists. Default
+   to loopback and explain exact-interface/firewall configuration only as an expert local/testnet path.
+2. Treat URL/user/password/wallet edits as an in-memory draft. Persist only from an explicit Save/Confirm action.
+3. Remove all automatic authenticated probes on wallet open and field edits. Add explicit `Test connection` /
+   `Use node` actions; displaying or editing a configuration performs zero I/O.
+4. Harden every RPC client: `followRedirects(false)`, `followSslRedirects(false)`, bounded response reads, bounded
+   errors, existing timeouts, and no credential forwarding to a changed origin.
+5. Add one central endpoint/trust classifier. At minimum distinguish:
+   - allowed explicit local testnet/regtest LAN,
+   - exact provisioned Tailscale HTTPS,
+   - unverified public HTTPS,
+   - direct `.onion` (invalid for this client),
+   - invalid/unknown.
+   URL syntax (`rpcUrlValid`) is never a trust decision.
+6. Change `resolveBackend`, malformed saved-backend handling, assist `offerVisible`, assist activation, and probe
+   suppression in the same PR. An unverified public URL resolves to SPV, never appears assist-ready, and is never
+   probed. An active assist is stopped before another request if an edit makes the endpoint ineligible.
+7. Enforce the same classifier/client factory in wallet reads/sends, `BroadcastHelperService`, helper
+   announcements, payment-status reads, and all production debug/console RPC paths. Direct construction must not
+   bypass route policy.
+8. Add focused tests for all networks and saved-backend states: local HTTP, arbitrary HTTPS, exact Tailscale host,
+   `.onion`, malformed state, redirects, oversized bodies, zero-I/O editing/open, offer visibility, and activation.
+
+Also amend `docs/payment-request-status-spec.md` when that B0 work proceeds:
+
+- mainnet + legacy/raw RPC => `CANNOT_CHECK` with zero I/O;
+- first-class `SOURCE_DISPUTED` (the source, not the payment, is disputed);
+- every RPC-derived result says `node-reported, not independently verified` until SPV corroborates it;
+- explorer, unknown/malformed, unverified public, and future unsupported backends => `CANNOT_CHECK`.
+
+### Portable testnet node: correct security model
+
+"Watch-only" describes the Core wallet's relationship to the Android address; the full node still validates the
+entire chain. The current app already calls `importaddress` and signs with `DogecoinTransactionBuilder` on Android.
+Never send/import the Android WIF to Core.
+
+First verify the currently active phone address:
+
+```text
+dogecoin-cli -testnet validateaddress "<phone-testnet-address>"
+```
+
+Desired result:
+
+```text
+ismine: false
+iswatchonly: true
+```
+
+- If so, the node is already watch-only for that address; do not wipe/resync it merely to rename the architecture.
+- If `ismine: true`, Core has the private key. For the real pattern, use a separate app-only Core data directory
+  and import only the public address. The historical testnet setup deliberately copied a node WIF into a phone, so
+  do not assume today's address/node pairing is clean; verify it.
+- Dogecoin Core 1.14.9 lacks modern Bitcoin Core's `createwallet(..., disable_private_keys=true)` facility. A
+  separate legacy Core wallet may contain unrelated generated keys, but it must contain no valuable keys/funds and
+  must never receive the Android WIF. Strong isolation means a separate Core instance/data directory from any
+  custodial desktop wallet.
+- Complete the watch-address historical rescan before travel. The current app requires an unpruned node for that
+  path. Keep Core caught up; a stale laptop cannot rescue a quick spend merely because it has old chain data.
+
+If RPC is currently port-forwarded/WAN-reachable, close it immediately. Core P2P may be public; Core RPC may not.
+
+### Tailscale setup target (ops spike, no custom gateway)
+
+Tailscale is trusted as an encrypted private transport, not as the only money-safety boundary:
+
+- enable MFA, device approval, and Tailnet Lock;
+- use at least two Tailnet Lock signing devices and store disablement secrets offline;
+- replace default-allow policy with a narrow grant: named phone(s) -> tagged Dogecoin laptop -> TCP 443 only;
+- use a unique `rpcauth` credential per phone so one lost phone can be revoked;
+- keep a separate Core instance with no app/private spending keys;
+- use **Serve**, never Funnel; verify the service is unreachable outside the tailnet;
+- Tailscale sees device/connection metadata and is not an anonymity service.
+
+Reference host shape (placeholders only; never commit a real RPC secret):
+
+```ini
+testnet=1
+server=1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=44555
+rpcauth=<unique-user:salt$hash>
+```
+
+Then publish the loopback service privately with the installed Tailscale version's documented syntax, currently:
+
+```text
+tailscale serve --bg http://127.0.0.1:44555
+```
+
+Configure Android with the exact resulting `https://<node>.<tailnet>.ts.net` origin. Platform TLS + the tailnet's
+device identity provide the pragmatic trust boundary; this is not app-managed SPKI pinning. Do not accept a raw
+`http://100.64.x.x` substitute, sibling `.ts.net` host, redirect, alternate port, query, fragment, or automatic
+fallback.
+
+No Tailscale SDK is required for the first experiment. After the guardrails, the existing semantic RPC calls can
+use the HTTPS origin. An optional later UX may show `Open Tailscale`, but it is not a prerequisite.
+
+### Laptop + phone-hotspot behavior
+
+The portable geometry is valid:
+
+```text
+Android signer/key
+  -> Tailscale HTTPS (normally a direct WireGuard path over the hotspot)
+  -> laptop Tailscale Serve
+  -> loopback Dogecoin Core watch view
+  -> Dogecoin P2P through the phone's internet connection
+```
+
+Both devices being on the same phone hotspot does not require public reachability. Direct private-LAN RPC can be a
+testnet-only expert fallback, but Tailscale HTTPS avoids rebinding Core whenever the laptop's hotspot address changes
+and authenticates/encrypts the path. Some Android/OEM hotspots isolate the phone from tethered clients or interact
+oddly with VPNs; prove the actual phone/laptop pair instead of assuming.
+
+Test in this order with tiny testnet funds:
+
+1. Node reports correct testnet chain, `initialblockdownload=false`, acceptable peer count, and completed rescan.
+2. Exact watch state is `ismine=false`, `iswatchonly=true` for the active Android address.
+3. Balance/activity/UTXOs work through Tailscale Serve on home Wi-Fi.
+4. Repeat on cellular with the laptop elsewhere.
+5. Repeat with the laptop joined to the phone hotspot; verify whether the path is direct and whether reconnects work.
+6. Build/sign on Android, run Core policy preflight, broadcast through the laptop, then corroborate the tx via SPV.
+7. Exercise Tailscale down, Core down/syncing, 401, TLS failure, laptop sleep/reboot, lost-phone revocation, and
+   hotspot reconnect. Each failure ends the node attempt without credential leakage; SPV remains usable.
+8. External/LAN scans prove RPC 44555 is not reachable except via the loopback Serve target.
+
+### Mainnet fast-spend follow-up (explicitly deferred until testnet passes)
+
+The current remote-node spec intentionally requires fully synced SPV before mainnet signing. That does **not** meet
+the user's portable-laptop requirement. If the testnet proof succeeds, amend the design and build a separate
+`TRUSTED_PERSONAL_NODE` profile where the user explicitly elects to trust the exact personal laptop as the UTXO
+oracle while SPV is behind.
+
+Required gates for that future mode:
+
+- exact provisioned Tailscale HTTPS origin and explicit user confirmation;
+- correct mainnet chain, Core fully synced/not IBD, sufficient node peers, watch import/rescan complete;
+- Android remains the only signer; Core never receives the WIF;
+- fresh node snapshot, exact input ownership/script/amount validation, and immediate selected-input recheck;
+- hard absolute and relative fee caps with no acknowledgement override;
+- locally recomputed txid, Core `testmempoolaccept`, idempotent/user-triggered broadcast, and Claimed-until-observed
+  receipt semantics;
+- prominent `Trusted personal node — not yet verified by Built-in` provenance;
+- node compromise is an accepted risk: watch-only prevents key theft, but does not stop a compromised laptop from
+  lying about chain/UTXO data or censoring a transaction.
+
+Do not silently relax the SPV gate in the ordinary RPC path. This must be a named profile/state, reviewed as a
+money-path change, and proven on testnet before any user-authorized mainnet use.
+
+## ▶️ NEXT SESSION — START HERE (2026-07-02, updated)
+
+### 🌏 SLOW-OPEN FIX + JAPANESE LOCALIZATION (2026-07-02, HEAD `9bed2ef`)
+Both from user feedback this session; both build+test green + adversarially reviewed.
+- **Slow conversation open FIXED (`4bc5132`) — VERIFIED ON S24.** User: "chat history takes a while to load up." A
+  4-agent investigation OVERTURNED the disk-load guess (chat_history_v1.json is ~8KB on both phones → parse <1ms).
+  REAL cause: `ChatViewModel.startPrivateChat` looped `SeenMessageStore.markRead(id)` once PER message on the MAIN
+  thread, each = full Gson-serialize of the ~10k-id set + an AES-EncryptedSharedPreferences commit → N encrypted
+  writes to open a thread. FIX: new `SeenMessageStore.markReadBulk(ids)` (one persist, same LRU/trim) called once on
+  `Dispatchers.IO`. Deliberately did NOT do the async-load / conv-count-bound the synthesis also suggested (8KB →
+  non-problem + merge-race risk). Verified S24: Family group opens clean+fast, no jank/errors.
+- **Japanese localization + in-app language toggle (`9bed2ef`) — ON-DEVICE VERIFY PENDING (phones disconnected).**
+  ~65 Simple strings (SimpleModeScreen/AddFamilyScreen/ProfilePickScreen) → `values/strings.xml` + `values-ja`
+  (base app was already JP-localized) via `stringResource`/`getString`; auto-follows phone language. In-app
+  **Language** picker (System / English / 日本語) in Simple settings: new `profile/SimpleLanguage.kt` (pref +
+  `wrap()`), applied in `OrientationAwareActivity.attachBaseContext` (Activities are ComponentActivity, not
+  AppCompat, so AppCompatDelegate wouldn't apply), Activity `recreate()` on change; restores JVM default on
+  "System". Review clean on extraction (keys/format-args/completeness); folded a low fix (locale-restore).
+  **NEXT: on-device — set Language→日本語, confirm the Simple UI switches; also set the phone to Japanese to
+  confirm auto-follow.** Deferred (minor): `formatBubbleTime` still hardcodes 12h "h:mm a" (locale-aware time
+  format needs context threading).
+- **DECISIONS this session:** home address in history = user ACCEPTS (no rewrite); QR replay window = KEEP
+  Long.MAX_VALUE (copy-and-send-later); multi-phone group test = user chose SKIP for now.
+
+---
+
+## (earlier) NEXT SESSION — START HERE (2026-07-01)
+
+**Branch `simple-family-profile` (PR #2), HEAD `0c67507`, in sync with origin. Dogecoin wallet already MERGED to
+`main` (PR #1) — HISTORICAL below.** Full running detail is in memory `simple-family-profile-plan.md` — READ IT FIRST.
+
+### 🧰 TIGHTENING PASS COMPLETE (2026-07-01) — plan `docs/simple-profile-tightening-plan.md`
+A full-branch multi-lens audit (34-agent workflow, 26 confirmed findings) drove six hardening slices, EACH
+adversarially reviewed before commit (real defects were caught + fixed in review — e.g. a panic wipe/persist race
+I'd introduced). All build+tests green; money-path canaries pass every commit. Shipped commits:
+- **WP1 `d5a6dc7` — message-loss correctness (4 HIGH + 2 MED):** seed `GeohashAliasRegistry` on contact open (first
+  send no longer queues forever); mesh peerID added to the Simple thread union (BLE messages show); out-of-order
+  group messages BUFFERED past the trust gate then drained after a trusted member stores the group (per-conv capped,
+  admission-gated on a claimed mutual favorite); delivery-status caption + in-conversation connection banner;
+  `isViewing` computed against the conversation key set; Nostr FILE_TRANSFER deduped by gift-wrap id. **Verified
+  on-device (tablet): own bubble shows "· Sent", group renders.**
+- **WP2 `4362297` — privacy & trust:** panic-clear now truly erases on-disk history via `AppStateStore.wipePersisted()`
+  (+ `NostrGroupRegistry.clear()`/`KnownNpubStore.clear()`), run AFTER pipelines torn down, with a `persistGeneration`
+  guard so an in-flight debounced write can't resurrect the file (the race review caught); **home address removed**
+  from `ProfileSetupCoordinator` KDoc + dead room machinery deleted (STILL in earlier history — see DECISIONS);
+  `isMine` is structural (`senderPeerID==myPeerID`); tap-added contacts marked "not verified"; `parseGroupMembers`
+  64-hex validation. **Verified on-device: `isMine` correct after the change.**
+- **WP4 `c5d2f79` — tests + WP3 #14:** `NostrGroupRegistryTest` (pinned computeGroupId vector + invariance),
+  `KnownNpubStoreTest`, `AppStateStorePersistenceTest` (corrupt-file quarantine + round-trip + cap) — 14 new tests;
+  plus the corrupt-history **quarantine** fix in `load()`.
+- **WP3 `f3dedc4` — lifecycle:** Simple nav survives Activity recreation (`rememberSaveable` convKey + restore
+  effect + shared `closeConversation()`); profile pick persists SYNCHRONOUSLY; notification intent ignores Recents
+  relaunch (`FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`) + drives only the active profile; `senderNostrPubkey` persisted
+  (tap-to-add survives relaunch). **Verified on-device: forced font-scale recreation kept the thread open.**
+- **WP6 `0c67507` — hygiene:** removed the dead always-true `isPrivate` branch + 2 dead `collectAsState` in
+  `SimpleConversation`; refreshed 3 stale phase/increment comments. PR #2 description refreshed.
+
+**⭐ DECISIONS DEFERRED (asked; user was away — proceed on these when they answer):**
+1. **Chat history at rest is plaintext** on disk (`allowBackup=false` already closes the ADB vector). Encrypt at rest
+   (keystore, like SeenMessageStore) vs. make persistence opt-in per profile? NOT built — genuine architecture fork.
+2. **Home address in git history:** removed going forward; purging earlier commits (`60dfe08`) needs a branch
+   history rewrite + force-push (destructive — did NOT do unattended).
+3. **Provisioning QR replay window** (`maxAgeSeconds=Long.MAX_VALUE`): bound it vs. keep for copy-and-send-later.
+
+**⭐ HELD (larger, not started) — WP5 UX + a few WP4/WP6 items:** Japanese **localization** sweep (~60 hardcoded
+strings → `strings.xml` + `values-ja`; also 12h→locale time format); home chat-list **unread/preview/timestamp/
+activity-ordering**; **confirm dialog** on "Switch to full bitchat"; QR-scan **error feedback** (invalid code =
+silent); MessageRouter branch-order test + `provisionFamilyContact` test (need DI seams); split the 1,191-line
+`SimpleModeScreen.kt`. All scoped in the plan doc.
+
+**REMAINING VERIFY (needs S24 + Pixel 3 plugged in):** the interactive 2–3-phone group test + the two notification
+fixes on a receiving phone (see below). Tablet is on `0c67507`.
+
+### (Pre-tightening) The Simple/Family profile — feature-complete
+This session's earlier work: a **real E2E "family group"** that REPLACES the old public geohash "Family Room".
+
+### 🔔 Nostr messages now raise notifications (fix on top of Increment 2)
+On-device finding: incoming messages "don't always come up as a notification — no way to know unless you open the
+convo." ROOT CAUSE = notifications were fired ONLY by the mesh receive path (`MeshDelegateHandler.didReceiveMessage`);
+**Nostr-delivered** DMs/group messages were filed straight into the chat by `NostrDirectMessageHandler` with NO
+notify call — and the Simple family profile is Nostr-centric (off-mesh clearnet), so family messages arrived silently
+unless the two phones were in BLE range. FIX (additive, presentation-only): new `MeshDelegateHandler.notifyIncoming
+NostrMessage(convKey, senderNickname, message, groupSubject?)` reuses the existing `NotificationManager` +
+its "don't notify the chat you're viewing" gate; called from `NostrDirectMessageHandler.processNoisePayload` for
+`PRIVATE_MESSAGE`, group messages, and `FILE_TRANSFER`, gated on `!suppressUnread && !isViewing` (no re-notify of
+already-read re-fetches). Group banners read "Sender · Subject". Wiring verified: dmHandler's meshDelegateHandler is
+the SAME instance owning the UI `NotificationManager` (ChatViewModel 841→867→880→GeohashViewModel 61). No money/mesh/
+trust gating touched. Build+tests green. **CAVEAT (still open):** covers foreground + backgrounded-but-alive only; if
+the OS fully KILLS the app (Samsung/Doze), Nostr reception itself stops → no notification until relaunch. A truly
+reliable "notify when killed" needs a service-owned Nostr subscription or push — bigger follow-up, not done.
+Follow-up shipped same session: **tapping a notification now opens the thread in Simple mode.** The tap intent only
+drove the Power UI (`showPrivateChatSheet`), which Simple doesn't observe. Added a one-shot `ChatViewModel
+.pendingOpenConversation` signal (`requestOpenConversation`/`consumePendingOpenConversation`); `MainActivity
+.handleNotificationIntent` emits the convKey (guarded to SIMPLE profile so a Power tap can't leave a stale value);
+`SimpleModeScreen` LaunchedEffect observes it and navigates — `nostr_grp_…` → openGroup, else resolves the contact
+(name/pubkey via GeohashAliasRegistry, noiseHex via favorites) and opens the 1:1. Cold-start falls back to the last
+incoming sender name + persisted history. Additive, presentation/nav only. Build green.
+
+### ✅ E2E family group Increment 2 COMPLETE — committed `3b13d5b`, pushed, installed on the tablet
+2c (tap-a-name-to-add discovery) shipped clean (zero-findings adversarial review). The WHOLE E2E family group —
+transport + transitive-trust gate + Simple UI + tap-to-add discovery — is now on `simple-family-profile` (PR #2),
+build+tests green, pushed. **IMMEDIATE NEXT = the on-device 2–3-phone group test (see REMAINING).** Process pattern
+this whole session: implement → adversarial review (Workflow) → fold fixes → build green → commit → push → install;
+the user consistently chose "commit + push + install" after each reviewed slice.
+
+### The E2E "family group" (the big new architecture)
+The public "Family Room" was a PUBLIC pinned geohash channel and it LEAKED STRANGER messages (geohash chat is
+public + it was pinned to the user's real Wakefield location, so local bitchat users appeared). It is **REMOVED**
+(commit `ddc3dc7`: UI gone, seeder selects `ChannelID.Mesh`, a LaunchedEffect un-pins existing installs). Replaced
+by a real **E2E group reached as "add a person" from inside a 1:1 DM** (downgraded visibility, the user's stated
+direction). How it works: a group message = **N NIP-17 1:1 gift wraps** (one per member + a self-copy) that all
+carry the same `groupId` + member set **SEALED INSIDE the kind-14 rumor** (never the public kind-1059 wrap → no
+membership leak; PFS preserved; NO new crypto). Deterministic `groupId = sha256(sorted member account-pubkey hexes
+incl self).take(16)` so every member derives the same thread with no handshake; members thread under
+`nostr_grp_<groupId>`. **Transitive trust (user requirement — "add a person only one of us knows"):** accept a
+group message iff the sender is a MUTUAL FAVORITE **or** already a STORED member (introduced earlier by a mutual
+favorite); a cold stranger is dropped BEFORE any registry write; PLUS a MANDATORY `computeGroupId(parsed members)
+== bg groupId` integrity check so membership is immutable-per-thread (nobody can silently expand the roster to
+inject an eavesdropper). **Increments:** 1 = transport (`69c41aa`, console-only); 2a = trust gate + member identity
+(`bgm` tags) + receipt suppression + `BitchatMessage.senderNostrPubkey` (`0c52fb7`); 2b = the Simple UI —
+`SimpleTarget.Group`, group list from the registry, `AddPeopleSheet`, sender-names-in-group-bubbles, wallet-request
+hidden in groups (`5867a15`, ALSO fixed a pre-existing data-loss bug: `PrivateChatManager.consolidateNostrTemp…`
+swept `nostr_grp_` keys into a 1:1 on send → excluded them); **2c = tap-a-member-name → Add as an npub-only contact
++ the account-DM routing fix (`3b13d5b`) — Increment 2 COMPLETE.** Key files: `nostr/{NostrGroupRegistry,KnownNpubStore}.kt`, `NostrProtocol.{createPrivateMessage
+(additionalRumorTags),decryptPrivateMessageRumor}`, `NostrTransport.{sendGroupMessage,sendPrivateMessageToPubkey}`,
+`NostrDirectMessageHandler.onGiftWrap` (the gate) + `parseGroupMembers`, `services/MessageRouter.sendPrivate` (group
+branch + the account-DM routing), `ui/ChatViewModel.startNostrGroup`, `profile/ui/SimpleModeScreen` (all group UI).
+
+**⭐ MONEY-SAFETY RULE (do not break):** tap-to-add writes ONLY to `KnownNpubStore` (npub→name) + `GeohashAliasRegistry`
++ `repo.nostrKeyMapping`, **NEVER a FavoriteRelationship** — a fabricated 32-byte Noise key would poison the Dogecoin
+broadcast-helper mutual-favorite gate AND the new group trust gate. A tap-added contact can 1:1 Nostr-DM + appears in
+the list but is NOT a verified favorite (upgrade still needs the signed QR). **ROUTING FIX in 2c (design had it wrong):**
+a non-favorite `nostr_<hex16>` alias returns false from `canSendViaNostr`, so `MessageRouter.sendPrivate` now routes a
+known-alias with NO source geohash via the new `sendPrivateMessageToPubkey` (account-identity NIP-17 to the raw pubkey);
+also fixes replying to any received non-favorite Nostr 1:1.
+
+### Other Simple work SHIPPED this session (all on `simple-family-profile`, pushed)
+- **DM persistence + display fix (`d52844e`):** chat history now SURVIVES a process kill — `services/AppStateStore`
+  persists private+channel messages to `filesDir/chat_history_v1.json` (flat Gson DTO — preserves type/deliveryStatus,
+  no size cap; atomic temp-file+rename under a lock; loaded in `BitchatApplication.onCreate`). AND the Simple DM screen
+  now reads the UNION of the `nostr_<pub16>` alias + the contact's Noise key + the app's canonical `selectedPrivateChatPeer`
+  (the app files a contact under different keys per transport) so sent/mesh/consolidated messages all show.
+- **On-device friction fixes (`bc87d42`):** IME padding so the keyboard no longer hides the send button; a "Copy my
+  code" text button on the QR "My code" tab (camera-less relatives paste it); **invoice-in-chat** — a request-DOGE icon
+  posts a `dogecoin:` URI that renders as a tappable Pay card opening the locked wallet prefilled (net-locked so a
+  cross-network invoice can't switch the Simple wallet's network).
+- **P5 polish (`4a3c888`):** reactive contacts (FavoritesChangeListener), an honest 3-state Tor "punch-through" banner
+  (offline/suggest-Tor/tor-on) driven by `NostrRelayManager.isConnected` + `rememberHasInternet()`, and a discoverable
+  Power→Simple card in the AboutSheet.
+
+### Curation + design notes (steer future Simple work)
+- **CURATION PRINCIPLE:** expose only cosmetic/safe-opt-in settings; LOCK + HIDE anything that could stop two people
+  talking (proof-of-work, relays, network selector, mesh/node internals). A non-tech user can't break their own chat.
+- **Media stays lean (text + Dogecoin-request) ON PURPOSE** — large media over BLE mesh is bandwidth-prohibitive; if
+  ever added it'd be Nostr-only, never mesh. Not a gap.
+- Simple is now **people-first** (favorites + tap-added contacts + private groups), no public channel at all.
+
+### REMAINING after 2c
+1. **On-device 2–3-phone group test** — PARTIALLY EVIDENCED (2026-07-01 session): the tablet's `nostr_grp_0419e835c7d1c05f`
+   holds real traffic from all THREE devices (blueberry ×3, pineapple ×1, googlepad/tablet ×1), so 3-member fan-out +
+   receive + sender-name bubbles are proven on the tablet side. STILL NEEDED (blocked on plugging in the S24 + Pixel 3):
+   the full interactive pass — create a group via UI (1:1 → PersonAdd → pick members), send both ways observed on EACH
+   device, tap an unknown member's name → Add, and the notification-raise + tap-to-open-thread on a receiving phone.
+   Console drivers: `nostr-id`, `group-send <hex1,hex2,…> <msg>`, `group-show`.
+2. ~~Verify the DM-history persistence + union display~~ ✅ **DONE (2026-07-01, tablet, build `bf3d253`):** reinstall
+   (process kill) → relaunch → `chat_history_v1.json` (group + 1:1 alias + mesh-peerID buckets) reloaded; `group-show`
+   returned all 5 messages and the Simple UI rendered the full Family-group thread (sender names + own green bubble).
+3. Deferred/optional: per-member group DELIVERED/READ receipts (2a suppresses them for group keys); group subject/naming
+   UX; the address-search idea (geocode→geohash — superseded by the private group but still capturable).
+
+### Operational state
+- **Devices (all arm64, debug app `com.bitchat.droid.debug`, PIN 5555):** Pixel 3 `89VX0HPX1`, Galaxy S24
+  `RFCX81GNBRE`, **Pixel Tablet `47251HFH807FLS`**. **Tablet is on HEAD `bf3d253` (verified reinstall 2026-07-01),
+  in SIMPLE profile (tor=OFF pow=false channel=Mesh), all 4 Nostr relays UP over clearnet; S24 + Pixel 3 were NOT
+  connected — install `bf3d253` on them when plugged in (last known: S24 on `3b13d5b` from 06-30, i.e. WITHOUT the
+  two notification fixes; Pixel 3 older still).**
+  Install: `adb -s <serial> install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` then
+  `adb -s <serial> shell monkey -p com.bitchat.droid.debug -c android.intent.category.LAUNCHER 1`.
+- **Simple UI access:** app relaunch → onboarding may show the Power/Simple picker on a fresh install; or Power→Simple
+  via app title → App Info → "Simple (Family) mode".
+- **GitNexus:** the workspace index (`C:/Users/rober/Downloads/Projects/.gitnexus`, name "Projects") was reindexed
+  earlier this session (`indexedAt` 2026-06-30) but goes stale after each commit; `npx gitnexus analyze` from the
+  workspace root refreshes it (slow — spans the whole multi-project tree).
+
+---
+
+## 📦 HISTORICAL — Dogecoin wallet handoff (now MERGED to `main` via PR #1)
+
+> Everything below predates the Dogecoin merge + the Simple-profile work. Kept for context; HEADs/branches
+> referenced below are historical (the `dogecoin-m2-pay-nickname` branch was merged to `main`).
+
+### Pre-Simple Dogecoin handoff (HEAD `1f5e301`, branch `dogecoin-m2-pay-nickname`)
 
 **Both phones (Pixel 3 `89VX0HPX1` + S24 `RFCX81GNBRE`) are on the latest build (`1f5e301`), testnet/SPV/Tor.**
 
@@ -551,6 +963,11 @@ reannounce`. **Mainnet money-path commands HARD-REFUSE; WIF/keys never logged.**
 sync/balance + SPV-vs-node cross-check commands here as the soak surface.)
 
 ## Local Dogecoin Node (testnet)
+
+> **SUPERSEDED FOR NEW WORK:** The 2026-07-10 section at the top is authoritative. Do not reuse the broad LAN
+> `rpcbind`/`rpcallowip` example below. Prefer loopback Core behind Tailscale Serve, or an exact-interface,
+> firewall-restricted, explicit testnet-only local setup after the RPC guardrails land.
+
 ```text
 "C:\Program Files\Dogecoin\dogecoin-qt.exe" -testnet            # RPC 127.0.0.1:44555 (P2P 44556)
 "C:\Program Files\Dogecoin\daemon\dogecoin-cli.exe" -testnet <cmd>

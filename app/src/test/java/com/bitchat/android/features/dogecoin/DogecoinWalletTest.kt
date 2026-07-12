@@ -1064,6 +1064,110 @@ class DogecoinWalletTest {
     }
 
     @Test
+    fun `review send readiness mirrors the effective backend`() {
+        // Built-in remains locked while unsynced; a ready node cannot unlock it unless assist changes the
+        // effective backend to RPC.
+        assertFalse(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = false,
+                nodeReady = true
+            )
+        )
+        assertTrue(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.SPV,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+
+        // Effective RPC covers both a persisted node backend and session-only home-node assist.
+        assertTrue(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = false,
+                nodeReady = true
+            )
+        )
+        assertFalse(
+            canReviewDogecoinSend(
+                effectiveBackend = DogecoinBackend.RPC,
+                spvSynced = true,
+                nodeReady = false
+            )
+        )
+    }
+
+    @Test
+    fun `confirmation progress source mirrors the effective backend`() {
+        assertEquals(
+            DogecoinConfirmationProgressSource.SPV,
+            dogecoinConfirmationProgressSource(DogecoinBackend.SPV)
+        )
+        assertEquals(
+            DogecoinConfirmationProgressSource.RPC,
+            dogecoinConfirmationProgressSource(DogecoinBackend.RPC)
+        )
+        assertEquals(
+            DogecoinConfirmationProgressSource.RPC,
+            dogecoinConfirmationProgressSource(DogecoinBackend.EXPLORER)
+        )
+    }
+
+    @Test
+    fun `confirmation ring visibility preserves SPV gate but not for RPC assist`() {
+        assertTrue(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.RPC,
+                hasActiveReceipt = true,
+                confirmationDepth = 0,
+                spvSyncedOrNearTip = false
+            )
+        )
+        assertFalse(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.SPV,
+                hasActiveReceipt = true,
+                confirmationDepth = 1,
+                spvSyncedOrNearTip = false
+            )
+        )
+        assertTrue(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.SPV,
+                hasActiveReceipt = true,
+                confirmationDepth = 1,
+                spvSyncedOrNearTip = true
+            )
+        )
+        assertFalse(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.RPC,
+                hasActiveReceipt = false,
+                confirmationDepth = 1,
+                spvSyncedOrNearTip = false
+            )
+        )
+        assertFalse(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.RPC,
+                hasActiveReceipt = true,
+                confirmationDepth = null,
+                spvSyncedOrNearTip = false
+            )
+        )
+        assertFalse(
+            shouldShowDogecoinConfirmingRing(
+                effectiveBackend = DogecoinBackend.RPC,
+                hasActiveReceipt = true,
+                confirmationDepth = DOGECOIN_SPV_CONFIRM_TARGET,
+                spvSyncedOrNearTip = false
+            )
+        )
+    }
+
+    @Test
     fun `signed mainnet transaction export requires mainnet acknowledgement`() {
         val transaction = signedMainnetTransaction()
         val nowMillis = transaction.createdAtMillis

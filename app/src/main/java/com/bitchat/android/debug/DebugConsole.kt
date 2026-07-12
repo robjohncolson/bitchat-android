@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import java.util.concurrent.Executors
 
 /**
  * Debug-only command surface, driven from a host machine over adb:
@@ -20,6 +21,12 @@ import android.util.Log
 object DebugConsole {
     const val TAG = "DbgConsole"
 
+    // BroadcastReceiver.onReceive runs on the main thread. Keep commands serialized, but run their potentially
+    // blocking work (notably SPV start/stop) after the receiver has returned so lock contention cannot cause ANR.
+    private val commandExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "bitchat-debug-console").apply { isDaemon = true }
+    }
+
     interface Host {
         /** Run [cmd] with [args]; return human-readable output. Async work may log under [TAG] itself. */
         fun handle(cmd: String, args: List<String>): String
@@ -31,6 +38,10 @@ object DebugConsole {
 
     /** Compare-and-clear so a newer ViewModel that already re-registered is not clobbered. */
     fun clearHostIfCurrent(h: Host?) { if (host === h) host = null }
+
+    internal fun dispatchFromReceiver(raw: String?) {
+        commandExecutor.execute { dispatch(raw) }
+    }
 
     fun dispatch(raw: String?) {
         val line = raw?.trim().orEmpty()
@@ -56,6 +67,8 @@ object DebugConsole {
 /** Component-targeted via `am broadcast -n …`; exported only in the debug manifest. */
 class DebugCommandReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        DebugConsole.dispatch(intent.getStringExtra("cmd"))
+        // Deliberately do not hold a goAsync PendingResult: a contended SPV stop may outlive Android's broadcast
+        // timeout. The process-wide serial executor preserves command/log ordering without holding the receiver.
+        DebugConsole.dispatchFromReceiver(intent.getStringExtra("cmd"))
     }
 }

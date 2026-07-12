@@ -56,33 +56,9 @@ data class DogecoinRpcConfig(
         }
     }
 
-    private fun isAllowedCleartextRpcHost(host: String): Boolean {
-        val normalizedHost = host.trim().lowercase().trimEnd('.')
-        if (normalizedHost == "localhost" || normalizedHost.endsWith(".local")) return true
-        if (!normalizedHost.contains(".") && !normalizedHost.contains(":")) return true
-        return isPrivateIpv4Host(normalizedHost) || isPrivateIpv6Host(normalizedHost)
-    }
-
-    private fun isPrivateIpv4Host(host: String): Boolean {
-        val octets = host.split(".").map { it.toIntOrNull() ?: return false }
-        if (octets.size != 4 || octets.any { it !in 0..255 }) return false
-        return when {
-            octets[0] == 10 -> true
-            octets[0] == 127 -> true
-            octets[0] == 169 && octets[1] == 254 -> true
-            octets[0] == 172 && octets[1] in 16..31 -> true
-            octets[0] == 192 && octets[1] == 168 -> true
-            else -> false
-        }
-    }
-
-    private fun isPrivateIpv6Host(host: String): Boolean {
-        val normalizedHost = host.removeSurrounding("[", "]")
-        return normalizedHost == "::1" ||
-            normalizedHost.startsWith("fc") ||
-            normalizedHost.startsWith("fd") ||
-            normalizedHost.startsWith("fe80:")
-    }
+    // Syntax-level cleartext guard only. Endpoint TRUST (probes, assist, whether RPC I/O may happen at
+    // all) is decided by classifyDogecoinRpcEndpoint, which shares this host predicate.
+    private fun isAllowedCleartextRpcHost(host: String): Boolean = isPrivateOrLocalDogecoinRpcHost(host)
 
     private fun normalizedWalletName(): String {
         return walletName.trim().trim('/')
@@ -204,7 +180,10 @@ class DogecoinWalletRepository(context: Context) {
      * and independently of testnet/regtest, so running a testnet helper never silently relays mainnet.
      */
     fun loadHelperEnabled(network: DogecoinNetwork): Boolean {
-        return prefs.getBoolean(helperEnabledKey(network), false)
+        if (!prefs.getBoolean(helperEnabledKey(network), false)) return false
+        // The signed NODE_HELPER advert and helper request gate both call this method. An opt-in flag
+        // therefore becomes active only while its saved RPC origin passes the same central route policy.
+        return classifyDogecoinRpcEndpoint(loadRpcConfig(network).url).isTrustedRpcRoute
     }
 
     fun saveHelperEnabled(network: DogecoinNetwork, enabled: Boolean) {
@@ -231,13 +210,12 @@ class DogecoinWalletRepository(context: Context) {
      * soft default back to RPC. NOT persisted — it is recomputed each open from the current node config.
      */
     fun resolveBackend(network: DogecoinNetwork): DogecoinBackend {
-        val saved = prefs.getString(backendKey(network), null)
-        if (saved != null) {
-            return runCatching { DogecoinBackend.valueOf(saved) }.getOrDefault(DogecoinBackend.RPC)
-        }
-        return defaultBackend(
-            noNodeConfigured = loadRpcConfig(network).url.isBlank(),
-            spvCheckpointShipped = spvCheckpointAssetShipped(network)
+        val rpcUrl = loadRpcConfig(network).url
+        return resolveDogecoinBackend(
+            savedBackendName = prefs.getString(backendKey(network), null),
+            nodeConfigured = rpcUrl.isNotBlank(),
+            nodeEndpointTrusted = classifyDogecoinRpcEndpoint(rpcUrl).isTrustedRpcRoute,
+            spvAvailable = spvCheckpointAssetShipped(network)
         )
     }
 
@@ -443,6 +421,33 @@ class DogecoinWalletRepository(context: Context) {
         return updatedAddresses
     }
 
+    /**
+     * Atomically reserves [txid] for one outgoing structured payment receipt on [network]. Callers may
+     * send the receipt only when this returns true. The synchronous commit deliberately happens before
+     * that send, so a process death cannot reopen the same txid for a duplicate receipt.
+     *
+     * The lock is process-wide (rather than repository-instance-local) because wallet sheets and the chat
+     * ViewModel may hold different repository instances. Invalid/non-canonical txids and storage failures
+     * fail closed without authorizing a send.
+     */
+    fun reserveOutgoingPaymentReceipt(network: DogecoinNetwork, txid: String): Boolean {
+        if (!OUTGOING_PAYMENT_RECEIPT_TXID_REGEX.matches(txid)) return false
+
+        return synchronized(OUTGOING_PAYMENT_RECEIPT_RESERVATION_LOCK) {
+            runCatching {
+                val key = outgoingPaymentReceiptTxidsKey(network)
+                val reserved = prefs.getStringSet(key, emptySet()).orEmpty().toSet()
+                if (txid in reserved) {
+                    false
+                } else {
+                    prefs.edit()
+                        .putStringSet(key, reserved + txid)
+                        .commit()
+                }
+            }.getOrDefault(false)
+        }
+    }
+
     fun resetWallet(network: DogecoinNetwork): DogecoinWalletSnapshot {
         val editor = prefs.edit()
             .remove(privateKeyKey(network))
@@ -558,6 +563,9 @@ class DogecoinWalletRepository(context: Context) {
     }
 
     private companion object {
+        val OUTGOING_PAYMENT_RECEIPT_RESERVATION_LOCK = Any()
+        val OUTGOING_PAYMENT_RECEIPT_TXID_REGEX = Regex("^[0-9a-f]{64}$")
+
         const val PREFS_NAME = "dogecoin_wallet"
         const val LEGACY_PREFS_NAME = "dogecoin_testnet_wallet"
         const val KEY_LEGACY_PREFS_MIGRATED = "legacy_testnet_prefs_migrated"
@@ -589,6 +597,8 @@ class DogecoinWalletRepository(context: Context) {
         fun wifCopyAddressKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_address"
         fun wifCopyAtKey(network: DogecoinNetwork): String = "${network.id}_wif_copy_at"
         fun addressBookKey(network: DogecoinNetwork): String = "${network.id}_address_book"
+        fun outgoingPaymentReceiptTxidsKey(network: DogecoinNetwork): String =
+            "${network.id}_outgoing_payment_receipt_txids"
         fun onChainCorroborationKey(network: DogecoinNetwork): String = "${network.id}_onchain_corroboration_enabled"
         fun explorerUrlKey(network: DogecoinNetwork): String = "${network.id}_explorer_url_template"
     }
@@ -601,6 +611,33 @@ class DogecoinWalletRepository(context: Context) {
     private fun legacyTestnetString(network: DogecoinNetwork, key: String): String? {
         return if (network == DogecoinNetwork.TESTNET) prefs.getString(key, null) else null
     }
+}
+
+/**
+ * Pure backend resolution (guardrail slice): which backend serves the wallet for a network, given the
+ * user's saved choice and the trust classification of the configured node endpoint.
+ *
+ *  - A saved RPC choice pointing at an UNTRUSTED endpoint (unverified public HTTPS, .onion, invalid)
+ *    resolves to Built-in SPV — the untrusted node is never probed or used.
+ *  - A malformed saved value falls through to the soft default instead of silently meaning "RPC".
+ *  - Soft default (no saved choice): a configured-but-untrusted node resolves to Built-in; with no node,
+ *    Built-in is selected when SPV is practical (a checkpoint asset ships), otherwise RPC.
+ */
+internal fun resolveDogecoinBackend(
+    savedBackendName: String?,
+    nodeConfigured: Boolean,
+    nodeEndpointTrusted: Boolean,
+    spvAvailable: Boolean
+): DogecoinBackend {
+    val saved = savedBackendName?.let { name -> runCatching { DogecoinBackend.valueOf(name) }.getOrNull() }
+    // An explicit RPC choice must not remain resolved when its route is ineligible. Fail closed to the
+    // built-in backend even without a recent checkpoint; an untrusted origin never becomes eligible just
+    // because SPV may be slower (or unsupported on regtest until the user fixes the node URL).
+    if (saved == DogecoinBackend.RPC && !nodeEndpointTrusted) return DogecoinBackend.SPV
+    if (saved != null) return saved
+    if (nodeConfigured && !nodeEndpointTrusted) return DogecoinBackend.SPV
+    val usableNodeConfigured = nodeConfigured && nodeEndpointTrusted
+    return if (!usableNodeConfigured && spvAvailable) DogecoinBackend.SPV else DogecoinBackend.RPC
 }
 
 internal fun dogecoinNetworkForStoredSelection(

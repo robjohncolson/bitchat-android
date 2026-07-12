@@ -69,7 +69,10 @@ data class BitchatMessage(
     val encryptedContent: ByteArray? = null,
     val isEncrypted: Boolean = false,
     val deliveryStatus: DeliveryStatus? = null,
-    val powDifficulty: Int? = null
+    val powDifficulty: Int? = null,
+    // Account pubkey (hex) of the individual sender of a GROUP message, set on the Nostr group-receive path
+    // for tap-to-add discovery. Null for 1:1 DMs and everything else; never serialized to the binary wire.
+    val senderNostrPubkey: String? = null
 ) : Parcelable {
 
     /**

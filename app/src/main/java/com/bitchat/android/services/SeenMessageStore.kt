@@ -50,6 +50,22 @@ class SeenMessageStore private constructor(private val context: Context) {
         persist()
     }
 
+    /**
+     * Mark many ids read with a SINGLE persist() at the end. Opening a conversation marks every message in it
+     * read; doing that one-by-one meant one full serialize + encrypted write PER message on the caller's
+     * thread (hundreds of encrypted writes to open a busy thread — the dominant "chat is slow to open" cost).
+     * Same LRU + trim semantics as [markRead], collapsed to one write.
+     */
+    @Synchronized fun markReadBulk(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        var added = false
+        for (id in ids) {
+            if (read.remove(id)) read.add(id) else { read.add(id); added = true }
+        }
+        if (added) trim(read)
+        persist()
+    }
+
     @Synchronized fun clear() {
         delivered.clear()
         read.clear()

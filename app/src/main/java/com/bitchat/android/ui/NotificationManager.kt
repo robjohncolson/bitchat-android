@@ -144,19 +144,48 @@ class NotificationManager(
      * Show a notification for a private message with proper grouping and state awareness
      */
     fun showPrivateMessageNotification(senderPeerID: String, senderNickname: String, messageContent: String) {
+        // Display-time resolve (spec Workstream A): favorite pet-name wins over "anon"/announced nick.
+        // Covers mesh FG notifications, MeshDelegateHandler, and Nostr paths in one place.
+        val familyFallback = try {
+            context.getString(com.bitchat.android.R.string.simple_family_fallback)
+        } catch (_: Exception) {
+            "Family"
+        }
+        val resolvedNickname = try {
+            // Group banners may be "Alice · Family" — resolve the member segment, keep the subject suffix.
+            val sep = " · "
+            val baseNick = senderNickname.substringBefore(sep).ifBlank { senderNickname }
+            val subjectSuffix = if (senderNickname.contains(sep)) {
+                sep + senderNickname.substringAfter(sep)
+            } else ""
+            val display = com.bitchat.android.profile.ContactDisplayName.resolveLive(
+                identity = com.bitchat.android.profile.ContactDisplayName.Identity(
+                    convKey = senderPeerID.takeIf { it.startsWith("nostr_") && !it.startsWith("nostr_grp_") },
+                    meshPeerId = senderPeerID.takeIf { it.length == 16 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } },
+                    noiseKeyHex = senderPeerID.takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+                ),
+                messageSenderFallback = baseNick,
+                familyFallback = familyFallback
+            ).display
+            display + subjectSuffix
+        } catch (_: Exception) {
+            senderNickname.takeIf { !com.bitchat.android.profile.ContactDisplayName.isBannedToken(it) }
+                ?: familyFallback
+        }
+
         // Only show notifications if app is in background OR user is not viewing this specific chat
         val shouldNotify = isAppInBackground || (!isAppInBackground && currentPrivateChatPeer != senderPeerID)
         
         if (!shouldNotify) {
-            Log.d(TAG, "Skipping notification - app in foreground and viewing chat with $senderNickname")
+            Log.d(TAG, "Skipping notification - app in foreground and viewing chat with $resolvedNickname")
             return
         }
 
-        Log.d(TAG, "Showing notification for message from $senderNickname (peerID: $senderPeerID)")
+        Log.d(TAG, "Showing notification for message from $resolvedNickname (peerID: $senderPeerID)")
 
         val notification = PendingNotification(
             senderPeerID = senderPeerID,
-            senderNickname = senderNickname,
+            senderNickname = resolvedNickname,
             messageContent = messageContent,
             timestamp = System.currentTimeMillis()
         )
