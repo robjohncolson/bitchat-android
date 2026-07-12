@@ -80,7 +80,7 @@ while UI stayed on Syncing / empty balance; height can stall ~1k behind tip with
 process-owned SPV can lag a network switch.
 
 ```text
-SPV-BALANCE-REFRESH   Always re-pull SPV balance; fix misleading "0 behind" (Codex first)
+SPV-BALANCE-REFRESH   DONE — re-pull SPV balance; honest behind labels
 SPV-NETWORK-REBIND    Network switch must stop old SPV and start correct chain (Codex second)
 ```
 
