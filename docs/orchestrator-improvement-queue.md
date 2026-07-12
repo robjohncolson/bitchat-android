@@ -94,7 +94,8 @@ Plan: **`docs/des1-implementation-plan.md`**
 DES-1-DECISIONS   DONE
 DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
 DES-1-A           DONE — TPN profile + ceremony (no spend)
-DES-1-B           NEXT — Activation + readiness + read-only display (Codex)
+DES-1-B           DONE — Activation + readiness + read-only display
+DES-1-C           NEXT — Proof-backed UTXO / prev-tx (Codex)
 DES-1-C           Proof-backed UTXO / prev-tx
 DES-1-D           Send coordinator (first TPN spend unlock)
 DES-1-E           Settlement + dispute + SPV-6
@@ -296,6 +297,14 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Done means:** origin/state unit tests; suite green; describe UI surfaces.  
 **Out of scope:** activation reads (B), proofs (C), send (D).
 **Status:** DONE.
+
+---
+
+### DES-1-B — TPN activation + read-only display
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-implementation-plan.md` § DES-1-B  
+**Status:** DONE — process session, readiness, provenance UI; no spend unlock.
 
 ---
 

@@ -128,6 +128,51 @@ internal data class DogecoinTrustedPersonalNodeProvisioningResult(
     val watchStatus: DogecoinAddressWatchStatus
 )
 
+/**
+ * Display-only DES-1-B balance. This deliberately does not expose the node's UTXO rows, so a
+ * node-reported balance cannot accidentally enter coin selection before DES-1-C proof support exists.
+ */
+internal data class DogecoinTrustedPersonalNodeDisplayBalance(
+    val confirmedKoinu: Long,
+    val unconfirmedKoinu: Long,
+    val utxoCount: Int
+) {
+    init {
+        require(confirmedKoinu >= 0L) { "Confirmed trusted-node balance must be non-negative." }
+        require(unconfirmedKoinu >= 0L) { "Unconfirmed trusted-node balance must be non-negative." }
+        require(utxoCount >= 0) { "Trusted-node UTXO count must be non-negative." }
+    }
+
+    val totalKoinu: Long
+        get() = dogecoinSaturatingAddKoinu(confirmedKoinu, unconfirmedKoinu)
+}
+
+/**
+ * One fixed, read-only DES-1-B result. Freshness is attached by the in-memory session with the phone's
+ * monotonic clock; no node timestamp is allowed to decide whether this snapshot is fresh.
+ */
+internal data class DogecoinTrustedPersonalNodeDisplaySnapshot(
+    val profileRevision: Long,
+    val origin: String,
+    val androidAddress: String,
+    val coreWalletId: String,
+    val blocks: Int,
+    val headers: Int,
+    val verificationProgress: Double,
+    val peerCount: Int,
+    val balance: DogecoinTrustedPersonalNodeDisplayBalance,
+    val activity: List<DogecoinWalletActivity>
+)
+
+/** HTTP status is retained so the TPN session can distinguish 401/403 from route/node degradation. */
+internal class DogecoinRpcHttpException(
+    val statusCode: Int,
+    message: String
+) : IllegalStateException(message)
+
+internal fun Throwable.isDogecoinRpcAuthenticationFailure(): Boolean =
+    this is DogecoinRpcHttpException && (statusCode == 401 || statusCode == 403)
+
 data class DogecoinMempoolAcceptance(
     val checked: Boolean,
     val allowed: Boolean?,
@@ -400,6 +445,242 @@ class DogecoinRpcClient private constructor(
                 isWatchOnly = isWatchOnly
             )
         )
+    }
+
+    /**
+     * DES-1-B's fixed readiness-and-display workflow. It intentionally does not reuse the generic wallet
+     * balance/activity APIs because those ensure an import with `importaddress`. The authorized profile
+     * already attests that its historical import/rescan was completed at the host console, and activation
+     * rechecks the exact watch-only binding here without mutating Core.
+     *
+     * The only possible RPC methods are the literal calls visible below plus fixed `help` capability checks
+     * for `testmempoolaccept` and the two approved previous-transaction sources. No caller can supply a
+     * method name, transaction, outpoint, count, address, network, origin, or wallet that differs from the
+     * durable profile.
+     */
+    internal suspend fun readTrustedPersonalNodeDisplaySnapshot(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials
+    ): DogecoinTrustedPersonalNodeDisplaySnapshot = withContext(Dispatchers.IO) {
+        require(isValidDogecoinTrustedPersonalNodeProfile(profile)) {
+            "Trusted personal node profile is invalid or no longer authorized."
+        }
+        require(profile.network == DogecoinNetwork.MAINNET) {
+            "Trusted personal node reads are mainnet-only."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node RPC credentials are unavailable."
+        }
+
+        val config = DogecoinRpcConfig(
+            url = profile.origin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = profile.coreWalletId
+        )
+
+        val blockchainInfo = callObject(config.copy(walletName = ""), "getblockchaininfo")
+        val chain = requiredExactString(blockchainInfo, "chain", "getblockchaininfo")
+        require(chain == DogecoinNetwork.MAINNET.chainName) {
+            "Trusted personal node is on $chain, expected Dogecoin mainnet."
+        }
+        val initialBlockDownload = parseOptionalBoolean(
+            blockchainInfo,
+            "initialblockdownload",
+            "getblockchaininfo"
+        ) ?: throw IllegalArgumentException(
+            "RPC getblockchaininfo did not report initialblockdownload."
+        )
+        require(!initialBlockDownload) {
+            "Trusted personal node is still in initial block download."
+        }
+        val blocks = parseOptionalNonNegativeInt(blockchainInfo, "blocks", "getblockchaininfo")
+            ?: throw IllegalArgumentException("RPC getblockchaininfo did not report blocks.")
+        val headers = parseOptionalNonNegativeInt(blockchainInfo, "headers", "getblockchaininfo")
+            ?: throw IllegalArgumentException("RPC getblockchaininfo did not report headers.")
+        require(headers >= blocks) {
+            "RPC getblockchaininfo returned headers below the current block height."
+        }
+        require(headers - blocks <= DOGECOIN_TPN_MAX_BLOCK_HEADER_LAG) {
+            "Trusted personal node is more than $DOGECOIN_TPN_MAX_BLOCK_HEADER_LAG blocks behind its headers."
+        }
+        val verificationProgress = parseOptionalProgressFraction(
+            blockchainInfo,
+            "verificationprogress",
+            "getblockchaininfo"
+        ) ?: throw IllegalArgumentException(
+            "RPC getblockchaininfo did not report verificationprogress."
+        )
+        require(verificationProgress >= DOGECOIN_TPN_MIN_VERIFICATION_PROGRESS) {
+            "Trusted personal node verification progress is below the activation threshold."
+        }
+
+        val networkInfo = callObject(config.copy(walletName = ""), "getnetworkinfo")
+        val networkActive = parseOptionalBoolean(networkInfo, "networkactive", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report networkactive.")
+        require(networkActive) { "Trusted personal node networking is disabled." }
+        val peerCount = parseOptionalNonNegativeInt(networkInfo, "connections", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report connections.")
+        require(peerCount >= DOGECOIN_TPN_MIN_MAINNET_PEERS) {
+            "Trusted personal node has $peerCount peers; at least $DOGECOIN_TPN_MIN_MAINNET_PEERS are required."
+        }
+
+        val walletInfo = callObject(config, "getwalletinfo")
+        val returnedWalletId = requiredExactCoreWalletId(walletInfo)
+        require(returnedWalletId == profile.coreWalletId) {
+            "Trusted personal node returned a different Core wallet identity."
+        }
+        // Dogecoin Core versions that expose `scanning` report false when no rescan is active and an
+        // object while scanning. Older versions may omit it, so the durable operator attestation plus
+        // the mandatory watch-only recheck remains the v1 rescan-completion gate.
+        walletInfo.get("scanning")?.takeUnless { it.isJsonNull }?.let { scanning ->
+            val primitive = scanning.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+            require(primitive?.isBoolean == true && !primitive.asBoolean) {
+                "Trusted personal node wallet reports an active or malformed rescan state."
+            }
+        }
+
+        val validateAddress = callObject(
+            config,
+            "validateaddress",
+            JsonArray().apply { add(profile.androidAddress) }
+        )
+        requireExactTrustedPersonalNodeWatchStatus(validateAddress, profile.androidAddress)
+
+        require(isRpcMethodAvailable(config.copy(walletName = ""), "testmempoolaccept")) {
+            "Trusted personal node does not provide testmempoolaccept."
+        }
+        val walletPreviousTransactionAvailable =
+            isRpcMethodAvailable(config.copy(walletName = ""), "gettransaction")
+        val rawPreviousTransactionAvailable = walletPreviousTransactionAvailable ||
+            isRpcMethodAvailable(config.copy(walletName = ""), "getrawtransaction")
+        require(rawPreviousTransactionAvailable) {
+            "Trusted personal node does not provide an approved previous-transaction RPC."
+        }
+
+        val utxos = readTrustedPersonalNodeUnspent(config, profile)
+        val activity = readTrustedPersonalNodeActivity(config, profile)
+        DogecoinTrustedPersonalNodeDisplaySnapshot(
+            profileRevision = profile.revision,
+            origin = profile.origin,
+            androidAddress = profile.androidAddress,
+            coreWalletId = profile.coreWalletId,
+            blocks = blocks,
+            headers = headers,
+            verificationProgress = verificationProgress,
+            peerCount = peerCount,
+            balance = DogecoinTrustedPersonalNodeDisplayBalance(
+                confirmedKoinu = sumRpcUtxoAmounts(
+                    utxos.filter { it.confirmations > 0 },
+                    "confirmed trusted-node"
+                ),
+                unconfirmedKoinu = sumRpcUtxoAmounts(
+                    utxos.filter { it.confirmations <= 0 },
+                    "unconfirmed trusted-node"
+                ),
+                utxoCount = utxos.size
+            ),
+            activity = activity
+        )
+    }
+
+    private fun requiredExactCoreWalletId(walletInfo: JsonObject): String {
+        return requiredExactString(walletInfo, "walletname", "getwalletinfo").also { walletId ->
+            require(canonicalDogecoinTrustedPersonalNodeWalletIdOrNull(walletId) == walletId) {
+                "RPC getwalletinfo returned a non-canonical walletname."
+            }
+        }
+    }
+
+    private fun requireExactTrustedPersonalNodeWatchStatus(result: JsonObject, address: String) {
+        val isValid = parseOptionalBoolean(result, "isvalid", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report isvalid.")
+        require(isValid) { "Dogecoin Core rejected the bound Android mainnet address." }
+        val returnedAddress = requiredExactString(result, "address", "validateaddress")
+        require(returnedAddress == address) {
+            "RPC validateaddress returned a different Dogecoin address."
+        }
+        val isMine = parseOptionalBoolean(result, "ismine", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report ismine.")
+        val isWatchOnly = parseOptionalBoolean(result, "iswatchonly", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report iswatchonly.")
+        require(!isMine) {
+            "Trusted personal node reports ismine=true. The Android key must remain phone-only."
+        }
+        require(isWatchOnly) {
+            "Trusted personal node no longer reports the Android address as watch-only."
+        }
+    }
+
+    private fun readTrustedPersonalNodeUnspent(
+        config: DogecoinRpcConfig,
+        profile: DogecoinTrustedPersonalNodeProfile
+    ): List<DogecoinUtxo> {
+        val result = callElement(
+            config,
+            "listunspent",
+            JsonArray().apply {
+                add(0)
+                add(9_999_999)
+                add(JsonArray().apply { add(profile.androidAddress) })
+            }
+        )
+        require(result.isJsonArray) { "RPC listunspent response was not an array." }
+        return result.asJsonArray.map { element ->
+            require(element.isJsonObject) { "RPC listunspent returned a malformed UTXO row." }
+            parseListUnspentItem(element.asJsonObject, profile.androidAddress, profile.network)
+        }
+    }
+
+    private fun readTrustedPersonalNodeActivity(
+        config: DogecoinRpcConfig,
+        profile: DogecoinTrustedPersonalNodeProfile
+    ): List<DogecoinWalletActivity> {
+        val result = callElement(
+            config,
+            "listtransactions",
+            JsonArray().apply {
+                add("*")
+                add(DOGECOIN_TPN_ACTIVITY_SCAN_COUNT)
+                add(0)
+                add(true)
+            }
+        )
+        require(result.isJsonArray) { "RPC listtransactions response was not an array." }
+        return result.asJsonArray.mapNotNull { element ->
+            require(element.isJsonObject) {
+                "RPC listtransactions returned a malformed activity row."
+            }
+            val item = element.asJsonObject
+            if (exactListTransactionsAddressForFilter(item) != profile.androidAddress) {
+                return@mapNotNull null
+            }
+            parseListTransactionsItem(item, profile.network)
+        }
+            .sortedWith(
+                compareByDescending<DogecoinWalletActivity> { it.timeSeconds ?: Long.MIN_VALUE }
+                    .thenByDescending { it.confirmations }
+                    .thenBy { it.txid }
+            )
+            .take(DOGECOIN_TPN_ACTIVITY_DISPLAY_COUNT)
+    }
+
+    private fun requiredExactString(result: JsonObject, fieldName: String, method: String): String {
+        val element = result.get(fieldName)?.takeUnless { it.isJsonNull }
+            ?: throw IllegalArgumentException("RPC $method did not report $fieldName.")
+        val primitive = element.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+        require(primitive?.isString == true) {
+            "RPC $method returned an invalid $fieldName."
+        }
+        return primitive.asString.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("RPC $method returned an invalid $fieldName.")
+    }
+
+    private fun exactListTransactionsAddressForFilter(item: JsonObject): String? {
+        val value = item.get("address")?.takeUnless { it.isJsonNull } ?: return null
+        val primitive = value.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+        if (!primitive.isString) return null
+        return primitive.asString.takeIf { it.isNotBlank() }
     }
 
     suspend fun getWalletBalance(
@@ -1435,10 +1716,21 @@ class DogecoinRpcClient private constructor(
         if (cancelOnOwnerDispose) activeCalls.register(call)
         try {
             call.execute().use { response ->
-                // A redirect is a transport-policy failure regardless of attacker-controlled JSON content.
-                // Check it before reading/parsing so every 3xx has the same explicit non-following result.
-                if (response.code in 300..399) {
-                    throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
+                // Redirect and authentication status are transport-policy results regardless of body content.
+                // Check them before parsing so 3xx never forwards credentials and 401/403 stay typed.
+                if (response.code in 300..399 || response.code == 401 || response.code == 403) {
+                    throw DogecoinRpcHttpException(
+                        response.code,
+                        httpRpcErrorMessage(method, response.code, response.message)
+                    )
+                }
+                // Authentication status owns the TPN transition even if a proxy supplies attacker-controlled
+                // JSON or an oversized body. Do not let body parsing collapse 401/403 into generic degradation.
+                if (response.code == 401 || response.code == 403) {
+                    throw DogecoinRpcHttpException(
+                        response.code,
+                        httpRpcErrorMessage(method, response.code, response.message)
+                    )
                 }
                 val body = readBoundedRpcBody(response, method)
                 // Dogecoin Core returns JSON-RPC errors with HTTP 500 and the structured error in the
@@ -1451,7 +1743,10 @@ class DogecoinRpcClient private constructor(
                     throw IllegalStateException(rpcErrorMessage(method, error))
                 }
                 if (!response.isSuccessful) {
-                    throw IllegalStateException(httpRpcErrorMessage(method, response.code, response.message))
+                    throw DogecoinRpcHttpException(
+                        response.code,
+                        httpRpcErrorMessage(method, response.code, response.message)
+                    )
                 }
 
                 return json?.get("result") ?: JsonNull.INSTANCE
@@ -1651,6 +1946,11 @@ class DogecoinRpcClient private constructor(
 
     companion object {
         private val txidRegex = Regex("^[0-9a-f]{64}$")
+        internal const val DOGECOIN_TPN_MIN_MAINNET_PEERS = 4
+        internal const val DOGECOIN_TPN_MAX_BLOCK_HEADER_LAG = 2
+        internal const val DOGECOIN_TPN_MIN_VERIFICATION_PROGRESS = 0.999999
+        private const val DOGECOIN_TPN_ACTIVITY_DISPLAY_COUNT = 20
+        private const val DOGECOIN_TPN_ACTIVITY_SCAN_COUNT = 100
         private val walletRpcMethods = setOf(
             "getwalletinfo",
             "importaddress",

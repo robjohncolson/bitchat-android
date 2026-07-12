@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE — **DES-1-A DONE**; next **DES-1-B**  
+**Status:** ACTIVE — **DES-1-A/B DONE**; next **DES-1-C**  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -77,7 +77,7 @@ Codex (trust/policy).
 
 ---
 
-## DES-1-B — Activation + readiness + read-only display
+## DES-1-B — Activation + readiness + read-only display (DONE)
 
 ### Goal
 
