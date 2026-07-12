@@ -71,7 +71,7 @@ WALLET-OPEN-HARDEN  DONE — wallet open / SPV thrash
 SPV-IO-UNBLOCK      DONE — SPV start no longer blocks home-node RPC status
 ```
 
-### Wave 3 (ACTIVE) — mainnet SPV honesty
+### Wave 3 (DONE) — mainnet SPV honesty
 
 Full specs: **`docs/spv-ui-honesty-spec.md`**
 
@@ -81,7 +81,7 @@ process-owned SPV can lag a network switch.
 
 ```text
 SPV-BALANCE-REFRESH   DONE — re-pull SPV balance; honest behind labels
-SPV-NETWORK-REBIND    Network switch must stop old SPV and start correct chain (Codex second)
+SPV-NETWORK-REBIND    DONE — network switch rebinds SPV chain
 ```
 
 **Dependencies:** Prefer **SPV-BALANCE-REFRESH** first (UI refresh). **SPV-NETWORK-REBIND** next (lifecycle).

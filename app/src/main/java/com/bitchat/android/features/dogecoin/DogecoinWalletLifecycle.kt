@@ -32,5 +32,35 @@ internal class DogecoinWalletIoSession {
     suspend fun <T> serialized(block: suspend () -> T): T = mutex.withLock { block() }
 }
 
+/**
+ * Serializes ownership changes with SPV status publication without taking bitcoinj's lifecycle monitor from
+ * a PeerGroup callback. Each live PeerGroup gets a unique [owner] token. A delayed callback from a stopped or
+ * replaced group can still run after `PeerGroup.stopAsync()`, but it can no longer resurrect that group's
+ * network/running state after a rebind.
+ */
+internal class DogecoinSpvStatusPublicationGate {
+    private val lock = Any()
+    private var activeOwner: Any? = null
+
+    fun activate(owner: Any) = synchronized(lock) {
+        activeOwner = owner
+    }
+
+    fun deactivate(updateStoppedStatus: () -> Unit) = synchronized(lock) {
+        activeOwner = null
+        updateStoppedStatus()
+    }
+
+    fun isCurrent(owner: Any): Boolean = synchronized(lock) {
+        activeOwner === owner
+    }
+
+    fun publishIfCurrent(owner: Any, publish: () -> Unit): Boolean = synchronized(lock) {
+        if (activeOwner !== owner) return@synchronized false
+        publish()
+        true
+    }
+}
+
 internal const val DOGECOIN_WALLET_BOOTSTRAP_TIMEOUT_MS = 10_000L
 internal const val DOGECOIN_SPV_START_TIMEOUT_MS = 15_000L

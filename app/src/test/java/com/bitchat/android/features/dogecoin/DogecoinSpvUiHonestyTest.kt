@@ -102,4 +102,66 @@ class DogecoinSpvUiHonestyTest {
             )
         )
     }
+
+    @Test
+    fun `persisted SPV owns the selected supported chain while other backends stop it`() {
+        assertEquals(
+            DogecoinNetwork.TESTNET,
+            dogecoinSpvTargetNetwork(DogecoinBackend.SPV, DogecoinNetwork.TESTNET, supported = true)
+        )
+        assertEquals(
+            DogecoinNetwork.MAINNET,
+            dogecoinSpvTargetNetwork(DogecoinBackend.SPV, DogecoinNetwork.MAINNET, supported = true)
+        )
+        assertEquals(
+            null,
+            dogecoinSpvTargetNetwork(DogecoinBackend.RPC, DogecoinNetwork.TESTNET, supported = true)
+        )
+        assertEquals(
+            null,
+            dogecoinSpvTargetNetwork(DogecoinBackend.EXPLORER, DogecoinNetwork.MAINNET, supported = true)
+        )
+        assertEquals(
+            null,
+            dogecoinSpvTargetNetwork(DogecoinBackend.SPV, DogecoinNetwork.REGTEST, supported = false)
+        )
+    }
+
+    @Test
+    fun `wrong-chain process status is idle and unsynced for the selected sheet`() {
+        val testnetStatus = DogecoinSpvStatus(
+            network = DogecoinNetwork.TESTNET,
+            running = true,
+            peerCount = 4,
+            chainHeight = 67_000_000,
+            bestPeerHeight = 67_000_000L,
+            synced = true,
+            overTor = true,
+            stalled = true
+        )
+
+        val projected = dogecoinSpvStatusForSelectedNetwork(testnetStatus, DogecoinNetwork.MAINNET)
+
+        assertEquals(DogecoinNetwork.MAINNET, projected.network)
+        assertFalse(projected.running)
+        assertFalse(projected.synced)
+        assertEquals(0, projected.peerCount)
+        assertEquals(0, projected.chainHeight)
+        assertFalse(projected.overTor)
+        assertFalse(projected.stalled)
+    }
+
+    @Test
+    fun `matching-chain process status is preserved`() {
+        val status = DogecoinSpvStatus(
+            network = DogecoinNetwork.MAINNET,
+            running = true,
+            peerCount = 6,
+            chainHeight = 6_286_946,
+            bestPeerHeight = 6_286_946L,
+            synced = true
+        )
+
+        assertSame(status, dogecoinSpvStatusForSelectedNetwork(status, DogecoinNetwork.MAINNET))
+    }
 }

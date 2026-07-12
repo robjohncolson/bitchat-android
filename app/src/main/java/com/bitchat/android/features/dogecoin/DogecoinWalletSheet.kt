@@ -130,6 +130,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -369,7 +370,7 @@ fun DogecoinWalletSheet(
     // Phase 2: the on-device SPV light client (process singleton — shared with the debug console). Read-only;
     // started on demand for "Built-in" and retained across sheet dismissal for fast reopen. See walletReadSource.
     val spvService = remember { DogecoinSpvService.getInstance(context, repository) }
-    val spvStatus by spvService.status.collectAsState()
+    val processSpvStatus by spvService.status.collectAsState()
     val spvDataSource = remember(spvService) { DogecoinSpvDataSource(spvService) }
     // Tor state drives the SPV connection disclosure: with Tor ON the light client routes peers over Tor and
     // never connects clearnet (intent = mode != OFF; ready = bootstrapped + RUNNING). See DogecoinSpvService.
@@ -393,6 +394,10 @@ fun DogecoinWalletSheet(
 
     var snapshot by remember { mutableStateOf(initialSnapshot) }
     var selectedNetwork by remember { mutableStateOf(snapshot.key.network) }
+    // A process-owned SPV instance can legitimately report the prior chain while a rebind is settling. Never let
+    // that old chain's synced/readiness state enter this sheet; the service's activeNetwork checks remain the
+    // independent fail-closed boundary for snapshots and broadcast.
+    val spvStatus = dogecoinSpvStatusForSelectedNetwork(processSpvStatus, selectedNetwork)
     // Phase 2 backend selector: which source serves balance/UTXO reads for the selected network. Default RPC.
     // SPV = the no-node built-in light client; EXPLORER is not user-selectable here (read-only/console-only).
     // Default to "Built-in" (SPV) when no node is configured and SPV is practical, so a no-node user sees
@@ -408,6 +413,11 @@ fun DogecoinWalletSheet(
     var nodeAssist by remember(selectedNetwork) { mutableStateOf(false) }
     val dogecoinBackend =
         if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
+    val spvTargetNetwork = dogecoinSpvTargetNetwork(
+        persistedBackend = persistedBackend,
+        selectedNetwork = selectedNetwork,
+        supported = spvService.isSupported(selectedNetwork)
+    )
     // Read seam: SPV reads the synced light-client wallet; everything else uses the caller's captured RPC
     // config (byte-identical to the prior direct calls). Node-specific ops (status/watch/mempool/rescan),
     // rich activity, and broadcast stay on rpcClient (SPV broadcast is a later phase).
@@ -1766,13 +1776,14 @@ fun DogecoinWalletSheet(
     // across sheet dismissal; stop only when the persisted backend/network explicitly moves away from SPV.
     // Keyed on persistedBackend (NOT the assist-effective backend): home-node assist must leave the light
     // client syncing in the background, so enabling assist never stops SPV here.
-    var spvStartAttempt by remember { mutableStateOf(0) }
-    var spvStarting by remember { mutableStateOf(false) }
-    var spvStartFailed by remember { mutableStateOf(false) }
-    LaunchedEffect(persistedBackend, selectedNetwork, spvStartAttempt) {
+    var spvStartAttempt by remember(selectedNetwork) { mutableStateOf(0) }
+    var spvStarting by remember(selectedNetwork) { mutableStateOf(false) }
+    var spvStartFailed by remember(selectedNetwork) { mutableStateOf(false) }
+    LaunchedEffect(spvTargetNetwork, spvStartAttempt) {
         val sessionGeneration = walletIoSession.captureGeneration()
         val startAttempt = spvStartAttempt
-        if (persistedBackend == DogecoinBackend.SPV && spvService.isSupported(selectedNetwork)) {
+        val targetNetwork = spvTargetNetwork
+        if (targetNetwork != null) {
             // Every SPV owner reserves a newer desired generation, even if the service is already running. This
             // cancels an older queued teardown from a rapid RPC→SPV switch before taking the idempotent fast path.
             val startRequest = spvService.reserveStartRequest()
@@ -1784,26 +1795,35 @@ fun DogecoinWalletSheet(
                 // Process SPV lifecycle mutex only — never walletIoSession.serialized.
                 // Home-node status/balance also use the sheet IO session; if SPV start held that lock,
                 // "Use home node" / "Refresh node status" starved behind bitcoinj (often minutes on testnet).
-                val startApplied = dogecoinSpvLifecycleMutex.withLock {
-                    withContext(Dispatchers.IO) {
-                        spvService.startForRequest(selectedNetwork, startRequest)
+                // Applying the already-reserved process owner survives sheet dismissal. Superseded queued starts
+                // still return false at the service generation check, while the latest selected chain cannot be
+                // abandoned behind an older slow start merely because its sheet left composition.
+                val startApplied = withContext(NonCancellable + Dispatchers.IO) {
+                    dogecoinSpvLifecycleMutex.withLock {
+                        spvService.startForRequest(targetNetwork, startRequest)
                     }
                 }
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStartFailed = !startApplied
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStartFailed = true
             } finally {
                 if (
                     walletIoSession.isCurrent(sessionGeneration) &&
-                    spvStartAttempt == startAttempt
+                    spvStartAttempt == startAttempt &&
+                    selectedNetwork == targetNetwork &&
+                    persistedBackend == DogecoinBackend.SPV
                 ) spvStarting = false
             }
         } else {
@@ -1811,10 +1831,10 @@ fun DogecoinWalletSheet(
             spvStartFailed = false
             // Process-owned request survives sheet dismissal. If a slow old start is still finishing, it is
             // stopped afterward; a later SPV start supersedes this request inside the service.
-            spvService.requestStop()
+            spvService.requestStop(statusNetworkAfterStop = selectedNetwork)
         }
     }
-    LaunchedEffect(spvStarting, spvStartAttempt) {
+    LaunchedEffect(spvStarting, spvStartAttempt, selectedNetwork) {
         if (!spvStarting) return@LaunchedEffect
         delay(DOGECOIN_SPV_START_TIMEOUT_MS)
         if (spvStarting) {
@@ -1948,12 +1968,12 @@ fun DogecoinWalletSheet(
     // (dMs grows while dHeight is frozen -> rate falls -> ETA rises) instead of freezing an optimistic number;
     // re-anchored on a chain regression (rescan); skipped entirely once essentially caught up. Reads the
     // StateFlow directly so each tick sees the fresh height. Cosmetic — never gates anything.
-    var syncEtaMinutes by remember { mutableStateOf<Int?>(null) }
+    var syncEtaMinutes by remember(selectedNetwork) { mutableStateOf<Int?>(null) }
     LaunchedEffect(dogecoinBackend, selectedNetwork) {
         var anchorHeight = -1
         var anchorTimeMs = 0L
         while (true) {
-            val st = spvService.status.value
+            val st = dogecoinSpvStatusForSelectedNetwork(spvService.status.value, selectedNetwork)
             val isSyncing = dogecoinBackend == DogecoinBackend.SPV && st.running && !st.synced
             if (!isSyncing || st.chainHeight <= 0 || st.blocksBehind <= 0) {
                 anchorHeight = -1
@@ -1985,7 +2005,9 @@ fun DogecoinWalletSheet(
     // Confirmation ring fill (presentation-only): observe the just-sent tx through the effective backend.
     // SPV keeps its existing validated-chain depth; RPC/home-node assist asks the wallet-scoped node for this
     // exact txid. Neither result feeds coin selection, signing, policy checks, or broadcast authorization.
-    var confirmationObservation by remember { mutableStateOf<DogecoinConfirmationObservation?>(null) }
+    var confirmationObservation by remember(selectedNetwork) {
+        mutableStateOf<DogecoinConfirmationObservation?>(null)
+    }
     val confirmingDepth = confirmationObservation
         ?.takeIf { observation -> observation.txid.equals(sentReceipt?.txid, ignoreCase = true) }
         ?.depth
@@ -2097,7 +2119,7 @@ fun DogecoinWalletSheet(
     // Activity / pending list (SPV): poll the READ-ONLY wallet-tx snapshot so the pending cards + full activity
     // list reflect confirmations climbing 0->target. Incoming txs appear here automatically (bloom-matched), so
     // the RECEIVING phone sees an inbound payment confirm without any extra plumbing. Never feeds signing.
-    var spvTxs by remember { mutableStateOf<List<DogecoinSpvTx>>(emptyList()) }
+    var spvTxs by remember(selectedNetwork) { mutableStateOf<List<DogecoinSpvTx>>(emptyList()) }
     LaunchedEffect(dogecoinBackend, selectedNetwork) {
         if (dogecoinBackend != DogecoinBackend.SPV) {
             spvTxs = emptyList()
@@ -2173,7 +2195,7 @@ fun DogecoinWalletSheet(
     val pendingTxRows = txRows.filter { it.confirmations < DOGECOIN_SPV_CONFIRM_TARGET }
     // Tap-to-inspect: which tx's confirmation-detail dialog is open. Keyed by txid (not the row) so the dialog's
     // ring keeps climbing as the 15s poll refreshes the underlying row.
-    var walletTxDetailId by remember { mutableStateOf<String?>(null) }
+    var walletTxDetailId by remember(selectedNetwork) { mutableStateOf<String?>(null) }
 
     // Auto-save every recipient on a successful send (per-network) so it appears in the recipient picker without
     // a manual "Save recipient" tap. Runs only AFTER sentReceipt is set (post-broadcast), isolated in runCatching

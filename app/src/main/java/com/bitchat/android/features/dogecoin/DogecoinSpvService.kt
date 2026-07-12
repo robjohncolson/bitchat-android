@@ -83,6 +83,7 @@ class DogecoinSpvService private constructor(
     private val repository: DogecoinWalletRepository
 ) {
     private val lock = Any()
+    private val statusPublicationGate = DogecoinSpvStatusPublicationGate()
     // Orders synchronous starts/stops with process-owned asynchronous stop requests. A later request wins,
     // so an RPC switch survives sheet dismissal while a subsequent SPV reopen cancels that pending teardown.
     private val lifecycleRequestGeneration = AtomicInteger(0)
@@ -151,7 +152,9 @@ class DogecoinSpvService private constructor(
                 return@synchronized false
             }
             if (activeNetwork == network && peerGroup != null) return@synchronized true // already running
-            stopLocked() // tear down any other-network instance first
+            // Tear down any other-network instance first and immediately project the requested chain as idle.
+            // Old PeerGroup callbacks are invalidated before their asynchronous stop can report stale status.
+            stopLocked(statusNetworkAfterStop = network)
 
             val snapshot = repository.loadWalletIfPresent(network) ?: run {
                 Log.i(TAG, "No $network wallet key yet; not starting SPV")
@@ -202,8 +205,9 @@ class DogecoinSpvService private constructor(
             pg.addPeerDiscovery(DnsDiscovery(params))
             this.builtSocksAddress = socks    // remember the endpoint so the Tor observer rebuilds only on a real change
 
-            pg.addConnectedEventListener { _, _ -> publishStatus(network, chain, pg) }
-            pg.addDisconnectedEventListener { _, _ -> publishStatus(network, chain, pg) }
+            val statusOwner = Any()
+            pg.addConnectedEventListener { _, _ -> publishStatus(statusOwner, network, chain, pg) }
+            pg.addDisconnectedEventListener { _, _ -> publishStatus(statusOwner, network, chain, pg) }
 
             this.bitcoinjContext = ctx
             this.wallet = w
@@ -211,15 +215,16 @@ class DogecoinSpvService private constructor(
             this.blockChain = chain
             this.peerGroup = pg
             this.activeNetwork = network
-            publishStatus(network, chain, pg)
+            statusPublicationGate.activate(statusOwner)
+            publishStatus(statusOwner, network, chain, pg)
 
             pg.startAsync()
             pg.startBlockChainDownload(object : DownloadProgressTracker() {
                 override fun progress(pct: Double, blocksSoFar: Int, date: Date?) {
-                    publishStatus(network, chain, pg)
+                    publishStatus(statusOwner, network, chain, pg)
                 }
                 override fun doneDownload() {
-                    publishStatus(network, chain, pg)
+                    publishStatus(statusOwner, network, chain, pg)
                 }
             })
             Log.i(TAG, "SPV started for $network (birthdate=${Date(birthdateSecs * 1000L)})")
@@ -240,7 +245,7 @@ class DogecoinSpvService private constructor(
 
                         // DownloadProgressTracker follows PeerGroup.downloadPeer only. Read the chain directly so
                         // status cannot remain frozen if another bitcoinj callback advanced the shared chain.
-                        publishStatus(network, liveChain, livePg)
+                        publishStatus(statusOwner, network, liveChain, livePg)
                         val st = _status.value
 
                         val nowMillis = android.os.SystemClock.elapsedRealtime()
@@ -252,7 +257,7 @@ class DogecoinSpvService private constructor(
                             bestPeerHeight = st.bestPeerHeight
                         )
                         if (st.stalled != headerProgressWatchdog.stalled) {
-                            publishStatus(network, liveChain, livePg)
+                            publishStatus(statusOwner, network, liveChain, livePg)
                         }
 
                         // Continue status/progress maintenance during a broadcast, but never rotate its peers.
@@ -308,17 +313,29 @@ class DogecoinSpvService private constructor(
     /**
      * Request process-owned teardown without making a UI lifecycle callback wait on the bitcoinj monitor.
      * A later [start] supersedes a queued stop; a stop requested after a running start waits and then tears it down.
+     * [statusNetworkAfterStop] lets the owning sheet keep the selected-chain identity honest while SPV is idle.
      */
-    fun requestStop() {
+    fun requestStop(statusNetworkAfterStop: DogecoinNetwork? = null) {
         val requestGeneration = lifecycleRequestGeneration.incrementAndGet()
         torScope.launch {
             synchronized(lock) {
-                if (lifecycleRequestGeneration.get() == requestGeneration) stopLocked()
+                if (lifecycleRequestGeneration.get() == requestGeneration) {
+                    stopLocked(statusNetworkAfterStop = statusNetworkAfterStop)
+                }
             }
         }
     }
 
-    private fun stopLocked() {
+    private fun stopLocked(statusNetworkAfterStop: DogecoinNetwork? = null) {
+        val stoppedNetwork = statusNetworkAfterStop ?: activeNetwork
+        // Invalidate the live callback owner BEFORE stopAsync(). A disconnect/progress callback from that group
+        // may still arrive, but publishIfCurrent rejects it. Publishing the requested next network as idle also
+        // keeps console/sheet identity honest while its wallet and chain are being opened.
+        statusPublicationGate.deactivate {
+            if (stoppedNetwork != null) {
+                _status.value = DogecoinSpvStatus(network = stoppedNetwork, running = false)
+            }
+        }
         catchUpJob?.cancel()
         catchUpJob = null
         headerProgressWatchdog.reset()
@@ -329,7 +346,6 @@ class DogecoinSpvService private constructor(
         }
         // The block store is memory-mapped; closing is best-effort (never on Android does WindowsMMapHack run).
         blockStore?.let { runCatching { it.close() } }
-        val net = activeNetwork
         peerGroup = null
         blockChain = null
         blockStore = null
@@ -337,7 +353,6 @@ class DogecoinSpvService private constructor(
         bitcoinjContext = null
         activeNetwork = null
         builtSocksAddress = null
-        if (net != null) _status.value = DogecoinSpvStatus(network = net, running = false)
     }
 
     /**
@@ -513,37 +528,46 @@ class DogecoinSpvService private constructor(
     private fun walletAddress(network: DogecoinNetwork): String =
         repository.loadWalletIfPresent(network)?.key?.address ?: ""
 
-    private fun publishStatus(network: DogecoinNetwork, chain: BlockChain, pg: PeerGroup) {
+    private fun publishStatus(statusOwner: Any, network: DogecoinNetwork, chain: BlockChain, pg: PeerGroup) {
+        // Drop callbacks already known stale before sampling their old PeerGroup. If teardown races this first
+        // check, publishIfCurrent still performs the decisive atomic check after the fields are sampled.
+        if (!statusPublicationGate.isCurrent(statusOwner)) return
         val height = runCatching { chain.bestChainHeight }.getOrDefault(0)
         val peers = pg.connectedPeers
         val peerCount = peers.size
         val bestPeerHeight = peers.maxOfOrNull { it.bestHeight } ?: 0L
         val headTimeSecs = runCatching { chain.chainHead.header.timeSeconds }.getOrDefault(0L)
+        val overTor = builtSocksAddress != null
+        val stalled = headerProgressWatchdog.stalled
         // Schmitt trigger on tip-freshness: reach within SYNCED_WITHIN_BLOCKS of the tip to FIRST go synced, then
         // HOLD synced until we fall more than STALE_BEHIND_BLOCKS behind — a fresh block (a block or two of
         // download lag) can no longer flap the flag. The peer floor stays STRICT per network (mainnet eclipse
         // floor unchanged; testnet relaxed). `prevSynced` is scoped to THIS live network so a switch can't carry
-        // sticky state. Read/written lock-free like the rest of publishStatus; a stale `prev` only ever makes the
-        // next tick re-require the strict rising edge (never enables an unsafe state).
-        val behind = if (bestPeerHeight > 0L) bestPeerHeight - height else Long.MAX_VALUE
-        val prevSynced = _status.value.running && _status.value.synced && _status.value.network == network
-        // Falling-edge hysteresis is NON-MAINNET only: mainnet stays strict on BOTH axes (freshness AND the peer
-        // floor), so mainnet "synced"/broadcast-readiness is byte-for-byte unchanged. Testnet holds synced up to
-        // STALE_BEHIND_BLOCKS behind to stop the flag flapping as its tip advances ~1 block/30-40s.
-        val staleThreshold = if (network == DogecoinNetwork.MAINNET) SYNCED_WITHIN_BLOCKS else STALE_BEHIND_BLOCKS
-        val freshEnough = behind <= if (prevSynced) staleThreshold else SYNCED_WITHIN_BLOCKS
-        val synced = bestPeerHeight > 0L && peerCount >= minPeersFor(network) && freshEnough
-        _status.value = DogecoinSpvStatus(
-            network = network,
-            running = true,
-            peerCount = peerCount,
-            chainHeight = height,
-            bestPeerHeight = bestPeerHeight,
-            syncedToDateMillis = headTimeSecs * 1000L,
-            synced = synced,
-            overTor = builtSocksAddress != null,
-            stalled = headerProgressWatchdog.stalled
-        )
+        // sticky state. The owner gate serializes this read/write with rebind/stop, so an obsolete callback can
+        // neither inherit nor overwrite the replacement chain's state.
+        statusPublicationGate.publishIfCurrent(statusOwner) {
+            val behind = if (bestPeerHeight > 0L) bestPeerHeight - height else Long.MAX_VALUE
+            val previous = _status.value
+            val prevSynced = previous.running && previous.synced && previous.network == network
+            // Falling-edge hysteresis is NON-MAINNET only: mainnet stays strict on BOTH axes (freshness AND the
+            // peer floor), so mainnet "synced"/broadcast-readiness is byte-for-byte unchanged. Testnet holds synced
+            // up to STALE_BEHIND_BLOCKS behind to stop the flag flapping as its tip advances ~1 block/30-40s.
+            val staleThreshold =
+                if (network == DogecoinNetwork.MAINNET) SYNCED_WITHIN_BLOCKS else STALE_BEHIND_BLOCKS
+            val freshEnough = behind <= if (prevSynced) staleThreshold else SYNCED_WITHIN_BLOCKS
+            val synced = bestPeerHeight > 0L && peerCount >= minPeersFor(network) && freshEnough
+            _status.value = DogecoinSpvStatus(
+                network = network,
+                running = true,
+                peerCount = peerCount,
+                chainHeight = height,
+                bestPeerHeight = bestPeerHeight,
+                syncedToDateMillis = headTimeSecs * 1000L,
+                synced = synced,
+                overTor = overTor,
+                stalled = stalled
+            )
+        }
     }
 
     private fun maybeLoadCheckpoints(network: DogecoinNetwork, params: NetworkParameters, store: SPVBlockStore, birthdateSecs: Long) {

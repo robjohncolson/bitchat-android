@@ -290,6 +290,28 @@ internal fun shouldPollDogecoinSpvBalance(
     running &&
     (!balanceKnown || !synced)
 
+/** Process SPV ownership follows the persisted backend, not session-only home-node assist. */
+internal fun dogecoinSpvTargetNetwork(
+    persistedBackend: DogecoinBackend,
+    selectedNetwork: DogecoinNetwork,
+    supported: Boolean
+): DogecoinNetwork? = selectedNetwork.takeIf {
+    persistedBackend == DogecoinBackend.SPV && supported
+}
+
+/**
+ * Fail-closed sheet projection: a fully-synced status for another chain is idle for this sheet. This is
+ * presentation/readiness state only; service snapshots and broadcast independently require activeNetwork match.
+ */
+internal fun dogecoinSpvStatusForSelectedNetwork(
+    processStatus: DogecoinSpvStatus,
+    selectedNetwork: DogecoinNetwork
+): DogecoinSpvStatus = if (processStatus.network == selectedNetwork) {
+    processStatus
+} else {
+    DogecoinSpvStatus(network = selectedNetwork)
+}
+
 internal enum class DogecoinFeePreset(val labelResId: Int) {
     SLOW(R.string.dogecoin_send_fee_preset_slow),
     NORMAL(R.string.dogecoin_send_fee_preset_normal),
