@@ -2,4 +2,6 @@
 <full-backup-content>
     <exclude domain="sharedpref" path="bitchat_prefs.xml"/>
     <exclude domain="sharedpref" path="bitchat_crypto.xml"/>
+    <exclude domain="sharedpref" path="dogecoin_tpn_trust.xml"/>
+    <exclude domain="sharedpref" path="dogecoin_tpn_credentials.xml"/>
 </full-backup-content>

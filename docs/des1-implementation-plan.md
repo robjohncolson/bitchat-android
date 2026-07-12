@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE planning — first code card **DES-1-A** ready  
+**Status:** ACTIVE — **DES-1-A DONE**; next **DES-1-B**  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -33,7 +33,7 @@ Until **DES-1-D** lands, `dogecoinSpendRouteAllowed` still treats TPN as absent 
 
 ---
 
-## DES-1-A — Profile, state, trust ceremony (FIRST)
+## DES-1-A — Profile, state, trust ceremony (DONE)
 
 ### Goal
 

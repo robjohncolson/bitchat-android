@@ -115,6 +115,19 @@ data class DogecoinAddressWatchStatus(
         get() = isMine || isWatchOnly
 }
 
+/**
+ * Result of the DES-1-A one-shot trust-ceremony probe. Every field is node-reported setup evidence,
+ * not an independent proof that the node is honest or that its historical rescan is complete.
+ */
+internal data class DogecoinTrustedPersonalNodeProvisioningResult(
+    val origin: String,
+    val network: DogecoinNetwork,
+    val androidAddress: String,
+    val coreWalletId: String,
+    val chain: String,
+    val watchStatus: DogecoinAddressWatchStatus
+)
+
 data class DogecoinMempoolAcceptance(
     val checked: Boolean,
     val allowed: Boolean?,
@@ -275,6 +288,118 @@ class DogecoinRpcClient private constructor(
                 error = e.message ?: "Unable to reach Dogecoin ${network.displayName} node."
             )
         }
+    }
+
+    /**
+     * DES-1-A provisioning only. This is deliberately not a general status/read API: after the user has
+     * reviewed the exact-origin disclosure it issues exactly three fixed, non-mutating calls and returns
+     * no balance, UTXO, activity, signing, or broadcast authority.
+     */
+    internal suspend fun probeTrustedPersonalNode(
+        origin: String,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        requestedWalletId: String,
+        boundMainnetAddress: String
+    ): DogecoinTrustedPersonalNodeProvisioningResult = withContext(Dispatchers.IO) {
+        val exactOrigin = exactDogecoinTrustedPersonalNodeOriginOrNull(origin)
+            ?: throw IllegalArgumentException(
+                "Trusted personal node origin must be an exact lowercase Tailscale HTTPS origin."
+            )
+        require(DogecoinAddress.isValidP2pkhAddress(boundMainnetAddress, DogecoinNetwork.MAINNET)) {
+            "Trusted personal node requires the active Android mainnet P2PKH address."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node RPC username and password are required."
+        }
+        require(
+            requestedWalletId.isEmpty() ||
+                canonicalDogecoinTrustedPersonalNodeWalletIdOrNull(requestedWalletId) == requestedWalletId
+        ) {
+            "Trusted personal node Core wallet name is not canonical."
+        }
+
+        val baseConfig = DogecoinRpcConfig(
+            url = exactOrigin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = requestedWalletId
+        )
+
+        // 1. TLS/auth are exercised by this first request; chain and IBD must be explicit and sane.
+        val blockchainInfo = callObject(baseConfig.copy(walletName = ""), "getblockchaininfo")
+        val chainElement = blockchainInfo.get("chain")?.takeUnless { it.isJsonNull }
+            ?: throw IllegalArgumentException("RPC getblockchaininfo did not report chain.")
+        val chainPrimitive = chainElement.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+        require(chainPrimitive?.isString == true) {
+            "RPC getblockchaininfo returned an invalid chain."
+        }
+        val chain = chainPrimitive.asString
+        require(chain == DogecoinNetwork.MAINNET.chainName) {
+            "Trusted personal node is on $chain, expected Dogecoin mainnet."
+        }
+        val initialBlockDownload = parseOptionalBoolean(
+            blockchainInfo,
+            "initialblockdownload",
+            "getblockchaininfo"
+        ) ?: throw IllegalArgumentException("RPC getblockchaininfo did not report initialblockdownload.")
+        require(!initialBlockDownload) {
+            "Trusted personal node is still in initial block download. Finish syncing before authorization."
+        }
+
+        // 2. Resolve one exact wallet identity. A mismatch stops before the phone address is disclosed.
+        val walletInfo = callObject(baseConfig, "getwalletinfo")
+        val walletElement = walletInfo.get("walletname")?.takeUnless { it.isJsonNull }
+            ?: throw IllegalArgumentException("RPC getwalletinfo did not report walletname.")
+        val walletPrimitive = walletElement.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+        require(walletPrimitive?.isString == true) {
+            "RPC getwalletinfo returned an invalid walletname."
+        }
+        val resolvedWalletId = walletPrimitive.asString
+        require(canonicalDogecoinTrustedPersonalNodeWalletIdOrNull(resolvedWalletId) == resolvedWalletId) {
+            "RPC getwalletinfo returned a non-canonical walletname."
+        }
+        require(requestedWalletId.isEmpty() || requestedWalletId == resolvedWalletId) {
+            "Trusted personal node returned a different Core wallet identity."
+        }
+
+        // 3. Always rebind to the resolved wallet endpoint before disclosing/checking the address.
+        val validateResult = callObject(
+            baseConfig.copy(walletName = resolvedWalletId),
+            "validateaddress",
+            JsonArray().apply { add(boundMainnetAddress) }
+        )
+        val isValid = parseOptionalBoolean(validateResult, "isvalid", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report isvalid.")
+        require(isValid) { "Dogecoin Core rejected the bound Android mainnet address." }
+        val returnedAddressElement = validateResult.get("address")?.takeUnless { it.isJsonNull }
+            ?: throw IllegalArgumentException("RPC validateaddress did not return the bound address.")
+        val returnedAddressPrimitive = returnedAddressElement.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+        require(returnedAddressPrimitive?.isString == true && returnedAddressPrimitive.asString == boundMainnetAddress) {
+            "RPC validateaddress returned a different Dogecoin address."
+        }
+        val isMine = parseOptionalBoolean(validateResult, "ismine", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report ismine.")
+        val isWatchOnly = parseOptionalBoolean(validateResult, "iswatchonly", "validateaddress")
+            ?: throw IllegalArgumentException("RPC validateaddress did not report iswatchonly.")
+        require(!isMine) {
+            "Trusted personal node reports ismine=true. Authorization stopped: the Android key must remain phone-only."
+        }
+        require(isWatchOnly) {
+            "Trusted personal node does not report the Android address as watch-only."
+        }
+
+        DogecoinTrustedPersonalNodeProvisioningResult(
+            origin = exactOrigin,
+            network = DogecoinNetwork.MAINNET,
+            androidAddress = boundMainnetAddress,
+            coreWalletId = resolvedWalletId,
+            chain = chain,
+            watchStatus = DogecoinAddressWatchStatus(
+                address = boundMainnetAddress,
+                isMine = isMine,
+                isWatchOnly = isWatchOnly
+            )
+        )
     }
 
     suspend fun getWalletBalance(

@@ -1,0 +1,679 @@
+package com.bitchat.android.features.dogecoin
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.bitchat.android.R
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * DES-1-A's mainnet trust ceremony only. This surface owns a separate draft and authorization store;
+ * it never writes generic RPC settings, changes the selected backend, activates a session, reads a
+ * balance, signs, or broadcasts.
+ */
+@Composable
+internal fun DogecoinTrustedPersonalNodeSettings(
+    androidMainnetAddress: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val appContext = context.applicationContext
+    val store = remember(appContext) { DogecoinTrustedPersonalNodeStore(appContext) }
+    val scope = rememberCoroutineScope()
+
+    var storeLoaded by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var loadedState by remember(androidMainnetAddress) {
+        mutableStateOf(DogecoinTrustedPersonalNodeState.UNAUTHORIZED)
+    }
+    var loadedProfile by remember(androidMainnetAddress) {
+        mutableStateOf<DogecoinTrustedPersonalNodeProfile?>(null)
+    }
+    var storeError by remember(androidMainnetAddress) { mutableStateOf<String?>(null) }
+
+    // Local-only draft. No edit callback below touches the store or starts a coroutine.
+    var origin by remember(androidMainnetAddress) { mutableStateOf("") }
+    var username by remember(androidMainnetAddress) { mutableStateOf("") }
+    var password by remember(androidMainnetAddress) { mutableStateOf("") }
+    var requestedWalletId by remember(androidMainnetAddress) { mutableStateOf("") }
+    var draftRevision by remember(androidMainnetAddress) { mutableLongStateOf(0L) }
+    val probeGeneration = remember(androidMainnetAddress) { AtomicLong(0L) }
+
+    var probeClient by remember(androidMainnetAddress) { mutableStateOf(DogecoinRpcClient()) }
+    var activeToken by remember(androidMainnetAddress) {
+        mutableStateOf<DogecoinTrustedPersonalNodeProvisioningToken?>(null)
+    }
+    var provisioningResult by remember(androidMainnetAddress) {
+        mutableStateOf<DogecoinTrustedPersonalNodeProvisioningResult?>(null)
+    }
+    var probeError by remember(androidMainnetAddress) { mutableStateOf<String?>(null) }
+    var provisioning by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var authorizing by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var showRevokeConfirmation by remember(androidMainnetAddress) { mutableStateOf(false) }
+
+    var controlsLaptop by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var loopbackServeNoFunnel by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var watchOnlyNoWifAndRescanned by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var acceptsNodeOracleRisk by remember(androidMainnetAddress) { mutableStateOf(false) }
+    var understandsTailscaleIsNotAnonymity by remember(androidMainnetAddress) { mutableStateOf(false) }
+
+    // Session-holder values are intentionally not persisted. Recreating this component/process from a
+    // durable authorization always yields AUTHORIZED_INACTIVE, never an active node session.
+    val holderInitialState = if (
+        loadedProfile != null && loadedProfile?.androidAddress != androidMainnetAddress
+    ) {
+        DogecoinTrustedPersonalNodeState.REVOKED
+    } else {
+        loadedState
+    }
+    val sessionHolder = remember(storeLoaded, holderInitialState, loadedProfile, androidMainnetAddress) {
+        DogecoinTrustedPersonalNodeSessionHolder(
+            savedState = holderInitialState,
+            savedProfile = loadedProfile?.takeIf { it.androidAddress == androidMainnetAddress }
+        )
+    }
+    // Holder state is plain process memory; this epoch makes its deliberate transitions observable by Compose.
+    var holderEpoch by remember(androidMainnetAddress) { mutableIntStateOf(0) }
+    @Suppress("UNUSED_VARIABLE") val observedHolderEpoch = holderEpoch
+    val authorizationState = sessionHolder.state
+    val authorizedProfile = sessionHolder.profile
+
+    LaunchedEffect(store, androidMainnetAddress) {
+        val loaded = try {
+            withContext(Dispatchers.IO) {
+                val savedState = store.loadState()
+                val savedProfile = store.loadProfile()
+                if (
+                    savedProfile != null &&
+                    savedProfile.androidAddress != androidMainnetAddress
+                ) {
+                    // A wallet reset/import changes the only signing address this authorization binds.
+                    // Persist the REVOKED tombstone and remove its credential before rendering the new
+                    // wallet; a holder-only projection would leave stale authority durable on disk.
+                    check(store.revoke()) {
+                        context.getString(R.string.dogecoin_tpn_wallet_changed_revoke_failed)
+                    }
+                    DogecoinTrustedPersonalNodeState.REVOKED to null
+                } else {
+                    savedState to savedProfile
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            storeError = error.message ?: error.javaClass.simpleName
+            null
+        }
+        loaded?.let { (state, profile) ->
+            loadedState = state
+            loadedProfile = profile
+        }
+        storeLoaded = true
+    }
+
+    DisposableEffect(probeClient, sessionHolder) {
+        onDispose {
+            probeGeneration.incrementAndGet()
+            probeClient.cancelActiveRequests()
+            sessionHolder.cancelProvisioning()
+        }
+    }
+
+    fun resetConfirmations() {
+        controlsLaptop = false
+        loopbackServeNoFunnel = false
+        watchOnlyNoWifAndRescanned = false
+        acceptsNodeOracleRisk = false
+        understandsTailscaleIsNotAnonymity = false
+    }
+
+    fun invalidateProvisioningDraft() {
+        probeGeneration.incrementAndGet()
+        draftRevision += 1L
+        sessionHolder.invalidateDraft(draftRevision)
+        holderEpoch += 1
+        activeToken = null
+        provisioningResult = null
+        probeError = null
+        provisioning = false
+        authorizing = false
+        resetConfirmations()
+        // A canceled OkHttp call cannot be reused as proof for a changed draft. Replace the client family
+        // so even the registration race handled by cancelActiveRequests remains fail-closed.
+        probeClient.cancelActiveRequests()
+        probeClient = DogecoinRpcClient()
+    }
+
+    val exactOrigin = remember(origin) { exactDogecoinTrustedPersonalNodeOriginOrNull(origin) }
+    val credentials = remember(username, password) {
+        DogecoinTrustedPersonalNodeCredentials(username = username, password = password)
+    }
+    val canonicalWalletId = remember(requestedWalletId) {
+        if (requestedWalletId.isEmpty()) "" else canonicalDogecoinTrustedPersonalNodeWalletIdOrNull(requestedWalletId)
+    }
+    val draftLocallyValid = exactOrigin != null && credentials.isValid() && canonicalWalletId != null
+
+    fun beginOneShotProvisioning() {
+        val disclosedOrigin = exactOrigin ?: return
+        if (!draftLocallyValid || provisioning || authorizing) return
+
+        val token = sessionHolder.beginProvisioning(draftRevision)
+        holderEpoch += 1
+        // The token is consumed immediately before the only code path allowed to run the fixed probe.
+        if (!sessionHolder.consumeProvisioningProbe(token)) {
+            sessionHolder.cancelProvisioning()
+            holderEpoch += 1
+            probeError = context.getString(R.string.dogecoin_tpn_probe_expired)
+            return
+        }
+
+        val capturedAddress = androidMainnetAddress
+        val capturedRevision = draftRevision
+        val capturedGeneration = probeGeneration.incrementAndGet()
+        val capturedCredentials = credentials
+        val capturedWalletId = canonicalWalletId.orEmpty()
+        val capturedClient = probeClient.guardedBy {
+            check(probeGeneration.get() == capturedGeneration) {
+                context.getString(R.string.dogecoin_tpn_probe_stale)
+            }
+        }
+        activeToken = token
+        provisioningResult = null
+        probeError = null
+        resetConfirmations()
+        provisioning = true
+
+        scope.launch {
+            val outcome = runCatching {
+                capturedClient.probeTrustedPersonalNode(
+                    origin = disclosedOrigin,
+                    credentials = capturedCredentials,
+                    requestedWalletId = capturedWalletId,
+                    boundMainnetAddress = capturedAddress
+                )
+            }
+            if (
+                probeGeneration.get() != capturedGeneration ||
+                activeToken != token ||
+                draftRevision != capturedRevision ||
+                androidMainnetAddress != capturedAddress
+            ) {
+                return@launch
+            }
+            provisioning = false
+            outcome.fold(
+                onSuccess = { result ->
+                    if (sessionHolder.recordSuccessfulProvisioning(token, result)) {
+                        holderEpoch += 1
+                        provisioningResult = result
+                    } else {
+                        sessionHolder.cancelProvisioning()
+                        holderEpoch += 1
+                        activeToken = null
+                        probeError = context.getString(R.string.dogecoin_tpn_probe_stale)
+                    }
+                },
+                onFailure = { error ->
+                    sessionHolder.cancelProvisioning()
+                    holderEpoch += 1
+                    activeToken = null
+                    probeError = error.message ?: error.javaClass.simpleName
+                }
+            )
+        }
+    }
+
+    fun authorizeInactiveProfile() {
+        val token = activeToken ?: return
+        if (authorizing || provisioning) return
+        val confirmations = DogecoinTrustedPersonalNodeConfirmations(
+            controlsLaptop = controlsLaptop,
+            loopbackServeNoFunnel = loopbackServeNoFunnel,
+            watchOnlyNoWif = watchOnlyNoWifAndRescanned,
+            acceptsNodeOracleRisk = acceptsNodeOracleRisk,
+            understandsTailscaleIsNotAnonymity = understandsTailscaleIsNotAnonymity
+        )
+        val now = System.currentTimeMillis()
+        val candidate = sessionHolder.authorizationCandidate(
+            token = token,
+            confirmations = confirmations,
+            rescanAttestedAtMillis = now
+        ) ?: return
+
+        val capturedCredentials = credentials
+        val capturedRevision = draftRevision
+        authorizing = true
+        storeError = null
+        scope.launch {
+            val persisted = try {
+                withContext(Dispatchers.IO) {
+                    store.authorize(
+                        candidate = candidate,
+                        credentials = capturedCredentials,
+                        authorizedAtMillis = now
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                storeError = error.message ?: error.javaClass.simpleName
+                null
+            }
+            if (
+                activeToken != token ||
+                draftRevision != capturedRevision ||
+                androidMainnetAddress != candidate.androidAddress
+            ) {
+                authorizing = false
+                return@launch
+            }
+            if (persisted != null && sessionHolder.authorizationPersisted(token, persisted)) {
+                loadedState = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+                loadedProfile = persisted
+                password = ""
+                activeToken = null
+                provisioningResult = null
+                resetConfirmations()
+                holderEpoch += 1
+            } else if (persisted == null && storeError == null) {
+                storeError = context.getString(R.string.dogecoin_tpn_authorization_refused)
+            } else if (persisted != null) {
+                storeError = context.getString(R.string.dogecoin_tpn_authorization_stale)
+            }
+            authorizing = false
+        }
+    }
+
+    WalletCard {
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_title),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_intro),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                lineHeight = 18.sp
+            )
+
+            when {
+                !storeLoaded -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text(stringResource(R.string.dogecoin_tpn_loading))
+                    }
+                }
+                authorizationState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE &&
+                    authorizedProfile != null -> {
+                    Text(
+                        text = stringResource(R.string.dogecoin_tpn_authorized_inactive),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    SelectionContainer {
+                        Text(
+                            text = stringResource(
+                                R.string.dogecoin_tpn_authorized_summary,
+                                authorizedProfile.origin,
+                                authorizedProfile.androidAddress,
+                                authorizedProfile.coreWalletId,
+                                authorizedProfile.revision,
+                                authorizedProfile.policyVersion,
+                                formatDogecoinWalletTime(authorizedProfile.authorizedAtMillis),
+                                formatDogecoinWalletTime(authorizedProfile.rescanAttestedAtMillis)
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 18.sp
+                        )
+                    }
+                    Text(
+                        text = stringResource(R.string.dogecoin_tpn_inactive_notice),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        lineHeight = 18.sp
+                    )
+                    OutlinedButton(
+                        onClick = { showRevokeConfirmation = true },
+                        enabled = !authorizing,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.dogecoin_tpn_revoke_action))
+                    }
+                }
+                else -> {
+                    Text(
+                        text = stringResource(
+                            if (authorizationState == DogecoinTrustedPersonalNodeState.REVOKED) {
+                                R.string.dogecoin_tpn_revoked
+                            } else {
+                                R.string.dogecoin_tpn_unauthorized
+                            }
+                        ),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                    OutlinedTextField(
+                        value = origin,
+                        onValueChange = {
+                            if (origin != it) {
+                                invalidateProvisioningDraft()
+                                origin = it
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !provisioning && !authorizing,
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.dogecoin_tpn_origin_label)) },
+                        isError = origin.isNotEmpty() && exactOrigin == null
+                    )
+                    Text(
+                        text = stringResource(R.string.dogecoin_tpn_origin_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        lineHeight = 16.sp
+                    )
+                    if (origin.isNotEmpty() && exactOrigin == null) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_origin_invalid),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = username,
+                            onValueChange = {
+                                if (username != it) {
+                                    invalidateProvisioningDraft()
+                                    username = it
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !provisioning && !authorizing,
+                            singleLine = true,
+                            label = { Text(stringResource(R.string.dogecoin_tpn_username_label)) }
+                        )
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = {
+                                if (password != it) {
+                                    invalidateProvisioningDraft()
+                                    password = it
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !provisioning && !authorizing,
+                            singleLine = true,
+                            label = { Text(stringResource(R.string.dogecoin_tpn_password_label)) },
+                            visualTransformation = PasswordVisualTransformation()
+                        )
+                    }
+                    OutlinedTextField(
+                        value = requestedWalletId,
+                        onValueChange = {
+                            if (requestedWalletId != it) {
+                                invalidateProvisioningDraft()
+                                requestedWalletId = it
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !provisioning && !authorizing,
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.dogecoin_tpn_wallet_label)) },
+                        isError = requestedWalletId.isNotEmpty() && canonicalWalletId == null
+                    )
+                    Text(
+                        text = stringResource(R.string.dogecoin_tpn_wallet_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        lineHeight = 16.sp
+                    )
+                    if (requestedWalletId.isNotEmpty() && canonicalWalletId == null) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_wallet_invalid),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                    }
+
+                    exactOrigin?.let { disclosedOrigin ->
+                        SelectionContainer {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_tpn_disclosure,
+                                    disclosedOrigin,
+                                    androidMainnetAddress
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                lineHeight = 18.sp
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = { beginOneShotProvisioning() },
+                        enabled = storeLoaded && draftLocallyValid && !provisioning && !authorizing,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.dogecoin_tpn_test_exact_origin))
+                    }
+                    if (provisioning) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text(stringResource(R.string.dogecoin_tpn_provisioning))
+                        }
+                    }
+                    probeError?.let { error ->
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_probe_failed, error),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                    }
+                    provisioningResult?.let { result ->
+                        SelectionContainer {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_tpn_probe_success,
+                                    result.origin,
+                                    result.coreWalletId
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.primary,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_probe_watch_state),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                        TpnConfirmationRow(
+                            checked = controlsLaptop,
+                            onCheckedChange = { controlsLaptop = it },
+                            text = stringResource(R.string.dogecoin_tpn_confirm_controlled_laptop),
+                            enabled = !authorizing
+                        )
+                        TpnConfirmationRow(
+                            checked = loopbackServeNoFunnel,
+                            onCheckedChange = { loopbackServeNoFunnel = it },
+                            text = stringResource(R.string.dogecoin_tpn_confirm_private_route),
+                            enabled = !authorizing
+                        )
+                        TpnConfirmationRow(
+                            checked = watchOnlyNoWifAndRescanned,
+                            onCheckedChange = { watchOnlyNoWifAndRescanned = it },
+                            text = stringResource(R.string.dogecoin_tpn_confirm_watch_only_rescan),
+                            enabled = !authorizing
+                        )
+                        TpnConfirmationRow(
+                            checked = acceptsNodeOracleRisk,
+                            onCheckedChange = { acceptsNodeOracleRisk = it },
+                            text = stringResource(R.string.dogecoin_tpn_confirm_oracle_risk),
+                            enabled = !authorizing
+                        )
+                        TpnConfirmationRow(
+                            checked = understandsTailscaleIsNotAnonymity,
+                            onCheckedChange = { understandsTailscaleIsNotAnonymity = it },
+                            text = stringResource(R.string.dogecoin_tpn_confirm_tailscale_privacy),
+                            enabled = !authorizing
+                        )
+                        Button(
+                            onClick = { authorizeInactiveProfile() },
+                            enabled = !authorizing &&
+                                controlsLaptop &&
+                                loopbackServeNoFunnel &&
+                                watchOnlyNoWifAndRescanned &&
+                                acceptsNodeOracleRisk &&
+                                understandsTailscaleIsNotAnonymity,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (authorizing) {
+                                        R.string.dogecoin_tpn_authorizing
+                                    } else {
+                                        R.string.dogecoin_tpn_authorize_action
+                                    }
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            storeError?.let { error ->
+                Text(
+                    text = stringResource(R.string.dogecoin_tpn_store_failed, error),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+    }
+
+    if (showRevokeConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showRevokeConfirmation = false },
+            title = { Text(stringResource(R.string.dogecoin_tpn_revoke_title)) },
+            text = {
+                Text(
+                    text = stringResource(R.string.dogecoin_tpn_revoke_body),
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRevokeConfirmation = false
+                        storeError = null
+                        authorizing = true
+                        scope.launch {
+                            val revoked = try {
+                                withContext(Dispatchers.IO) { store.revoke() }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Throwable) {
+                                storeError = error.message ?: error.javaClass.simpleName
+                                false
+                            }
+                            if (revoked) {
+                                sessionHolder.revoke()
+                                loadedState = DogecoinTrustedPersonalNodeState.REVOKED
+                                loadedProfile = null
+                                password = ""
+                                holderEpoch += 1
+                            } else if (storeError == null) {
+                                storeError = context.getString(R.string.dogecoin_tpn_revoke_failed)
+                            }
+                            authorizing = false
+                        }
+                    },
+                    enabled = !authorizing
+                ) {
+                    Text(stringResource(R.string.dogecoin_tpn_revoke_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRevokeConfirmation = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun TpnConfirmationRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    text: String,
+    enabled: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled
+        )
+        Text(
+            text = text,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            lineHeight = 18.sp
+        )
+    }
+}
