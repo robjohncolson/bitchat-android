@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE — **DES-1-A/B DONE**; next **DES-1-C**  
+**Status:** ACTIVE — **DES-1-A/B/C DONE**; next **DES-1-D** (first spend unlock)  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -99,7 +99,7 @@ Explicit “Use trusted personal node” for this session → readiness check �
 
 ---
 
-## DES-1-C — Proof-backed UTXOs
+## DES-1-C — Proof-backed UTXOs (DONE)
 
 ### Goal
 

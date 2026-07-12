@@ -30,6 +30,16 @@ internal data class DogecoinTrustedPersonalNodeActivationToken(
     val startedAtMonotonicMillis: Long
 )
 
+/**
+ * One process-memory-only lease for collecting a complete proof-backed UTXO snapshot. It deliberately
+ * carries no signer authority; DES-1-C only permits a caller to retain an all-or-nothing proof result.
+ */
+internal data class DogecoinTrustedPersonalNodeProofRequestToken(
+    val nonce: Long,
+    val binding: DogecoinTrustedPersonalNodeSessionBinding,
+    val startedAtMonotonicMillis: Long
+)
+
 /** Read-only values for display. These types provide no signer or broadcast capability. */
 internal data class DogecoinTrustedPersonalNodeTimedDisplaySnapshot(
     val binding: DogecoinTrustedPersonalNodeSessionBinding,
@@ -84,6 +94,27 @@ internal fun isDogecoinTrustedPersonalNodeTimedSnapshotFresh(
     snapshot.binding == profile.toSessionBinding() &&
         isDogecoinTrustedPersonalNodeReadSnapshotReady(profile, snapshot.nodeSnapshot) &&
         isDogecoinTrustedPersonalNodeFresh(snapshot.capturedAtMonotonicMillis, nowMonotonicMillis)
+
+/** A proof is usable only inside the exact still-fresh read session that launched its collection. */
+internal fun isDogecoinTrustedPersonalNodeProofSnapshotFresh(
+    profile: DogecoinTrustedPersonalNodeProfile,
+    displaySnapshot: DogecoinTrustedPersonalNodeTimedDisplaySnapshot,
+    proofToken: DogecoinTrustedPersonalNodeProofRequestToken,
+    proofSnapshot: DogecoinTrustedPersonalNodeProofSnapshot,
+    nowMonotonicMillis: Long
+): Boolean {
+    val binding = profile.toSessionBinding()
+    return displaySnapshot.binding == binding &&
+        proofToken.binding == binding &&
+        proofSnapshot.binding == binding &&
+        proofSnapshot.capturedAtMonotonicMillis == proofToken.startedAtMonotonicMillis &&
+        proofToken.startedAtMonotonicMillis >= displaySnapshot.capturedAtMonotonicMillis &&
+        isDogecoinTrustedPersonalNodeTimedSnapshotFresh(profile, displaySnapshot, nowMonotonicMillis) &&
+        isDogecoinTrustedPersonalNodeFresh(
+            proofSnapshot.capturedAtMonotonicMillis,
+            nowMonotonicMillis
+        )
+}
 
 /**
  * One process-wide holder preserves an explicit activation across sheet close/reopen, but never across

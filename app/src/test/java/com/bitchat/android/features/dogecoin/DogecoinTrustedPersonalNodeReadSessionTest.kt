@@ -145,9 +145,133 @@ class DogecoinTrustedPersonalNodeReadSessionTest {
         assertTrue(holder.recordSuccessfulReadSnapshot(token, rawSnapshot(profile), 1_001L))
         assertEquals(DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED, holder.state)
 
+        val proofToken = assertNotNullValue(holder.beginProofSnapshot(1_002L))
+        assertTrue(
+            holder.recordSuccessfulProofSnapshot(
+                proofToken,
+                proofSnapshot(profile, proofToken.startedAtMonotonicMillis),
+                1_003L
+            )
+        )
+        assertNotNull(holder.freshProofSnapshot(1_004L))
+
         assertFalse(dogecoinSpendRouteAllowed(DogecoinNetwork.MAINNET, DogecoinBackend.RPC))
         assertFalse(dogecoinGenericRpcSpendAllowed(DogecoinNetwork.MAINNET))
         assertTrue(dogecoinSpendRouteAllowed(DogecoinNetwork.MAINNET, DogecoinBackend.SPV))
+    }
+
+    @Test
+    fun `proof token requires active fresh display and exact binding start time`() {
+        val profile = profile(revision = 14L)
+        val inactive = holder(profile)
+        assertNull(inactive.beginProofSnapshot(100L))
+
+        val holder = holder(profile)
+        val activation = assertNotNullValue(holder.beginActivation(1_000L))
+        assertTrue(holder.recordSuccessfulReadSnapshot(activation, rawSnapshot(profile), 1_001L))
+
+        val first = assertNotNullValue(holder.beginProofSnapshot(1_002L))
+        assertTrue(holder.isProofSnapshotCurrent(first, 1_003L))
+        val replacement = assertNotNullValue(holder.beginProofSnapshot(1_004L))
+        assertFalse(holder.isProofSnapshotCurrent(first, 1_005L))
+        assertTrue(holder.isProofSnapshotCurrent(replacement, 1_005L))
+
+        val wrongBinding = profile.copy(revision = profile.revision + 1L).toSessionBinding()
+        assertFalse(
+            holder.recordSuccessfulProofSnapshot(
+                replacement,
+                proofSnapshot(profile, replacement.startedAtMonotonicMillis, wrongBinding),
+                1_006L
+            )
+        )
+        assertNull(holder.freshProofSnapshot(1_006L))
+        assertEquals(DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED, holder.state)
+
+        val wrongStart = assertNotNullValue(holder.beginProofSnapshot(1_007L))
+        assertFalse(
+            holder.recordSuccessfulProofSnapshot(
+                wrongStart,
+                proofSnapshot(profile, wrongStart.startedAtMonotonicMillis + 1L),
+                1_009L
+            )
+        )
+        assertNull(holder.freshProofSnapshot(1_009L))
+    }
+
+    @Test
+    fun `incomplete proof collection stays display only and cannot publish a prefix`() {
+        val profile = profile(revision = 15L)
+        val holder = activeHolder(profile, displayStartedAt = 500L)
+        val display = assertNotNullValue(holder.displaySnapshot)
+        val token = assertNotNullValue(holder.beginProofSnapshot(501L))
+
+        assertTrue(holder.recordProofSnapshotFailure(token))
+        assertEquals(DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED, holder.state)
+        assertEquals(display, holder.displaySnapshot)
+        assertNull(holder.freshProofSnapshot(501L))
+        assertFalse(holder.recordProofSnapshotFailure(token))
+        assertFalse(dogecoinSpendRouteAllowed(DogecoinNetwork.MAINNET, DogecoinBackend.RPC))
+    }
+
+    @Test
+    fun `proof is process only and expires with the bound display ttl`() {
+        val profile = profile(revision = 16L)
+        val holder = activeHolder(profile, displayStartedAt = 1_000L)
+        val token = assertNotNullValue(holder.beginProofSnapshot(1_001L))
+        assertTrue(
+            holder.recordSuccessfulProofSnapshot(
+                token,
+                proofSnapshot(profile, token.startedAtMonotonicMillis),
+                1_002L
+            )
+        )
+        assertNotNull(holder.freshProofSnapshot(121_000L))
+        assertNull(holder.freshProofSnapshot(121_001L))
+        assertEquals(DogecoinTrustedPersonalNodeState.DEGRADED, holder.state)
+
+        val afterProcessDeath = holder(profile)
+        assertEquals(DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE, afterProcessDeath.state)
+        assertNull(afterProcessDeath.displaySnapshot)
+        assertNull(afterProcessDeath.freshProofSnapshot(1_002L))
+    }
+
+    @Test
+    fun `every read session lifecycle boundary invalidates proof`() {
+        val profile = profile(revision = 17L)
+
+        activeHolderWithProof(profile, 100L).let { holder ->
+            assertNotNull(holder.refreshActiveReadSnapshot(200L))
+            assertNull(holder.freshProofSnapshot(200L))
+        }
+        activeHolderWithProof(profile, 300L).let { holder ->
+            holder.deactivate()
+            assertNull(holder.freshProofSnapshot(304L))
+        }
+        activeHolderWithProof(profile, 500L).let { holder ->
+            holder.beginProvisioning(1L)
+            assertNull(holder.freshProofSnapshot(504L))
+        }
+        activeFixtureWithProof(profile, 700L).let { fixture ->
+            assertTrue(fixture.holder.recordTransientFailure(fixture.activationToken))
+            assertNull(fixture.holder.freshProofSnapshot(704L))
+            assertNotNull(fixture.holder.retryDegradedActivation(704L))
+            assertNull(fixture.holder.freshProofSnapshot(704L))
+        }
+        activeFixtureWithProof(profile, 900L).let { fixture ->
+            assertTrue(fixture.holder.recordAuthenticationRequired(fixture.activationToken))
+            assertNull(fixture.holder.freshProofSnapshot(904L))
+        }
+        activeHolderWithProof(profile, 1_100L).let { holder ->
+            holder.synchronizePersistedAuthorization(
+                DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE,
+                profile.copy(revision = profile.revision + 1L)
+            )
+            assertNull(holder.freshProofSnapshot(1_104L))
+        }
+        activeHolderWithProof(profile, 1_300L).let { holder ->
+            holder.revoke()
+            assertNull(holder.freshProofSnapshot(1_304L))
+        }
     }
 
     @Test
@@ -253,6 +377,48 @@ class DogecoinTrustedPersonalNodeReadSessionTest {
             savedProfile = profile
         )
 
+    private fun activeHolder(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        displayStartedAt: Long
+    ): DogecoinTrustedPersonalNodeSessionHolder =
+        activeFixture(profile, displayStartedAt).holder
+
+    private fun activeFixture(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        displayStartedAt: Long
+    ): ActiveFixture {
+        val holder = holder(profile)
+        val activation = assertNotNullValue(holder.beginActivation(displayStartedAt))
+        assertTrue(
+            holder.recordSuccessfulReadSnapshot(
+                activation,
+                rawSnapshot(profile),
+                displayStartedAt + 1L
+            )
+        )
+        return ActiveFixture(holder, activation)
+    }
+
+    private fun activeHolderWithProof(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        displayStartedAt: Long
+    ): DogecoinTrustedPersonalNodeSessionHolder =
+        activeFixtureWithProof(profile, displayStartedAt).holder
+
+    private fun activeFixtureWithProof(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        displayStartedAt: Long
+    ): ActiveFixture = activeFixture(profile, displayStartedAt).also { fixture ->
+        val token = assertNotNullValue(fixture.holder.beginProofSnapshot(displayStartedAt + 2L))
+        assertTrue(
+            fixture.holder.recordSuccessfulProofSnapshot(
+                token,
+                proofSnapshot(profile, token.startedAtMonotonicMillis),
+                displayStartedAt + 3L
+            )
+        )
+    }
+
     private fun profile(revision: Long): DogecoinTrustedPersonalNodeProfile =
         DogecoinTrustedPersonalNodeProfile(
             origin = "https://dogebox.tail1234.ts.net",
@@ -285,8 +451,27 @@ class DogecoinTrustedPersonalNodeReadSessionTest {
             activity = emptyList()
         )
 
+    private fun proofSnapshot(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        capturedAtMonotonicMillis: Long,
+        binding: DogecoinTrustedPersonalNodeSessionBinding = profile.toSessionBinding()
+    ): DogecoinTrustedPersonalNodeProofSnapshot =
+        DogecoinTrustedPersonalNodeProofSnapshot.complete(
+            binding = binding,
+            capturedAtMonotonicMillis = capturedAtMonotonicMillis,
+            startTip = DogecoinTrustedPersonalNodeBlockTip(100, "11".repeat(32)),
+            endTip = DogecoinTrustedPersonalNodeBlockTip(100, "11".repeat(32)),
+            proofCandidates = emptyList(),
+            totalProofBytes = 0
+        )
+
     private fun <T : Any> assertNotNullValue(value: T?): T {
         assertNotNull(value)
         return requireNotNull(value)
     }
+
+    private data class ActiveFixture(
+        val holder: DogecoinTrustedPersonalNodeSessionHolder,
+        val activationToken: DogecoinTrustedPersonalNodeActivationToken
+    )
 }

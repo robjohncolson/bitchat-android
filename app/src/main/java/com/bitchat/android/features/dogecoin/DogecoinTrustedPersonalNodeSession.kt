@@ -36,8 +36,15 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     private var activationToken: DogecoinTrustedPersonalNodeActivationToken? = null
     private var stateBeforeChecking = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
 
+    private var nextProofNonce = 1L
+    private var proofToken: DogecoinTrustedPersonalNodeProofRequestToken? = null
+
     var displaySnapshot: DogecoinTrustedPersonalNodeTimedDisplaySnapshot? = null
         private set
+
+    // Never expose retained proof state directly: callers must pass through freshProofSnapshot(),
+    // which rechecks both the display lease and proof TTL at the moment of use.
+    private var retainedProofSnapshot: DogecoinTrustedPersonalNodeProofSnapshot? = null
 
     @Synchronized
     fun beginProvisioning(draftRevision: Long): DogecoinTrustedPersonalNodeProvisioningToken {
@@ -189,6 +196,110 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         )
     }
 
+    /**
+     * Starts an all-or-nothing proof collection only inside the exact active, fresh display session.
+     * Starting again immediately discards any older proof so stale inputs cannot remain available while
+     * a replacement is in flight.
+     */
+    @Synchronized
+    fun beginProofSnapshot(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeProofRequestToken? {
+        val boundProfile = profile?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile) ?: return null
+        val currentDisplay = freshDisplaySnapshot(nowMonotonicMillis) ?: return null
+        if (state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED) return null
+        val binding = boundProfile.toSessionBinding()
+        if (currentDisplay.binding != binding) return null
+
+        clearProofSession()
+        val token = DogecoinTrustedPersonalNodeProofRequestToken(
+            nonce = nextProofNonce,
+            binding = binding,
+            startedAtMonotonicMillis = nowMonotonicMillis
+        )
+        nextProofNonce = if (nextProofNonce == Long.MAX_VALUE) 1L else nextProofNonce + 1L
+        proofToken = token
+        return token
+    }
+
+    /** Lease check for each future proof RPC; it also expires stale display/proof work fail closed. */
+    @Synchronized
+    fun isProofSnapshotCurrent(
+        token: DogecoinTrustedPersonalNodeProofRequestToken,
+        nowMonotonicMillis: Long
+    ): Boolean {
+        refreshFreshness(nowMonotonicMillis)
+        val current = matchesProofToken(token) &&
+            state == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED &&
+            isDogecoinTrustedPersonalNodeFresh(token.startedAtMonotonicMillis, nowMonotonicMillis)
+        if (!current && proofToken == token) clearProofSession()
+        return current
+    }
+
+    /**
+     * Atomically publishes only an exact-bound, complete proof result. A current but mismatched/stale
+     * response consumes the lease and leaves the still-fresh node display active without spend inputs.
+     */
+    @Synchronized
+    fun recordSuccessfulProofSnapshot(
+        token: DogecoinTrustedPersonalNodeProofRequestToken,
+        result: DogecoinTrustedPersonalNodeProofSnapshot,
+        nowMonotonicMillis: Long
+    ): Boolean {
+        if (!matchesProofToken(token)) return false
+        val boundProfile = profile
+        val currentDisplay = displaySnapshot
+        proofToken = null
+        retainedProofSnapshot = null
+        if (
+            state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+            boundProfile == null ||
+            currentDisplay == null ||
+            !isDogecoinTrustedPersonalNodeProofSnapshotFresh(
+                profile = boundProfile,
+                displaySnapshot = currentDisplay,
+                proofToken = token,
+                proofSnapshot = result,
+                nowMonotonicMillis = nowMonotonicMillis
+            )
+        ) {
+            refreshFreshness(nowMonotonicMillis)
+            return false
+        }
+        retainedProofSnapshot = result
+        return true
+    }
+
+    /** Incomplete/failed proof collection never degrades an otherwise fresh display session. */
+    @Synchronized
+    fun recordProofSnapshotFailure(token: DogecoinTrustedPersonalNodeProofRequestToken): Boolean {
+        if (!matchesProofToken(token)) return false
+        clearProofSession()
+        return true
+    }
+
+    @Synchronized
+    fun freshProofSnapshot(nowMonotonicMillis: Long): DogecoinTrustedPersonalNodeProofSnapshot? {
+        refreshFreshness(nowMonotonicMillis)
+        val boundProfile = profile
+        val currentDisplay = displaySnapshot
+        val currentProof = retainedProofSnapshot
+        if (
+            state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+            boundProfile == null ||
+            currentDisplay == null ||
+            currentProof == null ||
+            currentProof.binding != boundProfile.toSessionBinding() ||
+            currentProof.capturedAtMonotonicMillis < currentDisplay.capturedAtMonotonicMillis ||
+            !isDogecoinTrustedPersonalNodeFresh(
+                currentProof.capturedAtMonotonicMillis,
+                nowMonotonicMillis
+            )
+        ) {
+            retainedProofSnapshot = null
+            return null
+        }
+        return currentProof
+    }
+
     /** Dismiss/cancellation resolves CHECKING synchronously instead of leaving an immortal spinner. */
     @Synchronized
     fun cancelActivation(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
@@ -244,6 +355,7 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         ) {
             return false
         }
+        clearProofSession()
         state = DogecoinTrustedPersonalNodeState.DEGRADED
         return true
     }
@@ -274,7 +386,21 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
             currentSnapshot == null ||
             !isDogecoinTrustedPersonalNodeTimedSnapshotFresh(boundProfile, currentSnapshot, nowMonotonicMillis)
         ) {
+            clearProofSession()
             state = DogecoinTrustedPersonalNodeState.DEGRADED
+        } else {
+            retainedProofSnapshot?.let { proof ->
+                if (
+                    proof.binding != boundProfile.toSessionBinding() ||
+                    proof.capturedAtMonotonicMillis < currentSnapshot.capturedAtMonotonicMillis ||
+                    !isDogecoinTrustedPersonalNodeFresh(
+                        proof.capturedAtMonotonicMillis,
+                        nowMonotonicMillis
+                    )
+                ) {
+                    clearProofSession()
+                }
+            }
         }
         return state
     }
@@ -354,6 +480,7 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         previousState: DogecoinTrustedPersonalNodeState
     ): DogecoinTrustedPersonalNodeActivationToken {
         clearTransientProvisioning()
+        clearProofSession()
         if (!keepDisplaySnapshot) displaySnapshot = null
         val token = DogecoinTrustedPersonalNodeActivationToken(
             nonce = nextActivationNonce,
@@ -370,10 +497,19 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     private fun matchesActiveToken(token: DogecoinTrustedPersonalNodeActivationToken): Boolean =
         activationToken == token && profile?.toSessionBinding() == token.binding
 
+    private fun matchesProofToken(token: DogecoinTrustedPersonalNodeProofRequestToken): Boolean =
+        proofToken == token && profile?.toSessionBinding() == token.binding
+
+    private fun clearProofSession() {
+        proofToken = null
+        retainedProofSnapshot = null
+    }
+
     private fun clearReadSession() {
         activationToken = null
         stateBeforeChecking = DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
         displaySnapshot = null
+        clearProofSession()
     }
 
     private fun DogecoinTrustedPersonalNodeState.isLiveReadSessionState(): Boolean =
