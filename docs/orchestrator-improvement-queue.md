@@ -96,7 +96,6 @@ DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
 DES-1-A           DONE — TPN profile + ceremony (no spend)
 DES-1-B           DONE — Activation + readiness + read-only display
 DES-1-C           NEXT — Proof-backed UTXO / prev-tx (Codex)
-DES-1-C           Proof-backed UTXO / prev-tx
 DES-1-D           Send coordinator (first TPN spend unlock)
 DES-1-E           Settlement + dispute + SPV-6
 DES-1-F           Ops runbook + shareable profile export
