@@ -55,21 +55,30 @@ Report:
 
 ## 2. Queue order
 
+### Wave 1 (DONE — 2026-07)
+
 ```text
-P0-1  SPV teardown ANR (doge-spv-stop / DebugCommandReceiver)
-P0-2  SPV far-behind header stall
-P0-3  Home-node UX honesty (draft vs saved, provenance)
-P1-1  Simple contact rename (local pet names)
-P1-2  Simple chat list (unread / preview / time / sort)
-P1-3  Payment receipt loop (dogepaid, claim-until-corroborated)
-P1-4  Simple Money entry (open wallet without App Info dig)
-P2-1  Split DogecoinWalletSheet (behavior-preserving)
-P2-2  Extract doge-* console from ChatViewModel
-P2-3  Wallet EN/JA localization + parity test
-DES-1 Design-only: mainnet TRUSTED_PERSONAL_NODE (no code)
+P0-1 … P2-3, DES-1, HOME-NODE-SEND, VERIFYPROGRESS-CLAMP  → shipped on simple-family-profile
 ```
 
-**Dependencies:** Do not parallelize P0-1 and P0-2 (same SPV service). P1 cards may parallel after P0 if different agents and no file thrash. DES-1 anytime as design-only.
+### Wave 2 (ACTIVE) — home-node bulletproofing
+
+Full specs: **`docs/home-node-ux-hardening-spec.md`**
+
+```text
+CONF-RPC-PROGRESS   Confirmation UI from node while RPC/assist (Codex)
+WALLET-OPEN-HARDEN  Wallet open never freezes / SPV lifecycle thrash (Codex)
+```
+
+**Dependencies:** Run **CONF-RPC-PROGRESS first**, then **WALLET-OPEN-HARDEN** (both touch `DogecoinWalletSheet.kt`). Do not parallelize without orchestrator file split.
+
+### Later (not opened)
+
+```text
+WALLET-SESSION      State hoist for full sheet section split (money-path review)
+SPV-AUDIT-LATER     Independent SPV corroboration badge / dispute
+DES-1 implement     Mainnet TRUSTED_PERSONAL_NODE (only after DES-1 decisions)
+```
 
 ---
 
@@ -184,7 +193,33 @@ DES-1 Design-only: mainnet TRUSTED_PERSONAL_NODE (no code)
 **Preferred agent:** Codex  
 **Goal:** Design doc under `docs/` only — opt-in, Tailscale origin bind, what SPV gates remain, fee caps, claim-until-observed, failure modes, test plan, non-goals.  
 **Must not:** implement code; recommend WIF-to-Core; claim watch-only = honest oracle.  
-**Done means:** markdown path + open questions for human.
+**Done means:** markdown path + open questions for human.  
+**Status:** DONE → `docs/dogecoin-trusted-personal-node-mainnet-design.md`
+
+---
+
+### CONF-RPC-PROGRESS — Node-path confirmation UI
+
+**Preferred agent:** Codex  
+**Spec:** `docs/home-node-ux-hardening-spec.md` § CONF-RPC-PROGRESS  
+**Problem:** Home-node / RPC send succeeds but user never sees 0→6; focal ring is SPV-only and disabled under assist; RPC activity poll can jump to Confirmed.  
+**Goal:** Route-mirror confirmation progress: RPC/assist → node confs (fast poll for active `sentReceipt`); SPV → existing SPV depth. Honest provenance caption.  
+**Must not:** change signer/broadcast gates, trust classifier, require SPV synced for node-path progress; no mainnet TRUSTED_PERSONAL_NODE.  
+**Done means:** unit tests for source selection; manual testnet home-node send shows intermediate N/6; suite green.  
+**Out of scope:** WALLET-OPEN-HARDEN, SPV tip speed.
+
+---
+
+### WALLET-OPEN-HARDEN — Wallet open never freezes
+
+**Preferred agent:** Codex  
+**Spec:** `docs/home-node-ux-hardening-spec.md` § WALLET-OPEN-HARDEN  
+**Problem:** Tapping wallet from Simple can freeze the app (force-stop). SPV start on open + stop on every dismiss + heavy sheet + concurrent RPC.  
+**Goal:** Progressive open; no SPV stop thrash on dismiss; IO serialized/cancellable; responsive chrome.  
+**Must not:** weaken money gates; block Main on SPV/RPC; large state-hoist rewrite unless tiny helper.  
+**Done means:** 20× rapid open/close stable; cold open interactive quickly; suite green.  
+**Depends on:** prefer after CONF-RPC-PROGRESS (same sheet file).  
+**Out of scope:** full section split, CONF progress logic (unless conflict merge).
 
 ---
 
@@ -193,8 +228,10 @@ DES-1 Design-only: mainnet TRUSTED_PERSONAL_NODE (no code)
 - Tailscale Serve + loopback Core RPC works on testnet.  
 - Watch-only + full rescan → non-zero UTXOs for phone address.  
 - `doge-self-broadcast` phone-sign + node-broadcast E2E PASS (example txid era 2026-07-11).  
-- Home-node balance works after rescan.  
-- Draft vs saved RPC is intentional architecture; UX was the bug, not Tailscale.
+- Home-node balance works after rescan; **HOME-NODE-SEND** unlocks Review under assist.  
+- Draft vs saved RPC is intentional architecture; UX was the bug, not Tailscale.  
+- `verificationprogress` slightly >1.0 is normal on Dogecoin testnet (clamped).  
+- Confirmation ring under assist was **known gap** until CONF-RPC-PROGRESS.
 
 ---
 
