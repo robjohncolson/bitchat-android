@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal fun DogecoinTrustedPersonalNodeSettings(
     androidMainnetAddress: String,
     onSessionUseChanged: (Boolean) -> Unit = {},
+    onSessionStateChanged: (DogecoinTrustedPersonalNodeState) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -183,8 +184,9 @@ internal fun DogecoinTrustedPersonalNodeSettings(
         }
     }
 
-    LaunchedEffect(processSessionUsesNode) {
+    LaunchedEffect(processSessionUsesNode, authorizationState) {
         onSessionUseChanged(processSessionUsesNode)
+        onSessionStateChanged(authorizationState)
     }
 
     // Display age and expiry use only the phone's monotonic clock. This loop performs no network or disk I/O.

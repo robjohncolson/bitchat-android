@@ -96,8 +96,8 @@ DES-1-GUARDRAIL   DONE — fail-closed generic mainnet My node spend
 DES-1-A           DONE — TPN profile + ceremony (no spend)
 DES-1-B           DONE — Activation + readiness + read-only display
 DES-1-C           DONE — Proof-backed UTXO / prev-tx
-DES-1-D           NEXT — Send coordinator (first TPN spend unlock) (Codex)
-DES-1-E           Settlement + dispute + SPV-6
+DES-1-D           DONE — Send coordinator (first TPN spend unlock)
+DES-1-E           NEXT — Settlement + dispute + SPV-6 (Codex)
 DES-1-F           Ops runbook + shareable profile export
 WALLET-SESSION    State hoist (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
@@ -312,6 +312,14 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Preferred agent:** Codex  
 **Spec:** `docs/des1-implementation-plan.md` § DES-1-C  
 **Status:** DONE — VerifiedPrevout + proof snapshot; no spend unlock.
+
+---
+
+### DES-1-D — TPN send coordinator (first spend unlock)
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-implementation-plan.md` § DES-1-D  
+**Status:** DONE — typed route, VerifiedPrevout signing, hard fees, Claimed-only; generic mainnet RPC still blocked.
 
 ---
 

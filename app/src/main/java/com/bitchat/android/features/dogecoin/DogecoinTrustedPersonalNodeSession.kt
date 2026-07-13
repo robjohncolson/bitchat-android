@@ -39,6 +39,9 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     private var nextProofNonce = 1L
     private var proofToken: DogecoinTrustedPersonalNodeProofRequestToken? = null
 
+    private var nextSpendNonce = 1L
+    private var spendAuthorization: DogecoinTrustedPersonalNodeSpendAuthorization? = null
+
     var displaySnapshot: DogecoinTrustedPersonalNodeTimedDisplaySnapshot? = null
         private set
 
@@ -300,6 +303,71 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         return currentProof
     }
 
+    /**
+     * Freeze the exact currently retained proof into a one-review authority. Issuing a replacement
+     * invalidates the older review synchronously; no Boolean supplied by a caller can substitute for
+     * this holder-owned object identity.
+     */
+    @Synchronized
+    fun beginSpendAuthorization(
+        nowMonotonicMillis: Long
+    ): DogecoinTrustedPersonalNodeSpendAuthorization? {
+        val currentProof = freshProofSnapshot(nowMonotonicMillis) ?: return null
+        if (currentProof.proofCandidates.isEmpty()) return null
+        val boundProfile = profile?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile) ?: return null
+        if (
+            state != DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
+            currentProof.binding != boundProfile.toSessionBinding()
+        ) {
+            return null
+        }
+        val issued = DogecoinTrustedPersonalNodeSpendAuthorization(
+            nonce = nextSpendNonce,
+            binding = currentProof.binding,
+            proofSnapshot = currentProof
+        )
+        nextSpendNonce = if (nextSpendNonce == Long.MAX_VALUE) 1L else nextSpendNonce + 1L
+        spendAuthorization = issued
+        return issued
+    }
+
+    /** Recheck the exact process lease immediately before every money-path operation. */
+    @Synchronized
+    fun isSpendAuthorizationCurrent(
+        authorization: DogecoinTrustedPersonalNodeSpendAuthorization,
+        nowMonotonicMillis: Long
+    ): Boolean {
+        refreshFreshness(nowMonotonicMillis)
+        val current = state == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED &&
+            spendAuthorization === authorization &&
+            profile?.toSessionBinding() == authorization.binding &&
+            retainedProofSnapshot === authorization.proofSnapshot &&
+            isDogecoinTrustedPersonalNodeFresh(
+                authorization.proofSnapshot.capturedAtMonotonicMillis,
+                nowMonotonicMillis
+            )
+        if (!current && spendAuthorization === authorization) spendAuthorization = null
+        return current
+    }
+
+    /** Return proof bytes only through a still-current typed spend authorization. */
+    @Synchronized
+    fun freshProofSnapshot(
+        authorization: DogecoinTrustedPersonalNodeSpendAuthorization,
+        nowMonotonicMillis: Long
+    ): DogecoinTrustedPersonalNodeProofSnapshot? =
+        authorization.proofSnapshot.takeIf {
+            isSpendAuthorizationCurrent(authorization, nowMonotonicMillis)
+        }
+
+    /** Dismissing an undisclosed review removes its in-memory authority without touching the proof. */
+    @Synchronized
+    fun cancelSpendAuthorization(authorization: DogecoinTrustedPersonalNodeSpendAuthorization): Boolean {
+        if (spendAuthorization !== authorization) return false
+        spendAuthorization = null
+        return true
+    }
+
     /** Dismiss/cancellation resolves CHECKING synchronously instead of leaving an immortal spinner. */
     @Synchronized
     fun cancelActivation(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
@@ -503,6 +571,7 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
     private fun clearProofSession() {
         proofToken = null
         retainedProofSnapshot = null
+        spendAuthorization = null
     }
 
     private fun clearReadSession() {

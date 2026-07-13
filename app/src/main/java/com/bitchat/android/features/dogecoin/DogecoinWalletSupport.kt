@@ -190,11 +190,26 @@ internal data class DogecoinBroadcastReceipt(
     val peerCorroborated: Boolean = false,
     // Phase 3: SPV self-broadcast was relayed to peers but is not yet chain-confirmed. Renders "Claimed"
     // until the on-chain confirmationDepth poll flips it to false (then it shows as a normal receipt).
-    val viaSpvClaimedOnly: Boolean = false
+    val viaSpvClaimedOnly: Boolean = false,
+    // DES-1-D: exact TPN acceptance is a node claim only. DES-1-E alone may later promote it from
+    // Claimed using independent Built-in depth; generic RPC confirmation must never do that here.
+    val viaTrustedPersonalNodeClaimedOnly: Boolean = false
 ) {
     val totalDebitKoinu: Long
         get() = dogecoinSaturatingAddKoinu(sendAmountKoinu, feeKoinu)
 }
+
+/** DES-1-D settlement guard: no node or unsynced-SPV depth can promote a durable TPN attempt. */
+internal fun dogecoinPresentedConfirmationDepth(
+    observedDepth: Int,
+    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?
+): Int = if (trustedPersonalNodeAttemptState == null) observedDepth.coerceAtLeast(0) else 0
+
+internal fun dogecoinPresentationIsConfirmed(
+    observedDepth: Int,
+    confirmationTarget: Int,
+    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?
+): Boolean = trustedPersonalNodeAttemptState == null && observedDepth >= confirmationTarget
 
 internal enum class DogecoinWatchImportAction {
     REFRESH_BALANCE,

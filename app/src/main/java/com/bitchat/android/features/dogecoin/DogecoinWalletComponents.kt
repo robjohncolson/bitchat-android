@@ -210,7 +210,12 @@ internal fun NodeAssistCard(
 internal fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
     val colors = dogeWalletColors
     val incomingGreen = Color(0xFF2E7D32)
-    val confirmed = row.confirmations >= DOGECOIN_SPV_CONFIRM_TARGET
+    val trustedNodeAttemptState = row.trustedPersonalNodeAttemptState
+    val confirmed = dogecoinPresentationIsConfirmed(
+        row.confirmations,
+        DOGECOIN_SPV_CONFIRM_TARGET,
+        trustedNodeAttemptState
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -231,7 +236,22 @@ internal fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
             maxLines = 1,
             modifier = Modifier.weight(1f)
         )
-        if (confirmed) {
+        if (trustedNodeAttemptState != null) {
+            Text(
+                text = stringResource(
+                    when (trustedNodeAttemptState) {
+                        DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED ->
+                            R.string.dogecoin_tpn_attempt_state_ready
+                        DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN ->
+                            R.string.dogecoin_tpn_attempt_state_unknown
+                        DogecoinTrustedPersonalNodeAttemptState.CLAIMED ->
+                            R.string.dogecoin_tpn_attempt_state_claimed
+                    }
+                ),
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.muted
+            )
+        } else if (confirmed) {
             Text("✓", style = MaterialTheme.typography.titleMedium, color = colors.gold)
         } else {
             ConfirmationRing(

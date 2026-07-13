@@ -407,6 +407,28 @@ class DogecoinSpvService private constructor(
         }
     }
 
+    /**
+     * Positive-only independent veto for DES-1-D. `true` means the SPV wallet actually contains a
+     * non-dead peer/chain transaction spending one of the exact outpoints. `false` is never treated as
+     * proof of unspentness (the behind/birthdate-limited wallet may simply not know it), and `null`
+     * means this network has no active SPV wallet.
+     */
+    fun hasObservedSpend(
+        network: DogecoinNetwork,
+        outpoints: List<Pair<String, Int>>
+    ): Boolean? = synchronized(lock) {
+        val w = wallet?.takeIf { activeNetwork == network } ?: return null
+        if (outpoints.isEmpty()) return false
+        val exact = outpoints.map { (txid, vout) -> "${txid.lowercase()}:$vout" }.toSet()
+        org.bitcoinj.core.Context.propagate(bitcoinjContext)
+        w.getTransactions(false).any { transaction ->
+            transaction.inputs.any { input ->
+                val outpoint = input.outpoint
+                "${outpoint.hash.toString().lowercase()}:${outpoint.index}" in exact
+            }
+        }
+    }
+
     /** Confirmed/unconfirmed balance shaped like the RPC/explorer result. Null if SPV isn't active for [network]. */
     fun snapshotBalance(network: DogecoinNetwork): DogecoinWalletBalance? = synchronized(lock) {
         val w = wallet?.takeIf { activeNetwork == network } ?: return null
