@@ -154,7 +154,10 @@ internal data class WalletTxRow(
     val incoming: Boolean,
     val amountKoinu: Long,
     val confirmations: Int,
-    val timeSeconds: Long?
+    val timeSeconds: Long?,
+    // Durable DES-1-D attempt state wins over both node-reported confirmations and an unsynced SPV
+    // observation. Only DES-1-E may independently settle this exact txid to Confirmed.
+    val trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState? = null
 )
 
 /** Binds presentation-only confirmation depth to its txid so receipts can never inherit stale progress. */
@@ -365,6 +368,18 @@ fun DogecoinWalletSheet(
 
     val clipboardManager = LocalClipboardManager.current
     val rpcClient = remember { DogecoinRpcClient() }
+    // TPN has its own client family and encrypted stores. Keeping it separate from generic node settings
+    // prevents draft/save/cancel generations from accidentally authorizing or rerouting a mainnet spend.
+    val trustedPersonalNodeRpcClient = remember { DogecoinRpcClient() }
+    val trustedPersonalNodeStore = remember(context.applicationContext) {
+        DogecoinTrustedPersonalNodeStore(context.applicationContext)
+    }
+    val trustedPersonalNodeAttemptStore = remember(context.applicationContext) {
+        DogecoinTrustedPersonalNodeAttemptStore(context.applicationContext)
+    }
+    val trustedPersonalNodeSessionHolder = remember {
+        DogecoinTrustedPersonalNodeProcessSessionRegistry.current()
+    }
     // Synchronous, thread-safe lease generation checked inside DogecoinRpcClient before every request.
     // Saving/switching/stopping a route revokes multi-call workflows before their next HTTP request.
     val rpcRequestGeneration = remember { AtomicInteger(0) }
@@ -415,11 +430,14 @@ fun DogecoinWalletSheet(
     val dogecoinBackend =
         if (nodeAssist && persistedBackend == DogecoinBackend.SPV) DogecoinBackend.RPC else persistedBackend
     var trustedPersonalNodeKeepsSpvSyncing by remember(selectedNetwork) {
-        val processState = DogecoinTrustedPersonalNodeProcessSessionRegistry.current().state
+        val processState = trustedPersonalNodeSessionHolder.state
         mutableStateOf(
             selectedNetwork == DogecoinNetwork.MAINNET &&
                 dogecoinTrustedPersonalNodeSessionUsesNode(processState)
         )
+    }
+    var trustedPersonalNodeSessionState by remember(selectedNetwork) {
+        mutableStateOf(trustedPersonalNodeSessionHolder.state)
     }
     val spvTargetNetwork = dogecoinSpvTargetNetwork(
         persistedBackend = persistedBackend,
@@ -498,6 +516,15 @@ fun DogecoinWalletSheet(
     var sendError by remember { mutableStateOf<String?>(null) }
     var sentReceipt by remember { mutableStateOf<DogecoinBroadcastReceipt?>(null) }
     var pendingTransaction by remember { mutableStateOf<DogecoinSignedTransaction?>(null) }
+    var pendingTrustedPersonalNodeReview by remember {
+        mutableStateOf<DogecoinTrustedPersonalNodeFrozenReview?>(null)
+    }
+    var pendingTrustedPersonalNodeRequestLabel by remember { mutableStateOf<String?>(null) }
+    var pendingTrustedPersonalNodeRequestMessage by remember { mutableStateOf<String?>(null) }
+    var trustedPersonalNodeOracleAcknowledged by remember { mutableStateOf(false) }
+    var trustedPersonalNodeAttemptLoadResult by remember {
+        mutableStateOf<DogecoinTrustedPersonalNodeAttemptLoadResult?>(null)
+    }
     var pendingPaymentReceiptContext by remember { mutableStateOf<DogepaidPaymentContext?>(null) }
     // One-shot within this sheet instance. Keeping the parent prop unchanged must not let a second send
     // reuse the original conversation/request binding after the first transaction succeeds.
@@ -561,19 +588,67 @@ fun DogecoinWalletSheet(
     val minimumSendOutputKoinu = dogecoinEffectiveStandardOutputKoinu(usableNodeStatus?.softDustLimitKoinu)
     val wifCopyRecorded = wifCopyState.matches(snapshot.key)
 
+    // Mainnet coin selection must not start until the encrypted reservation ledger has been read. A
+    // missing/corrupt ledger is not equivalent to an empty ledger, and every recorded state keeps its
+    // inputs reserved until the independent DES-1-E reconciliation work exists.
+    LaunchedEffect(selectedNetwork, snapshot.key.address) {
+        trustedPersonalNodeAttemptLoadResult = null
+        if (selectedNetwork != DogecoinNetwork.MAINNET) {
+            trustedPersonalNodeAttemptLoadResult = DogecoinTrustedPersonalNodeAttemptLoadResult.Empty
+            return@LaunchedEffect
+        }
+        withFrameNanos { }
+        trustedPersonalNodeAttemptLoadResult = withContext(Dispatchers.IO) {
+            trustedPersonalNodeAttemptStore.load()
+        }
+    }
+
+    val trustedPersonalNodeFreshDisplay = if (
+        selectedNetwork == DogecoinNetwork.MAINNET &&
+        trustedPersonalNodeSessionState == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED
+    ) {
+        trustedPersonalNodeSessionHolder.freshDisplaySnapshot(
+            android.os.SystemClock.elapsedRealtime()
+        )
+    } else {
+        null
+    }
+    val trustedPersonalNodeSpendSelected =
+        selectedNetwork == DogecoinNetwork.MAINNET &&
+            trustedPersonalNodeSessionHolder.state ==
+            DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED &&
+            trustedPersonalNodeFreshDisplay?.binding?.androidAddress == snapshot.key.address
+    val trustedPersonalNodeLedgerEmpty =
+        trustedPersonalNodeAttemptLoadResult is DogecoinTrustedPersonalNodeAttemptLoadResult.Empty
+    val mainnetAttemptLedgerAllowsNewSpend =
+        selectedNetwork != DogecoinNetwork.MAINNET || trustedPersonalNodeLedgerEmpty
+
     SecureWindowFlagEffect(enabled = pendingWifCopy != null || importWifRevealed)
-    val sendFeePresets = remember(
-        minimumSendFeePerKbKoinu,
+    // A TPN spend never inherits relay/incremental fee suggestions from generic RPC settings. The
+    // operator may still enter an explicit advanced rate, and the proof-derived actual fee remains
+    // subject to the non-overridable absolute/relative caps.
+    val routeMinimumFeePerKbKoinu = if (trustedPersonalNodeSpendSelected) {
+        DogecoinProtocol.MIN_TX_FEE_KOINU
+    } else {
+        minimumSendFeePerKbKoinu
+    }
+    val routeIncrementalFeePerKbKoinu = if (trustedPersonalNodeSpendSelected) {
+        null
+    } else {
         usableNodeStatus?.incrementalFeePerKbKoinu
+    }
+    val sendFeePresets = remember(
+        routeMinimumFeePerKbKoinu,
+        routeIncrementalFeePerKbKoinu
     ) {
         dogecoinFeePresetOptions(
-            minimumFeePerKbKoinu = minimumSendFeePerKbKoinu,
-            incrementalFeePerKbKoinu = usableNodeStatus?.incrementalFeePerKbKoinu
+            minimumFeePerKbKoinu = routeMinimumFeePerKbKoinu,
+            incrementalFeePerKbKoinu = routeIncrementalFeePerKbKoinu
         )
     }
     val selectedFeePresetRateKoinu = sendFeePresets.firstOrNull { it.preset == sendFeePreset }
         ?.feePerKbKoinu
-        ?: minimumSendFeePerKbKoinu
+        ?: routeMinimumFeePerKbKoinu
 
     fun currentRpcConfig(): DogecoinRpcConfig {
         return DogecoinRpcConfig(
@@ -591,13 +666,36 @@ fun DogecoinWalletSheet(
 
     fun isValidSelectedFeeRate(value: String): Boolean {
         if (!DogecoinAmount.isValidAmount(value)) return false
-        return DogecoinAmount.toKoinu(value) >= minimumSendFeePerKbKoinu
+        val minimum = if (trustedPersonalNodeSpendSelected) {
+            DogecoinProtocol.MIN_TX_FEE_KOINU
+        } else {
+            minimumSendFeePerKbKoinu
+        }
+        return DogecoinAmount.toKoinu(value) >= minimum
     }
 
     fun isValidSelectedSendAmount(value: String): Boolean {
         if (!DogecoinAmount.isValidAmount(value)) return false
-        return DogecoinAmount.toKoinu(value) >= minimumSendOutputKoinu
+        val minimum = if (trustedPersonalNodeSpendSelected) {
+            DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+        } else {
+            minimumSendOutputKoinu
+        }
+        return DogecoinAmount.toKoinu(value) >= minimum
     }
+
+    fun trustedPersonalNodeAttemptStateLabel(
+        state: DogecoinTrustedPersonalNodeAttemptState
+    ): String = context.getString(
+        when (state) {
+            DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED ->
+                R.string.dogecoin_tpn_attempt_state_ready
+            DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN ->
+                R.string.dogecoin_tpn_attempt_state_unknown
+            DogecoinTrustedPersonalNodeAttemptState.CLAIMED ->
+                R.string.dogecoin_tpn_attempt_state_claimed
+        }
+    )
 
     fun revokeActiveRpcRequests() {
         rpcRequestGeneration.incrementAndGet()
@@ -747,6 +845,9 @@ fun DogecoinWalletSheet(
         if (network == selectedNetwork) return
 
         // An unsaved node-settings draft is intentionally discarded: only an explicit Save persists it.
+        pendingTrustedPersonalNodeReview?.authorization?.let(
+            trustedPersonalNodeSessionHolder::cancelSpendAuthorization
+        )
         revokeActiveRpcRequests()
         invalidateDraftTestState()
         nodeAssist = false
@@ -786,8 +887,12 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
         pendingTransaction = null
+        pendingTrustedPersonalNodeReview = null
+        pendingTrustedPersonalNodeRequestLabel = null
+        pendingTrustedPersonalNodeRequestMessage = null
         pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
+        trustedPersonalNodeOracleAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
         pendingWifCopy = null
@@ -815,6 +920,9 @@ fun DogecoinWalletSheet(
     }
 
     fun clearWalletRuntimeState() {
+        pendingTrustedPersonalNodeReview?.authorization?.let(
+            trustedPersonalNodeSessionHolder::cancelSpendAuthorization
+        )
         revokeActiveRpcRequests()
         invalidateDraftTestState()
         nodeAssist = false
@@ -837,8 +945,12 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
         pendingTransaction = null
+        pendingTrustedPersonalNodeReview = null
+        pendingTrustedPersonalNodeRequestLabel = null
+        pendingTrustedPersonalNodeRequestMessage = null
         pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
+        trustedPersonalNodeOracleAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
         pendingWatchImportAction = null
@@ -1145,6 +1257,168 @@ fun DogecoinWalletSheet(
         }
     }
 
+    fun prepareTrustedPersonalNodeReview(
+        recipient: String,
+        dogeAmount: String,
+        feePerKbKoinu: Long,
+        requestLabel: String?,
+        requestMessage: String?,
+        reviewedPaymentReceiptContext: DogepaidPaymentContext?
+    ) {
+        if (!trustedPersonalNodeLedgerEmpty) {
+            sendError = if (
+                trustedPersonalNodeAttemptLoadResult ==
+                DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable ||
+                trustedPersonalNodeAttemptLoadResult == null
+            ) {
+                context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+            } else {
+                val attempt = (
+                    trustedPersonalNodeAttemptLoadResult as?
+                        DogecoinTrustedPersonalNodeAttemptLoadResult.Available
+                    )?.attempt
+                context.getString(
+                    R.string.dogecoin_tpn_attempt_unresolved,
+                    attempt?.let { trustedPersonalNodeAttemptStateLabel(it.state) }
+                        ?: context.getString(R.string.unknown),
+                    attempt?.review?.localTxid ?: context.getString(R.string.unknown)
+                )
+            }
+            return
+        }
+        val profile = trustedPersonalNodeSessionHolder.profile
+        val proofToken = trustedPersonalNodeSessionHolder.beginProofSnapshot(
+            android.os.SystemClock.elapsedRealtime()
+        )
+        if (
+            profile == null || proofToken == null ||
+            profile.network != DogecoinNetwork.MAINNET ||
+            profile.androidAddress != snapshot.key.address
+        ) {
+            sendError = context.getString(R.string.dogecoin_tpn_send_requires_active)
+            return
+        }
+
+        sending = true
+        sendError = null
+        val wallet = snapshot.key
+        coroutineScope.launch {
+            var authorization: DogecoinTrustedPersonalNodeSpendAuthorization? = null
+            runCatching {
+                val durable = withContext(Dispatchers.IO) {
+                    val loadedProfile = trustedPersonalNodeStore.loadProfile()
+                    val credentials = loadedProfile?.let(trustedPersonalNodeStore::loadCredentials)
+                    Triple(loadedProfile, credentials, trustedPersonalNodeAttemptStore.load())
+                }
+                check(durable.first == profile && durable.second != null) {
+                    context.getString(R.string.dogecoin_tpn_send_requires_active)
+                }
+                check(durable.third is DogecoinTrustedPersonalNodeAttemptLoadResult.Empty) {
+                    when (val ledger = durable.third) {
+                        is DogecoinTrustedPersonalNodeAttemptLoadResult.Available -> context.getString(
+                            R.string.dogecoin_tpn_attempt_unresolved,
+                            trustedPersonalNodeAttemptStateLabel(ledger.attempt.state),
+                            ledger.attempt.review.localTxid
+                        )
+                        else -> context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+                    }
+                }
+                val proofSnapshot = trustedPersonalNodeRpcClient.readTrustedPersonalNodeProofSnapshot(
+                    profile = profile,
+                    credentials = checkNotNull(durable.second),
+                    requestToken = proofToken,
+                    requestIsCurrent = {
+                        trustedPersonalNodeSessionHolder.isProofSnapshotCurrent(
+                            proofToken,
+                            android.os.SystemClock.elapsedRealtime()
+                        )
+                    }
+                )
+                val proofAccepted = trustedPersonalNodeSessionHolder.recordSuccessfulProofSnapshot(
+                    proofToken,
+                    proofSnapshot,
+                    android.os.SystemClock.elapsedRealtime()
+                )
+                check(proofAccepted) {
+                    context.getString(R.string.dogecoin_tpn_send_incomplete_proof)
+                }
+                val issuedAuthorization = trustedPersonalNodeSessionHolder.beginSpendAuthorization(
+                    android.os.SystemClock.elapsedRealtime()
+                ) ?: throw IllegalStateException(
+                    context.getString(R.string.dogecoin_tpn_send_incomplete_proof)
+                )
+                authorization = issuedAuthorization
+                val route = DogecoinSpendRoute.TRUSTED_PERSONAL_NODE(issuedAuthorization)
+                check(
+                    dogecoinSpendRouteAllowed(
+                        network = DogecoinNetwork.MAINNET,
+                        route = route,
+                        sessionHolder = trustedPersonalNodeSessionHolder,
+                        nowMonotonicMillis = android.os.SystemClock.elapsedRealtime()
+                    )
+                ) {
+                    context.getString(R.string.dogecoin_tpn_send_requires_active)
+                }
+                withContext(Dispatchers.Default) {
+                    DogecoinTrustedPersonalNodeTransactionBuilder.createFrozenReview(
+                        wallet = wallet,
+                        sessionHolder = trustedPersonalNodeSessionHolder,
+                        authorization = issuedAuthorization,
+                        nowMonotonicMillis = android.os.SystemClock.elapsedRealtime(),
+                        recipientAddress = recipient,
+                        amount = dogeAmount,
+                        feePerKbKoinu = feePerKbKoinu
+                    )
+                }
+            }.onSuccess { review ->
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == wallet.address &&
+                    trustedPersonalNodeSessionHolder.isSpendAuthorizationCurrent(
+                        review.authorization,
+                        android.os.SystemClock.elapsedRealtime()
+                    )
+                ) {
+                    pendingTransaction = null
+                    pendingTrustedPersonalNodeReview = review
+                    pendingTrustedPersonalNodeRequestLabel = requestLabel
+                    pendingTrustedPersonalNodeRequestMessage = requestMessage
+                    pendingPaymentReceiptContext = reviewedPaymentReceiptContext
+                    mainnetBroadcastAcknowledged = false
+                    trustedPersonalNodeOracleAcknowledged = false
+                    highFeeAcknowledged = false
+                    policyUnavailableAcknowledged = false
+                } else {
+                    trustedPersonalNodeSessionHolder.cancelSpendAuthorization(review.authorization)
+                }
+            }.onFailure { error ->
+                authorization?.let(trustedPersonalNodeSessionHolder::cancelSpendAuthorization)
+                trustedPersonalNodeSessionHolder.recordProofSnapshotFailure(proofToken)
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == wallet.address
+                ) {
+                    sendError = if (error is DogecoinTrustedPersonalNodeFeeBlockedException) {
+                        context.getString(
+                            R.string.dogecoin_tpn_send_hard_fee_block,
+                            DogecoinAmount.formatKoinu(error.feeKoinu),
+                            DogecoinAmount.formatKoinu(error.sendAmountKoinu)
+                        )
+                    } else {
+                        error.message
+                            ?: context.getString(R.string.dogecoin_tpn_send_incomplete_proof)
+                    }
+                }
+            }
+            if (
+                selectedNetwork == DogecoinNetwork.MAINNET &&
+                snapshot.key.address == wallet.address
+            ) {
+                sending = false
+            }
+        }
+    }
+
     fun reviewSend(allowWatchImport: Boolean = false) {
         val recipient = sendAddress.trim()
         val dogeAmount = sendAmount.trim()
@@ -1152,7 +1426,9 @@ fun DogecoinWalletSheet(
         sendError = null
         sentReceipt = null
 
-        if (!dogecoinSpendRouteAllowed(selectedNetwork, dogecoinBackend)) {
+        if (!trustedPersonalNodeSpendSelected &&
+            !dogecoinSpendRouteAllowed(selectedNetwork, dogecoinBackend)
+        ) {
             sendError = context.getString(R.string.dogecoin_mainnet_rpc_spend_requires_tpn)
             return
         }
@@ -1164,18 +1440,41 @@ fun DogecoinWalletSheet(
             sendError = context.getString(R.string.dogecoin_send_invalid_amount)
             return
         }
-        if (!isValidSelectedSendAmount(dogeAmount)) {
+        val reviewMinimumOutputKoinu = if (trustedPersonalNodeSpendSelected) {
+            DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+        } else {
+            minimumSendOutputKoinu
+        }
+        if (DogecoinAmount.toKoinu(dogeAmount) < reviewMinimumOutputKoinu) {
             sendError = context.getString(
                 R.string.dogecoin_send_amount_too_small,
-                DogecoinAmount.formatKoinu(minimumSendOutputKoinu)
+                DogecoinAmount.formatKoinu(reviewMinimumOutputKoinu)
             )
             return
         }
-        if (!isValidSelectedFeeRate(feeRate)) {
+        val reviewMinimumFeePerKbKoinu = if (trustedPersonalNodeSpendSelected) {
+            DogecoinProtocol.MIN_TX_FEE_KOINU
+        } else {
+            minimumSendFeePerKbKoinu
+        }
+        if (!DogecoinAmount.isValidAmount(feeRate) ||
+            DogecoinAmount.toKoinu(feeRate) < reviewMinimumFeePerKbKoinu
+        ) {
             sendError = context.getString(
                 R.string.dogecoin_send_invalid_fee_rate,
-                DogecoinAmount.formatKoinu(minimumSendFeePerKbKoinu)
+                DogecoinAmount.formatKoinu(reviewMinimumFeePerKbKoinu)
             )
+            return
+        }
+        if (!mainnetAttemptLedgerAllowsNewSpend) {
+            sendError = when (val ledger = trustedPersonalNodeAttemptLoadResult) {
+                is DogecoinTrustedPersonalNodeAttemptLoadResult.Available -> context.getString(
+                    R.string.dogecoin_tpn_attempt_unresolved,
+                    trustedPersonalNodeAttemptStateLabel(ledger.attempt.state),
+                    ledger.attempt.review.localTxid
+                )
+                else -> context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+            }
             return
         }
         if (selectedNetwork == DogecoinNetwork.MAINNET && !wifCopyState.matches(snapshot.key)) {
@@ -1186,12 +1485,11 @@ fun DogecoinWalletSheet(
             pendingWifCopy = snapshot.key
             return
         }
-        if (shouldConfirmImportingRefresh && !allowWatchImport) {
+        if (!trustedPersonalNodeSpendSelected && shouldConfirmImportingRefresh && !allowWatchImport) {
             pendingWatchImportAction = DogecoinWatchImportAction.REVIEW_SEND
             return
         }
 
-        sending = true
         val network = selectedNetwork
         val spendBackend = dogecoinBackend
         val wallet = snapshot.key
@@ -1210,6 +1508,19 @@ fun DogecoinWalletSheet(
                 request.network == network && request.address == recipient
             } == true
         }
+        if (trustedPersonalNodeSpendSelected) {
+            prepareTrustedPersonalNodeReview(
+                recipient = recipient,
+                dogeAmount = dogeAmount,
+                feePerKbKoinu = feePerKbKoinu,
+                requestLabel = requestLabel,
+                requestMessage = requestMessage,
+                reviewedPaymentReceiptContext = reviewedPaymentReceiptContext
+            )
+            return
+        }
+
+        sending = true
         coroutineScope.launch {
             runCatching {
                 check(dogecoinSpendRouteAllowed(network, spendBackend)) {
@@ -1286,6 +1597,377 @@ fun DogecoinWalletSheet(
                 rpcConfigRevision == configRevision
             ) {
                 sending = false
+            }
+        }
+    }
+
+    fun submitTrustedPersonalNodeReview(review: DogecoinTrustedPersonalNodeFrozenReview) {
+        val nowWallMillis = System.currentTimeMillis()
+        val nowMonotonicMillis = android.os.SystemClock.elapsedRealtime()
+        val route = DogecoinSpendRoute.TRUSTED_PERSONAL_NODE(review.authorization)
+        if (!wifCopyState.matches(snapshot.key)) {
+            sendError = context.getString(R.string.dogecoin_send_backup_required)
+            pendingWifCopy = snapshot.key
+            return
+        }
+        if (!mainnetBroadcastAcknowledged) {
+            sendError = context.getString(R.string.dogecoin_send_mainnet_ack_required)
+            return
+        }
+        if (!trustedPersonalNodeOracleAcknowledged) {
+            sendError = context.getString(R.string.dogecoin_tpn_review_oracle_ack_required)
+            return
+        }
+        if (
+            selectedNetwork != DogecoinNetwork.MAINNET ||
+            review.binding.androidAddress != snapshot.key.address ||
+            review.isExpired(nowWallMillis, DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS) ||
+            !dogecoinSpendRouteAllowed(
+                network = selectedNetwork,
+                route = route,
+                sessionHolder = trustedPersonalNodeSessionHolder,
+                nowMonotonicMillis = nowMonotonicMillis
+            )
+        ) {
+            trustedPersonalNodeSessionHolder.cancelSpendAuthorization(review.authorization)
+            pendingTrustedPersonalNodeReview = null
+            sendError = context.getString(R.string.dogecoin_send_review_expired)
+            return
+        }
+        runCatching { review.requireRevalidated() }.onFailure {
+            trustedPersonalNodeSessionHolder.cancelSpendAuthorization(review.authorization)
+            pendingTrustedPersonalNodeReview = null
+            sendError = it.message ?: context.getString(R.string.dogecoin_send_failed)
+            return
+        }
+
+        val profile = trustedPersonalNodeSessionHolder.profile
+        if (profile == null || profile.toSessionBinding() != review.binding) {
+            sendError = context.getString(R.string.dogecoin_tpn_send_requires_active)
+            return
+        }
+        val walletAddress = snapshot.key.address
+        val claimedPaymentReceiptContext = pendingPaymentReceiptContext
+        val requestLabel = pendingTrustedPersonalNodeRequestLabel
+        val requestMessage = pendingTrustedPersonalNodeRequestMessage
+        sending = true
+        sendError = null
+        coroutineScope.launch {
+            var persistedAttempt: DogecoinTrustedPersonalNodeAttempt? = null
+            try {
+                val credentials = withContext(Dispatchers.IO) {
+                    val exactProfile = trustedPersonalNodeStore.loadProfile()
+                    check(exactProfile == profile) {
+                        context.getString(R.string.dogecoin_tpn_send_requires_active)
+                    }
+                    trustedPersonalNodeStore.loadCredentials(profile)
+                        ?: error(context.getString(R.string.dogecoin_tpn_send_requires_active))
+                }
+                val claimed = trustedPersonalNodeRpcClient.submitTrustedPersonalNodeTransaction(
+                    profile = profile,
+                    credentials = credentials,
+                    authorization = review.authorization,
+                    review = review,
+                    requestIsCurrent = {
+                        trustedPersonalNodeSessionHolder.isSpendAuthorizationCurrent(
+                            review.authorization,
+                            android.os.SystemClock.elapsedRealtime()
+                        )
+                    },
+                    hasPositiveIndependentSpendEvidence = {
+                        spvService.hasObservedSpend(
+                            DogecoinNetwork.MAINNET,
+                            review.selectedPrevouts.map { it.txid to it.vout }
+                        ) == true
+                    },
+                    persistAndReserveBeforeDisclosure = {
+                        val attempt = trustedPersonalNodeAttemptStore.persistBeforeDisclosure(
+                            review = review,
+                            mainnetAcknowledged = true,
+                            personalNodeOracleAcknowledged = true
+                        ) ?: error(context.getString(R.string.dogecoin_tpn_attempt_store_unavailable))
+                        persistedAttempt = attempt
+                    },
+                    markSignedBytesDisclosed = {
+                        val attempt = checkNotNull(persistedAttempt) {
+                            "Trusted personal node attempt was not persisted before disclosure."
+                        }
+                        check(
+                            trustedPersonalNodeAttemptStore.markSubmissionUnknown(
+                                attempt.correlationId,
+                                review.txid
+                            )
+                        ) {
+                            context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+                        }
+                    }
+                )
+                val attempt = checkNotNull(persistedAttempt)
+                val claimedDurable = withContext(Dispatchers.IO) {
+                    trustedPersonalNodeAttemptStore.markClaimed(
+                        attempt.correlationId,
+                        claimed.txid
+                    )
+                }
+                check(claimedDurable) {
+                    context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+                }
+                val ledger = withContext(Dispatchers.IO) {
+                    trustedPersonalNodeAttemptStore.load()
+                }
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress &&
+                    pendingTrustedPersonalNodeReview === review
+                ) {
+                    trustedPersonalNodeAttemptLoadResult = ledger
+                    pendingTrustedPersonalNodeReview = null
+                    mainnetBroadcastAcknowledged = false
+                    trustedPersonalNodeOracleAcknowledged = false
+                    sentReceipt = DogecoinBroadcastReceipt(
+                        txid = claimed.txid,
+                        network = DogecoinNetwork.MAINNET,
+                        recipientAddress = review.recipientAddress,
+                        sendAmountKoinu = review.sendAmountKoinu,
+                        feeKoinu = review.feeKoinu,
+                        changeKoinu = review.changeKoinu,
+                        changeAddress = review.changeAddress,
+                        requestLabel = requestLabel,
+                        requestMessage = requestMessage,
+                        paymentContext = claimedPaymentReceiptContext,
+                        viaTrustedPersonalNodeClaimedOnly = true
+                    )
+                    if (claimedPaymentReceiptContext != null) {
+                        onPaymentReceiptClaimed(
+                            claimedPaymentReceiptContext,
+                            DogepaidBroadcastClaim(
+                                network = DogecoinNetwork.MAINNET,
+                                txid = claimed.txid,
+                                amountKoinu = review.sendAmountKoinu,
+                                recipientAddress = review.recipientAddress
+                            )
+                        )
+                        availablePaymentReceiptContext = null
+                    }
+                    pendingPaymentReceiptContext = null
+                    pendingTrustedPersonalNodeRequestLabel = null
+                    pendingTrustedPersonalNodeRequestMessage = null
+                    sendAmount = ""
+                    walletAction = DogeWalletAction.NONE
+                    trustedPersonalNodeSessionHolder.cancelSpendAuthorization(review.authorization)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                val ledger = withContext(Dispatchers.IO) {
+                    trustedPersonalNodeAttemptStore.load()
+                }
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress
+                ) {
+                    trustedPersonalNodeAttemptLoadResult = ledger
+                    sendError = if (
+                        persistedAttempt != null ||
+                        ledger is DogecoinTrustedPersonalNodeAttemptLoadResult.Available
+                    ) {
+                        context.getString(R.string.dogecoin_tpn_submission_unknown)
+                    } else {
+                        error.message ?: context.getString(R.string.dogecoin_send_failed)
+                    }
+                }
+            } finally {
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress
+                ) {
+                    sending = false
+                }
+            }
+        }
+    }
+
+    fun prepareTrustedPersonalNodeRetry(
+        attempt: DogecoinTrustedPersonalNodeAttempt
+    ) {
+        if (!wifCopyState.matches(snapshot.key)) {
+            sendError = context.getString(R.string.dogecoin_send_backup_required)
+            pendingWifCopy = snapshot.key
+            return
+        }
+        val nowWallMillis = System.currentTimeMillis()
+        val reviewWindowOpen = nowWallMillis >= attempt.review.createdAtMillis &&
+            nowWallMillis <= attempt.review.expiresAtMillis
+        val profile = trustedPersonalNodeSessionHolder.profile
+        if (
+            profile == null ||
+            profile.toSessionBinding() != attempt.review.binding ||
+            attempt.state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED ||
+            (attempt.state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED &&
+                !reviewWindowOpen)
+        ) {
+            sendError = context.getString(R.string.dogecoin_tpn_attempt_expired)
+            return
+        }
+        val proofToken = trustedPersonalNodeSessionHolder.beginProofSnapshot(
+            android.os.SystemClock.elapsedRealtime()
+        )
+        if (proofToken == null) {
+            sendError = context.getString(R.string.dogecoin_tpn_send_requires_active)
+            return
+        }
+        val walletAddress = snapshot.key.address
+        sending = true
+        sendError = null
+        coroutineScope.launch {
+            var authorization: DogecoinTrustedPersonalNodeSpendAuthorization? = null
+            try {
+                val credentials = withContext(Dispatchers.IO) {
+                    val durableAttempt = (
+                        trustedPersonalNodeAttemptStore.load() as?
+                            DogecoinTrustedPersonalNodeAttemptLoadResult.Available
+                    )?.attempt
+                    check(
+                        durableAttempt != null &&
+                            durableAttempt.correlationId == attempt.correlationId &&
+                            durableAttempt.review.binding == attempt.review.binding &&
+                            durableAttempt.review.localTxid == attempt.review.localTxid
+                    ) { context.getString(R.string.dogecoin_tpn_attempt_store_unavailable) }
+                    check(trustedPersonalNodeStore.loadProfile() == profile) {
+                        context.getString(R.string.dogecoin_tpn_send_requires_active)
+                    }
+                    trustedPersonalNodeStore.loadCredentials(profile)
+                        ?: error(context.getString(R.string.dogecoin_tpn_send_requires_active))
+                }
+                if (attempt.state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN) {
+                    val reconciled = trustedPersonalNodeRpcClient
+                        .reconcileTrustedPersonalNodeTransaction(
+                            profile = profile,
+                            credentials = credentials,
+                            requestToken = proofToken,
+                            attempt = attempt,
+                            requestIsCurrent = {
+                                trustedPersonalNodeSessionHolder.isProofSnapshotCurrent(
+                                    proofToken,
+                                    android.os.SystemClock.elapsedRealtime()
+                                )
+                            }
+                        )
+                    if (reconciled != null) {
+                        val claimedDurable = withContext(Dispatchers.IO) {
+                            trustedPersonalNodeAttemptStore.markClaimed(
+                                attempt.correlationId,
+                                reconciled.txid
+                            )
+                        }
+                        check(claimedDurable) {
+                            context.getString(R.string.dogecoin_tpn_attempt_store_unavailable)
+                        }
+                        trustedPersonalNodeSessionHolder.recordProofSnapshotFailure(proofToken)
+                        val ledger = withContext(Dispatchers.IO) {
+                            trustedPersonalNodeAttemptStore.load()
+                        }
+                        if (
+                            selectedNetwork == DogecoinNetwork.MAINNET &&
+                            snapshot.key.address == walletAddress
+                        ) {
+                            trustedPersonalNodeAttemptLoadResult = ledger
+                            sentReceipt = DogecoinBroadcastReceipt(
+                                txid = reconciled.txid,
+                                network = DogecoinNetwork.MAINNET,
+                                recipientAddress = attempt.review.recipientAddress,
+                                sendAmountKoinu = attempt.review.sendAmountKoinu,
+                                feeKoinu = attempt.review.feeKoinu,
+                                changeKoinu = attempt.review.changeKoinu,
+                                changeAddress = attempt.review.binding.androidAddress.takeIf {
+                                    attempt.review.changeKoinu > 0L
+                                },
+                                requestLabel = null,
+                                requestMessage = null,
+                                viaTrustedPersonalNodeClaimedOnly = true
+                            )
+                            sendError = null
+                            walletAction = DogeWalletAction.NONE
+                        }
+                        return@launch
+                    }
+                }
+                check(reviewWindowOpen) {
+                    context.getString(R.string.dogecoin_tpn_attempt_expired)
+                }
+                val proof = trustedPersonalNodeRpcClient.readTrustedPersonalNodeProofSnapshot(
+                    profile = profile,
+                    credentials = credentials,
+                    requestToken = proofToken,
+                    requestIsCurrent = {
+                        trustedPersonalNodeSessionHolder.isProofSnapshotCurrent(
+                            proofToken,
+                            android.os.SystemClock.elapsedRealtime()
+                        )
+                    }
+                )
+                check(
+                    trustedPersonalNodeSessionHolder.recordSuccessfulProofSnapshot(
+                        proofToken,
+                        proof,
+                        android.os.SystemClock.elapsedRealtime()
+                    )
+                ) {
+                    context.getString(R.string.dogecoin_tpn_send_incomplete_proof)
+                }
+                val issued = trustedPersonalNodeSessionHolder.beginSpendAuthorization(
+                    android.os.SystemClock.elapsedRealtime()
+                ) ?: error(context.getString(R.string.dogecoin_tpn_send_incomplete_proof))
+                authorization = issued
+                val recovered = withContext(Dispatchers.Default) {
+                    DogecoinTrustedPersonalNodeFrozenReview.recover(
+                        sessionHolder = trustedPersonalNodeSessionHolder,
+                        authorization = issued,
+                        nowMonotonicMillis = android.os.SystemClock.elapsedRealtime(),
+                        persisted = attempt.review
+                    )
+                }
+                check(
+                    dogecoinSpendRouteAllowed(
+                        network = DogecoinNetwork.MAINNET,
+                        route = DogecoinSpendRoute.TRUSTED_PERSONAL_NODE(issued),
+                        sessionHolder = trustedPersonalNodeSessionHolder,
+                        nowMonotonicMillis = android.os.SystemClock.elapsedRealtime()
+                    )
+                )
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress
+                ) {
+                    pendingTransaction = null
+                    pendingTrustedPersonalNodeReview = recovered
+                    pendingTrustedPersonalNodeRequestLabel = null
+                    pendingTrustedPersonalNodeRequestMessage = null
+                    pendingPaymentReceiptContext = null
+                    mainnetBroadcastAcknowledged = false
+                    trustedPersonalNodeOracleAcknowledged = false
+                } else {
+                    trustedPersonalNodeSessionHolder.cancelSpendAuthorization(issued)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                authorization?.let(trustedPersonalNodeSessionHolder::cancelSpendAuthorization)
+                trustedPersonalNodeSessionHolder.recordProofSnapshotFailure(proofToken)
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress
+                ) {
+                    sendError = error.message
+                        ?: context.getString(R.string.dogecoin_tpn_send_incomplete_proof)
+                }
+            } finally {
+                if (
+                    selectedNetwork == DogecoinNetwork.MAINNET &&
+                    snapshot.key.address == walletAddress
+                ) {
+                    sending = false
+                }
             }
         }
     }
@@ -1628,10 +2310,17 @@ fun DogecoinWalletSheet(
     }
 
     fun clearReviewedSendState() {
+        pendingTrustedPersonalNodeReview?.authorization?.let(
+            trustedPersonalNodeSessionHolder::cancelSpendAuthorization
+        )
         sentReceipt = null
         pendingTransaction = null
+        pendingTrustedPersonalNodeReview = null
+        pendingTrustedPersonalNodeRequestLabel = null
+        pendingTrustedPersonalNodeRequestMessage = null
         pendingPaymentReceiptContext = null
         mainnetBroadcastAcknowledged = false
+        trustedPersonalNodeOracleAcknowledged = false
         highFeeAcknowledged = false
         policyUnavailableAcknowledged = false
         exportingRawTransaction = false
@@ -1890,6 +2579,9 @@ fun DogecoinWalletSheet(
             spvStartFailed = true
         }
     }
+    val latestPendingTrustedPersonalNodeReview by rememberUpdatedState(
+        pendingTrustedPersonalNodeReview
+    )
     DisposableEffect(Unit) {
         onDispose {
             walletIoSession.invalidate()
@@ -1898,6 +2590,10 @@ fun DogecoinWalletSheet(
             // OkHttp execute() is blocking; revoke the next-call lease AND cancel this sheet client's current
             // calls. SPV deliberately remains alive for fast reopen and continued sync.
             rpcClient.cancelActiveRequests()
+            trustedPersonalNodeRpcClient.cancelActiveRequests()
+            latestPendingTrustedPersonalNodeReview?.authorization?.let(
+                trustedPersonalNodeSessionHolder::cancelSpendAuthorization
+            )
         }
     }
 
@@ -2073,6 +2769,12 @@ fun DogecoinWalletSheet(
             confirmationObservation = null
             return@LaunchedEffect
         }
+        // DES-1-D stops at Claimed. A node must not corroborate its own acceptance claim, and SPV
+        // promotion belongs to DES-1-E's separately specified settlement state machine.
+        if (receipt.viaTrustedPersonalNodeClaimedOnly) {
+            confirmationObservation = null
+            return@LaunchedEffect
+        }
         val txid = receipt.txid
         val sessionGeneration = walletIoSession.captureGeneration()
         confirmationObservation = null
@@ -2199,18 +2901,55 @@ fun DogecoinWalletSheet(
         dogecoinBackend,
         sentReceipt,
         confirmingDepth,
-        selectedNetwork
+        selectedNetwork,
+        trustedPersonalNodeAttemptLoadResult
     ) {
+        if (
+            selectedNetwork == DogecoinNetwork.MAINNET &&
+            (trustedPersonalNodeAttemptLoadResult == null ||
+                trustedPersonalNodeAttemptLoadResult ==
+                DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable)
+        ) {
+            return@remember emptyList()
+        }
+        val durableTrustedNodeAttempt = (
+            trustedPersonalNodeAttemptLoadResult as?
+                DogecoinTrustedPersonalNodeAttemptLoadResult.Available
+            )?.attempt
+        fun bindDurableTrustedNodeState(row: WalletTxRow): WalletTxRow =
+            if (
+                durableTrustedNodeAttempt != null &&
+                row.txid.equals(
+                    durableTrustedNodeAttempt.review.localTxid,
+                    ignoreCase = true
+                )
+            ) {
+                row.copy(
+                    confirmations = dogecoinPresentedConfirmationDepth(
+                        row.confirmations,
+                        durableTrustedNodeAttempt.state
+                    ),
+                    trustedPersonalNodeAttemptState = durableTrustedNodeAttempt.state
+                )
+            } else {
+                row
+            }
         if (confirmationProgressSource == DogecoinConfirmationProgressSource.SPV) {
-            spvTxs.map { WalletTxRow(it.txid, it.incoming, it.amountKoinu, it.confirmations, it.timeSeconds) }
+            spvTxs.map {
+                bindDurableTrustedNodeState(
+                    WalletTxRow(it.txid, it.incoming, it.amountKoinu, it.confirmations, it.timeSeconds)
+                )
+            }
         } else {
             val baseRows = walletActivity.map {
-                WalletTxRow(
-                    txid = it.txid,
-                    incoming = !it.category.equals("send", ignoreCase = true),
-                    amountKoinu = kotlin.math.abs(it.amountKoinu),
-                    confirmations = it.confirmations.coerceAtLeast(0),
-                    timeSeconds = it.timeSeconds
+                bindDurableTrustedNodeState(
+                    WalletTxRow(
+                        txid = it.txid,
+                        incoming = !it.category.equals("send", ignoreCase = true),
+                        amountKoinu = kotlin.math.abs(it.amountKoinu),
+                        confirmations = it.confirmations.coerceAtLeast(0),
+                        timeSeconds = it.timeSeconds
+                    )
                 )
             }
             val receipt = sentReceipt?.takeIf { it.network == selectedNetwork }
@@ -2702,6 +3441,8 @@ fun DogecoinWalletSheet(
                             WalletCard {
                                 Text(
                                     text = when {
+                                        receipt.viaTrustedPersonalNodeClaimedOnly ->
+                                            stringResource(R.string.dogecoin_tpn_send_receipt_claimed)
                                         receipt.viaSpvClaimedOnly ->
                                             stringResource(R.string.dogecoin_send_receipt_via_spv_claimed)
                                         receipt.viaPeer -> stringResource(
@@ -2723,6 +3464,7 @@ fun DogecoinWalletSheet(
                                 )
                                 val activeRpcDepth = confirmingDepth
                                 if (
+                                    !receipt.viaTrustedPersonalNodeClaimedOnly &&
                                     confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
                                     receipt.network == selectedNetwork
                                 ) {
@@ -2933,6 +3675,9 @@ fun DogecoinWalletSheet(
                             androidMainnetAddress = snapshot.key.address,
                             onSessionUseChanged = { usesNode ->
                                 trustedPersonalNodeKeepsSpvSyncing = usesNode
+                            },
+                            onSessionStateChanged = { state ->
+                                trustedPersonalNodeSessionState = state
                             }
                         )
                     }
@@ -4036,6 +4781,14 @@ fun DogecoinWalletSheet(
                                 "\n" + stringResource(R.string.dogecoin_send_receipt_message, message)
                             }.orEmpty()
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (receipt.viaTrustedPersonalNodeClaimedOnly) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_tpn_send_receipt_claimed),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        lineHeight = 16.sp
+                                    )
+                                }
                                 if (receipt.viaSpvClaimedOnly) {
                                     Text(
                                         text = stringResource(R.string.dogecoin_send_receipt_via_spv_claimed),
@@ -4060,6 +4813,7 @@ fun DogecoinWalletSheet(
                                 }
                                 val activeRpcDepth = confirmingDepth
                                 if (
+                                    !receipt.viaTrustedPersonalNodeClaimedOnly &&
                                     confirmationProgressSource == DogecoinConfirmationProgressSource.RPC &&
                                     receipt.network == selectedNetwork
                                 ) {
@@ -4176,9 +4930,13 @@ fun DogecoinWalletSheet(
                             spvSynced = spvStatus.synced,
                             nodeReady = nodeReady
                         )
+                        val trustedPersonalNodeReviewReady =
+                            trustedPersonalNodeSpendSelected && trustedPersonalNodeLedgerEmpty
                         Button(
                             onClick = { reviewSend() },
-                            enabled = !sending && !rescanning && reviewSendRouteReady,
+                            enabled = !sending && !rescanning &&
+                                mainnetAttemptLedgerAllowsNewSpend &&
+                                (reviewSendRouteReady || trustedPersonalNodeReviewReady),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -4191,7 +4949,73 @@ fun DogecoinWalletSheet(
                                 }
                             )
                         }
-                        if (!dogecoinSpendRouteAllowed(selectedNetwork, dogecoinBackend)) {
+                        when (val ledger = trustedPersonalNodeAttemptLoadResult) {
+                            DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable -> Text(
+                                text = stringResource(R.string.dogecoin_tpn_attempt_store_unavailable),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                            is DogecoinTrustedPersonalNodeAttemptLoadResult.Available -> {
+                                Text(
+                                    text = stringResource(
+                                        R.string.dogecoin_tpn_attempt_unresolved,
+                                        trustedPersonalNodeAttemptStateLabel(ledger.attempt.state),
+                                        ledger.attempt.review.localTxid
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    lineHeight = 18.sp
+                                )
+                                val retryWindowOpen = System.currentTimeMillis().let { now ->
+                                    ledger.attempt.state !=
+                                        DogecoinTrustedPersonalNodeAttemptState.CLAIMED &&
+                                        now >= ledger.attempt.review.createdAtMillis &&
+                                        now <= ledger.attempt.review.expiresAtMillis
+                                }
+                                val readOnlyReconciliationAvailable =
+                                    ledger.attempt.state ==
+                                    DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN
+                                if (retryWindowOpen || readOnlyReconciliationAvailable) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            prepareTrustedPersonalNodeRetry(ledger.attempt)
+                                        },
+                                        enabled = !sending && trustedPersonalNodeSpendSelected,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            stringResource(
+                                                if (readOnlyReconciliationAvailable) {
+                                                    R.string.dogecoin_tpn_attempt_reconcile
+                                                } else {
+                                                    R.string.dogecoin_tpn_attempt_retry
+                                                }
+                                            )
+                                        )
+                                    }
+                                } else if (
+                                    ledger.attempt.state !=
+                                    DogecoinTrustedPersonalNodeAttemptState.CLAIMED
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.dogecoin_tpn_attempt_expired),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                            }
+                            else -> Unit
+                        }
+                        if (trustedPersonalNodeSpendSelected && trustedPersonalNodeLedgerEmpty) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_review_oracle_warning),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                lineHeight = 18.sp
+                            )
+                        } else if (!dogecoinSpendRouteAllowed(selectedNetwork, dogecoinBackend)) {
                             Text(
                                 text = stringResource(R.string.dogecoin_mainnet_rpc_spend_requires_tpn),
                                 style = MaterialTheme.typography.bodySmall,
@@ -4497,6 +5321,171 @@ fun DogecoinWalletSheet(
                 if (pendingImportKey != null) {
                     scanningWifQr = false
                     wifScanError = null
+                }
+            }
+        )
+    }
+
+    pendingTrustedPersonalNodeReview?.let { review ->
+        var reviewNowWallMillis by remember(review.txid, review.createdAtMillis) {
+            mutableStateOf(System.currentTimeMillis())
+        }
+        var reviewNowMonotonicMillis by remember(review.txid) {
+            mutableStateOf(android.os.SystemClock.elapsedRealtime())
+        }
+        LaunchedEffect(review.txid, review.createdAtMillis) {
+            while (true) {
+                reviewNowWallMillis = System.currentTimeMillis()
+                reviewNowMonotonicMillis = android.os.SystemClock.elapsedRealtime()
+                val remaining = DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS -
+                    (reviewNowWallMillis - review.createdAtMillis)
+                if (remaining <= 0L) break
+                delay(remaining.coerceIn(1_000L, 30_000L))
+            }
+        }
+        val expired = review.isExpired(
+            reviewNowWallMillis,
+            DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS
+        )
+        val routeCurrent = dogecoinSpendRouteAllowed(
+            network = selectedNetwork,
+            route = DogecoinSpendRoute.TRUSTED_PERSONAL_NODE(review.authorization),
+            sessionHolder = trustedPersonalNodeSessionHolder,
+            nowMonotonicMillis = reviewNowMonotonicMillis
+        )
+        val revalidated = runCatching { review.requireRevalidated() }.isSuccess
+        fun dismissTrustedPersonalNodeReview() {
+            trustedPersonalNodeSessionHolder.cancelSpendAuthorization(review.authorization)
+            pendingTrustedPersonalNodeReview = null
+            pendingTrustedPersonalNodeRequestLabel = null
+            pendingTrustedPersonalNodeRequestMessage = null
+            pendingPaymentReceiptContext = null
+            mainnetBroadcastAcknowledged = false
+            trustedPersonalNodeOracleAcknowledged = false
+        }
+        AlertDialog(
+            onDismissRequest = {
+                if (!sending) dismissTrustedPersonalNodeReview()
+            },
+            title = { Text(stringResource(R.string.dogecoin_confirm_mainnet_send_title)) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = stringResource(
+                            R.string.dogecoin_confirm_send_body,
+                            DogecoinNetwork.MAINNET.displayName,
+                            review.recipientAddress,
+                            DogecoinAmount.formatKoinu(review.sendAmountKoinu),
+                            DogecoinAmount.formatKoinu(review.feeKoinu),
+                            DogecoinAmount.formatKoinu(review.sendAmountKoinu + review.feeKoinu),
+                            DogecoinAmount.formatKoinu(review.changeKoinu)
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        lineHeight = 20.sp
+                    )
+                    review.changeAddress?.let { changeAddress ->
+                        SelectionContainer {
+                            Text(
+                                text = stringResource(
+                                    R.string.dogecoin_confirm_change_address,
+                                    changeAddress
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    pendingTrustedPersonalNodeRequestLabel?.let { requestLabel ->
+                        Text(
+                            stringResource(R.string.dogecoin_confirm_request_label, requestLabel),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    pendingTrustedPersonalNodeRequestMessage?.let { requestMessage ->
+                        Text(
+                            stringResource(R.string.dogecoin_confirm_request_message, requestMessage),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Text(
+                        text = stringResource(
+                            R.string.dogecoin_tpn_review_source,
+                            review.binding.origin,
+                            review.binding.profileRevision,
+                            review.selectedPrevouts.size
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 18.sp
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.dogecoin_confirm_fee_rate,
+                            DogecoinAmount.formatKoinu(review.feePerKbKoinu)
+                        ),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = stringResource(R.string.dogecoin_tpn_review_oracle_warning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        lineHeight = 18.sp
+                    )
+                    Row(verticalAlignment = Alignment.Top) {
+                        Checkbox(
+                            checked = mainnetBroadcastAcknowledged,
+                            onCheckedChange = { mainnetBroadcastAcknowledged = it }
+                        )
+                        Text(
+                            text = stringResource(R.string.dogecoin_confirm_mainnet_acknowledge),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 12.dp)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.Top) {
+                        Checkbox(
+                            checked = trustedPersonalNodeOracleAcknowledged,
+                            onCheckedChange = { trustedPersonalNodeOracleAcknowledged = it }
+                        )
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_review_oracle_acknowledge),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 12.dp)
+                        )
+                    }
+                    if (expired || !routeCurrent || !revalidated) {
+                        Text(
+                            text = stringResource(R.string.dogecoin_send_review_expired),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { submitTrustedPersonalNodeReview(review) },
+                    enabled = !sending && !expired && routeCurrent && revalidated &&
+                        mainnetBroadcastAcknowledged && trustedPersonalNodeOracleAcknowledged
+                ) {
+                    Text(
+                        if (sending) {
+                            stringResource(R.string.dogecoin_send_working)
+                        } else {
+                            stringResource(R.string.dogecoin_confirm_broadcast_mainnet)
+                        }
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { dismissTrustedPersonalNodeReview() },
+                    enabled = !sending
+                ) {
+                    Text(stringResource(R.string.cancel))
                 }
             }
         )
@@ -5010,7 +5999,12 @@ fun DogecoinWalletSheet(
     if (txDetailRow != null) {
         DogecoinWalletTheme {
             val target = DOGECOIN_SPV_CONFIRM_TARGET
-            val confirmed = txDetailRow.confirmations >= target
+            val trustedNodeAttemptState = txDetailRow.trustedPersonalNodeAttemptState
+            val confirmed = dogecoinPresentationIsConfirmed(
+                txDetailRow.confirmations,
+                target,
+                trustedNodeAttemptState
+            )
             AlertDialog(
                 onDismissRequest = { walletTxDetailId = null },
                 title = { Text(if (txDetailRow.incoming) "Incoming payment" else "Outgoing payment") },
@@ -5021,15 +6015,31 @@ fun DogecoinWalletSheet(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         ConfirmationRing(
-                            mode = if (confirmed) RingMode.IDLE else RingMode.CONFIRMING,
-                            progress = if (confirmed) 1f else txDetailRow.confirmations.toFloat() / target,
+                            mode = if (confirmed || trustedNodeAttemptState != null) {
+                                RingMode.IDLE
+                            } else {
+                                RingMode.CONFIRMING
+                            },
+                            progress = if (confirmed) 1f else if (trustedNodeAttemptState != null) 0f
+                            else txDetailRow.confirmations.toFloat() / target,
                             diameter = 150.dp,
                             segments = target,
-                            contentDescription = if (confirmed) "Confirmed"
-                                else "${txDetailRow.confirmations} of $target confirmations"
+                            contentDescription = when {
+                                trustedNodeAttemptState != null ->
+                                    trustedPersonalNodeAttemptStateLabel(trustedNodeAttemptState)
+                                confirmed -> "Confirmed"
+                                else -> "${txDetailRow.confirmations} of $target confirmations"
+                            }
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                if (confirmed) {
+                                if (trustedNodeAttemptState != null) {
+                                    Text(
+                                        trustedPersonalNodeAttemptStateLabel(trustedNodeAttemptState),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = dogeWalletColors.ink,
+                                        textAlign = TextAlign.Center
+                                    )
+                                } else if (confirmed) {
                                     Text("Confirmed", style = MaterialTheme.typography.titleMedium, color = dogeWalletColors.ink)
                                 } else {
                                     Text("Confirming", style = MaterialTheme.typography.titleMedium, color = dogeWalletColors.ink)
@@ -5056,7 +6066,15 @@ fun DogecoinWalletSheet(
                                 color = dogeWalletColors.muted
                             )
                         }
-                        if (confirmationProgressSource == DogecoinConfirmationProgressSource.RPC) {
+                        if (trustedNodeAttemptState != null) {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_attempt_not_confirmed),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = dogeWalletColors.muted,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 16.sp
+                            )
+                        } else if (confirmationProgressSource == DogecoinConfirmationProgressSource.RPC) {
                             val isActiveReceipt = sentReceipt?.network == selectedNetwork &&
                                 sentReceipt?.txid.equals(txDetailRow.txid, ignoreCase = true)
                             Text(

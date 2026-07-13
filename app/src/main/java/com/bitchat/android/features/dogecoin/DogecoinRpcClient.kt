@@ -171,6 +171,13 @@ internal class DogecoinRpcHttpException(
     message: String
 ) : IllegalStateException(message)
 
+/** Structured JSON-RPC error identity; localized node text is never used as a recovery decision. */
+internal class DogecoinRpcMethodException(
+    val method: String,
+    val rpcCode: Int?,
+    message: String
+) : IllegalStateException(message)
+
 internal fun Throwable.isDogecoinRpcAuthenticationFailure(): Boolean =
     this is DogecoinRpcHttpException && (statusCode == 401 || statusCode == 403)
 
@@ -184,6 +191,15 @@ data class DogecoinMempoolAcceptance(
     val isAllowed: Boolean
         get() = checked && allowed == true
 }
+
+/**
+ * The only successful terminal result the DES-1-D RPC boundary can mint. The caller persists
+ * SUBMISSION_UNKNOWN before the first signed-byte disclosure and may promote it to this node-only
+ * claim only after Core returns the exact locally-computed transaction id.
+ */
+internal data class DogecoinTrustedPersonalNodeClaimedSubmission(
+    val txid: String
+)
 
 private class DogecoinRpcActiveCalls {
     private val calls = ConcurrentHashMap.newKeySet<Call>()
@@ -714,6 +730,310 @@ class DogecoinRpcClient private constructor(
             proofCandidates = finalCandidates,
             totalProofBytes = totalProofBytes
         )
+    }
+
+    /**
+     * DES-1-D's one-route mainnet submission boundary. This deliberately does not call the generic
+     * [testMempoolAcceptance] or [sendRawTransaction] entry points: those remain centrally forbidden
+     * on mainnet. The exact profile origin, proof-backed frozen review, and live process authorization
+     * are rebound here, and [requestIsCurrent] is installed at [callElement] before every RPC.
+     *
+     * [persistAndReserveBeforeDisclosure] must atomically persist the encrypted same-byte recovery
+     * attempt and reserve every selected input. Only after it succeeds is
+     * [markSignedBytesDisclosed] invoked and the exact reviewed bytes passed to `testmempoolaccept`.
+     * Once that marker runs, every thrown/ambiguous outcome belongs to the caller's durable
+     * SUBMISSION_UNKNOWN state; this method never retries or cascades to another route.
+     */
+    internal suspend fun submitTrustedPersonalNodeTransaction(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        authorization: DogecoinTrustedPersonalNodeSpendAuthorization,
+        review: DogecoinTrustedPersonalNodeFrozenReview,
+        requestIsCurrent: () -> Boolean,
+        hasPositiveIndependentSpendEvidence: () -> Boolean,
+        persistAndReserveBeforeDisclosure: () -> Unit,
+        markSignedBytesDisclosed: () -> Unit
+    ): DogecoinTrustedPersonalNodeClaimedSubmission = guardedBy {
+        check(requestIsCurrent()) {
+            "Trusted personal node spend authorization is no longer current."
+        }
+    }.submitTrustedPersonalNodeTransactionInternal(
+        profile = profile,
+        credentials = credentials,
+        authorization = authorization,
+        review = review,
+        requestIsCurrent = requestIsCurrent,
+        hasPositiveIndependentSpendEvidence = hasPositiveIndependentSpendEvidence,
+        persistAndReserveBeforeDisclosure = persistAndReserveBeforeDisclosure,
+        markSignedBytesDisclosed = markSignedBytesDisclosed
+    )
+
+    /**
+     * Read-only, same-origin reconciliation for a response-lost UNKNOWN attempt. It sends only the
+     * locally computed txid, never the signed bytes. A node claim is minted solely when wallet-scoped
+     * `gettransaction` or the txindex/mempool fallback returns raw bytes exactly equal to the encrypted
+     * recovery record. Code -5 absence is inconclusive; arbitrary/localized error text never counts.
+     */
+    internal suspend fun reconcileTrustedPersonalNodeTransaction(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        requestToken: DogecoinTrustedPersonalNodeProofRequestToken,
+        attempt: DogecoinTrustedPersonalNodeAttempt,
+        requestIsCurrent: () -> Boolean
+    ): DogecoinTrustedPersonalNodeClaimedSubmission? = guardedBy {
+        check(requestIsCurrent()) {
+            "Trusted personal node reconciliation lease is no longer current."
+        }
+    }.reconcileTrustedPersonalNodeTransactionInternal(
+        profile,
+        credentials,
+        requestToken,
+        attempt
+    )
+
+    private suspend fun reconcileTrustedPersonalNodeTransactionInternal(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        requestToken: DogecoinTrustedPersonalNodeProofRequestToken,
+        attempt: DogecoinTrustedPersonalNodeAttempt
+    ): DogecoinTrustedPersonalNodeClaimedSubmission? = withContext(Dispatchers.IO) {
+        require(isValidDogecoinTrustedPersonalNodeProfile(profile)) {
+            "Trusted personal node reconciliation profile is invalid."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node reconciliation credentials are unavailable."
+        }
+        require(requestToken.binding == profile.toSessionBinding() &&
+            attempt.review.binding == requestToken.binding) {
+            "Trusted personal node reconciliation binding or revision changed."
+        }
+        require(attempt.state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN) {
+            "Only a submission-unknown trusted personal node attempt can be reconciled."
+        }
+        require(
+            DogecoinTransactionBuilder.transactionId(attempt.review.signedRawTransactionHex) ==
+                attempt.review.localTxid
+        ) {
+            "Trusted personal node recovery bytes do not match their local txid."
+        }
+
+        val config = DogecoinRpcConfig(
+            url = profile.origin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = profile.coreWalletId
+        )
+        requireTrustedPersonalNodeSubmissionReadiness(config, profile)
+        val rawHex = readTrustedPersonalNodeReconciliationHex(
+            config,
+            attempt.review.localTxid
+        ) ?: return@withContext null
+        val normalized = DogecoinRawTxValidator.normalize(rawHex)
+        require(normalized == rawHex && rawHex == attempt.review.signedRawTransactionHex) {
+            "Trusted personal node reconciliation returned different transaction bytes."
+        }
+        require(DogecoinTransactionBuilder.transactionId(rawHex) == attempt.review.localTxid) {
+            "Trusted personal node reconciliation returned a different transaction id."
+        }
+        DogecoinTrustedPersonalNodeClaimedSubmission(attempt.review.localTxid)
+    }
+
+    private fun readTrustedPersonalNodeReconciliationHex(
+        config: DogecoinRpcConfig,
+        txid: String
+    ): String? {
+        try {
+            val walletResult = callObject(
+                config,
+                "gettransaction",
+                JsonArray().apply {
+                    add(txid)
+                    add(true)
+                }
+            )
+            require(requiredExactString(walletResult, "txid", "gettransaction") == txid) {
+                "RPC gettransaction returned a different reconciliation transaction id."
+            }
+            return requiredExactString(walletResult, "hex", "gettransaction")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: DogecoinRpcMethodException) {
+            if (error.rpcCode != -5 && error.rpcCode != -32601) throw error
+        }
+
+        return try {
+            val rawResult = callElement(
+                config.copy(walletName = ""),
+                "getrawtransaction",
+                JsonArray().apply {
+                    add(txid)
+                    add(false)
+                }
+            )
+            val primitive = rawResult.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+            require(primitive?.isString == true && primitive.asString.isNotBlank()) {
+                "RPC getrawtransaction returned invalid reconciliation bytes."
+            }
+            primitive.asString
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: DogecoinRpcMethodException) {
+            if (error.rpcCode == -5) null else throw error
+        }
+    }
+
+    private suspend fun submitTrustedPersonalNodeTransactionInternal(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        authorization: DogecoinTrustedPersonalNodeSpendAuthorization,
+        review: DogecoinTrustedPersonalNodeFrozenReview,
+        requestIsCurrent: () -> Boolean,
+        hasPositiveIndependentSpendEvidence: () -> Boolean,
+        persistAndReserveBeforeDisclosure: () -> Unit,
+        markSignedBytesDisclosed: () -> Unit
+    ): DogecoinTrustedPersonalNodeClaimedSubmission = withContext(Dispatchers.IO) {
+        require(isValidDogecoinTrustedPersonalNodeProfile(profile)) {
+            "Trusted personal node profile is invalid or no longer authorized."
+        }
+        require(profile.network == DogecoinNetwork.MAINNET) {
+            "Trusted personal node submission is mainnet-only."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node RPC credentials are unavailable."
+        }
+        val binding = profile.toSessionBinding()
+        require(authorization.binding == binding && review.binding == binding) {
+            "Trusted personal node review does not match the active profile revision."
+        }
+        require(review.authorization === authorization) {
+            "Trusted personal node review does not carry the active spend authorization."
+        }
+        require(review.proofSnapshot === authorization.proofSnapshot) {
+            "Trusted personal node review does not carry the authorized proof snapshot."
+        }
+        require(!review.isExpired(System.currentTimeMillis(), DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS)) {
+            "Trusted personal node signed review expired before final recheck."
+        }
+        review.requireRevalidated()
+        check(requestIsCurrent()) {
+            "Trusted personal node spend authorization expired before final recheck."
+        }
+
+        val config = DogecoinRpcConfig(
+            url = profile.origin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = profile.coreWalletId
+        )
+        requireTrustedPersonalNodeSubmissionReadiness(config, profile)
+
+        val proofEndTip = authorization.proofSnapshot.endTip
+        val submissionTip = readTrustedPersonalNodeProofTip(config)
+        requireTrustedPersonalNodeTipExtension(config, proofEndTip, submissionTip)
+        val tipExtension = submissionTip.height - proofEndTip.height
+
+        review.selectedProofCandidates.forEach { candidate ->
+            val verified = candidate.verifiedPrevout
+            val current = readTrustedPersonalNodeProofTxOut(config, verified.txid, verified.vout)
+                ?: throw IllegalStateException(
+                    "Trusted personal node selected outpoint ${verified.txid}:${verified.vout} is spent or missing."
+                )
+            require(current.bestBlockHash == submissionTip.hash) {
+                "Trusted personal node tip changed during the final selected-input checks."
+            }
+            requireTrustedPersonalNodeTxOutMatches(verified, current)
+            val expectedConfirmations = try {
+                Math.addExact(candidate.finalConfirmations, tipExtension)
+            } catch (_: ArithmeticException) {
+                throw IllegalArgumentException(
+                    "Trusted personal node selected-input confirmation depth overflowed."
+                )
+            }
+            require(current.confirmations == expectedConfirmations) {
+                "Trusted personal node selected-input confirmation depth changed inconsistently."
+            }
+        }
+
+        // Freeze the final rechecks to one exact tip. Advancing even one block during the pass restarts
+        // review instead of mixing selected-input claims from different chain states.
+        val stableTip = readTrustedPersonalNodeProofTip(config)
+        require(stableTip == submissionTip) {
+            "Trusted personal node tip changed before signed-byte disclosure."
+        }
+        require(!review.isExpired(System.currentTimeMillis(), DOGECOIN_SIGNED_TX_MAX_AGE_MILLIS)) {
+            "Trusted personal node signed review expired before signed-byte disclosure."
+        }
+        review.requireRevalidated()
+        check(requestIsCurrent()) {
+            "Trusted personal node spend authorization expired before signed-byte disclosure."
+        }
+        check(!hasPositiveIndependentSpendEvidence()) {
+            "Built-in independently observed a selected trusted-node input being spent."
+        }
+
+        // There must be no RPC containing signed bytes before this atomic caller-owned barrier.
+        persistAndReserveBeforeDisclosure()
+        markSignedBytesDisclosed()
+
+        val acceptance = testMempoolAcceptanceInternal(config, review.rawTransactionHex)
+        check(acceptance.checked && acceptance.allowed == true) {
+            acceptance.error ?: "Trusted personal node rejected the signed transaction in testmempoolaccept."
+        }
+
+        val rpcTxid = parseRequiredResultString(
+            callElement(
+                config,
+                "sendrawtransaction",
+                JsonArray().apply { add(review.rawTransactionHex) },
+                // After preflight disclosure, cancellation cannot make the signed bytes retractable. Let
+                // the exact same-route response finish; any process/network ambiguity stays durable.
+                cancelOnOwnerDispose = false
+            ),
+            method = "sendrawtransaction",
+            invalidMessage = "Trusted personal node sendrawtransaction returned an invalid txid."
+        )
+        val exactTxid = verifiedBroadcastTxid(review.rawTransactionHex, rpcTxid)
+        require(exactTxid == review.txid) {
+            "Trusted personal node returned a txid different from the frozen review."
+        }
+        DogecoinTrustedPersonalNodeClaimedSubmission(exactTxid)
+    }
+
+    /** Fixed, non-mutating final readiness checks for the bound TPN route only. */
+    private fun requireTrustedPersonalNodeSubmissionReadiness(
+        config: DogecoinRpcConfig,
+        profile: DogecoinTrustedPersonalNodeProfile
+    ) {
+        val networkInfo = callObject(config.copy(walletName = ""), "getnetworkinfo")
+        val networkActive = parseOptionalBoolean(networkInfo, "networkactive", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report networkactive.")
+        require(networkActive) { "Trusted personal node networking is disabled." }
+        val peerCount = parseOptionalNonNegativeInt(networkInfo, "connections", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report connections.")
+        require(peerCount >= DOGECOIN_TPN_MIN_MAINNET_PEERS) {
+            "Trusted personal node has $peerCount peers; at least $DOGECOIN_TPN_MIN_MAINNET_PEERS are required."
+        }
+
+        val walletInfo = callObject(config, "getwalletinfo")
+        require(requiredExactCoreWalletId(walletInfo) == profile.coreWalletId) {
+            "Trusted personal node returned a different Core wallet identity."
+        }
+        walletInfo.get("scanning")?.takeUnless { it.isJsonNull }?.let { scanning ->
+            val primitive = scanning.takeIf { it.isJsonPrimitive }?.asJsonPrimitive
+            require(primitive?.isBoolean == true && !primitive.asBoolean) {
+                "Trusted personal node wallet reports an active or malformed rescan state."
+            }
+        }
+
+        val validateAddress = callObject(
+            config,
+            "validateaddress",
+            JsonArray().apply { add(profile.androidAddress) }
+        )
+        requireExactTrustedPersonalNodeWatchStatus(validateAddress, profile.androidAddress)
+        require(isRpcMethodAvailable(config.copy(walletName = ""), "testmempoolaccept")) {
+            "Trusted personal node does not provide mandatory testmempoolaccept."
+        }
     }
 
     private fun readTrustedPersonalNodeProofTip(
@@ -2113,7 +2433,12 @@ class DogecoinRpcClient private constructor(
                 val json = runCatching { gson.fromJson(body, JsonObject::class.java) }.getOrNull()
                 val error = json?.get("error")?.takeUnless { it.isJsonNull }
                 if (error != null) {
-                    throw IllegalStateException(rpcErrorMessage(method, error))
+                    val errorObject = error.takeIf { it.isJsonObject }?.asJsonObject
+                    throw DogecoinRpcMethodException(
+                        method = method,
+                        rpcCode = parseOptionalRpcErrorCode(errorObject, method),
+                        message = rpcErrorMessage(method, error)
+                    )
                 }
                 if (!response.isSuccessful) {
                     throw DogecoinRpcHttpException(

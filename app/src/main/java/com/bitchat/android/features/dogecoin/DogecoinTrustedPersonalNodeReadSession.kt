@@ -40,6 +40,17 @@ internal data class DogecoinTrustedPersonalNodeProofRequestToken(
     val startedAtMonotonicMillis: Long
 )
 
+/**
+ * Process-memory-only authority for one frozen TPN review. Construction alone grants nothing: the
+ * session holder retains the exact object and rechecks its profile, display, proof, and monotonic
+ * lease at every use. A forged or superseded instance therefore cannot unlock the route.
+ */
+internal class DogecoinTrustedPersonalNodeSpendAuthorization internal constructor(
+    val nonce: Long,
+    val binding: DogecoinTrustedPersonalNodeSessionBinding,
+    val proofSnapshot: DogecoinTrustedPersonalNodeProofSnapshot
+)
+
 /** Read-only values for display. These types provide no signer or broadcast capability. */
 internal data class DogecoinTrustedPersonalNodeTimedDisplaySnapshot(
     val binding: DogecoinTrustedPersonalNodeSessionBinding,

@@ -291,6 +291,36 @@ object DogecoinTransactionBuilder {
         )
     }
 
+    /**
+     * DES-1-D signer seam. The only externally accepted inputs are proof candidates whose amount and
+     * script came from [DogecoinVerifiedPrevout]. Conversion to the legacy private signing machinery is
+     * confined here so a scalar-only [DogecoinUtxo] can never enter the TPN builder API.
+     */
+    internal fun createSignedTransactionFromVerifiedPrevouts(
+        wallet: DogecoinWalletKey,
+        proofCandidates: List<DogecoinTrustedPersonalNodeProofCandidate>,
+        recipientAddress: String,
+        amount: String,
+        feePerKbKoinu: Long = DogecoinProtocol.DEFAULT_FEE_PER_KB_KOINU
+    ): DogecoinSignedTransaction = createSignedTransaction(
+        wallet = wallet,
+        utxos = proofCandidates.map { candidate ->
+            val verified = candidate.verifiedPrevout
+            DogecoinUtxo(
+                txid = verified.txid,
+                vout = verified.vout,
+                amountKoinu = verified.amountKoinu,
+                scriptPubKeyHex = verified.scriptPubKeyHex,
+                confirmations = candidate.finalConfirmations
+            )
+        },
+        recipientAddress = recipientAddress,
+        amount = amount,
+        network = DogecoinNetwork.MAINNET,
+        feePerKbKoinu = feePerKbKoinu,
+        minimumOutputKoinu = DogecoinProtocol.MIN_STANDARD_OUTPUT_KOINU
+    )
+
     fun transactionId(rawTransactionHex: String): String {
         return DogecoinHex.encode(doubleSha256(DogecoinHex.decode(rawTransactionHex)).reversedArray())
     }

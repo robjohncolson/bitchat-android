@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE — **DES-1-A/B/C DONE**; next **DES-1-D** (first spend unlock)  
+**Status:** ACTIVE — **DES-1-A–D DONE**; next **DES-1-E** (settlement)  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -119,7 +119,7 @@ Every selectable mainnet UTXO carries verified full previous-tx (`gettransaction
 
 ---
 
-## DES-1-D — Send coordinator
+## DES-1-D — Send coordinator (DONE)
 
 ### Goal
 
