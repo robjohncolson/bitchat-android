@@ -1,5 +1,6 @@
 package com.bitchat.android.features.dogecoin
 
+import android.content.Intent
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -507,6 +508,23 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                             lineHeight = 18.sp
                         )
                     }
+                    if (authorizationState !in setOf(
+                            DogecoinTrustedPersonalNodeState.DISPUTED,
+                            DogecoinTrustedPersonalNodeState.AUTH_REQUIRED
+                        )
+                    ) {
+                        TpnConnectionProfileExport(
+                            profile = authorizedProfile,
+                            store = store
+                        )
+                    } else {
+                        Text(
+                            text = stringResource(R.string.dogecoin_tpn_profile_share_blocked),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 18.sp
+                        )
+                    }
 
                     when (authorizationState) {
                         DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE -> {
@@ -672,6 +690,17 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                         ),
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.tertiary
+                    )
+                    TpnConnectionProfileImport(
+                        enabled = !provisioning && !authorizing,
+                        onImported = { imported ->
+                            val draft = dogecoinTrustedPersonalNodeConnectionDraftFrom(imported)
+                            invalidateProvisioningDraft()
+                            origin = draft.origin
+                            username = draft.username
+                            password = draft.password
+                            requestedWalletId = draft.coreWalletId
+                        }
                     )
                     OutlinedTextField(
                         value = origin,
@@ -938,6 +967,222 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun TpnConnectionProfileExport(
+    profile: DogecoinTrustedPersonalNodeProfile,
+    store: DogecoinTrustedPersonalNodeStore
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var includePassword by remember(profile) { mutableStateOf(false) }
+    var passwordDisclosureAccepted by remember(profile) { mutableStateOf(false) }
+    var sharing by remember(profile) { mutableStateOf(false) }
+    var shareError by remember(profile) { mutableStateOf<String?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_profile_share_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_profile_share_intro),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            lineHeight = 18.sp
+        )
+        TpnConfirmationRow(
+            checked = includePassword,
+            onCheckedChange = {
+                includePassword = it
+                passwordDisclosureAccepted = false
+                shareError = null
+            },
+            text = stringResource(R.string.dogecoin_tpn_profile_include_password),
+            enabled = !sharing
+        )
+        if (includePassword) {
+            TpnConfirmationRow(
+                checked = passwordDisclosureAccepted,
+                onCheckedChange = {
+                    passwordDisclosureAccepted = it
+                    shareError = null
+                },
+                text = stringResource(R.string.dogecoin_tpn_profile_password_disclosure),
+                enabled = !sharing
+            )
+        }
+        OutlinedButton(
+            onClick = {
+                if (sharing) return@OutlinedButton
+                sharing = true
+                shareError = null
+                scope.launch {
+                    val result = runCatching {
+                        val credentials = withContext(Dispatchers.IO) {
+                            store.loadCredentials(profile)
+                        } ?: error(context.getString(R.string.dogecoin_tpn_credentials_unavailable))
+                        encodeDogecoinTrustedPersonalNodeConnectionProfile(
+                            DogecoinTrustedPersonalNodeConnectionProfile(
+                                origin = profile.origin,
+                                username = credentials.username,
+                                coreWalletId = profile.coreWalletId,
+                                password = credentials.password.takeIf { includePassword }
+                            )
+                        ) ?: error(context.getString(R.string.dogecoin_tpn_profile_invalid))
+                    }
+                    result.fold(
+                        onSuccess = { encoded ->
+                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, encoded)
+                            }
+                            runCatching {
+                                context.startActivity(
+                                    Intent.createChooser(
+                                        sendIntent,
+                                        context.getString(R.string.dogecoin_tpn_profile_share_chooser)
+                                    )
+                                )
+                            }.onSuccess {
+                                // A password-bearing export is always a fresh, explicit choice.
+                                includePassword = false
+                                passwordDisclosureAccepted = false
+                            }.onFailure { error ->
+                                shareError = error.message ?: error.javaClass.simpleName
+                            }
+                        },
+                        onFailure = { error ->
+                            shareError = error.message ?: error.javaClass.simpleName
+                        }
+                    )
+                    sharing = false
+                }
+            },
+            enabled = !sharing && (!includePassword || passwordDisclosureAccepted),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                stringResource(
+                    if (sharing) {
+                        R.string.dogecoin_tpn_profile_preparing
+                    } else {
+                        R.string.dogecoin_tpn_profile_share_action
+                    }
+                )
+            )
+        }
+        shareError?.let { error ->
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_profile_share_failed, error),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun TpnConnectionProfileImport(
+    enabled: Boolean,
+    onImported: (DogecoinTrustedPersonalNodeConnectionProfile) -> Unit
+) {
+    var encoded by remember { mutableStateOf("") }
+    var passwordDisclosureAccepted by remember { mutableStateOf(false) }
+    var imported by remember { mutableStateOf(false) }
+    var tooLong by remember { mutableStateOf(false) }
+    val parsed = remember(encoded, tooLong) {
+        if (tooLong) null else decodeDogecoinTrustedPersonalNodeConnectionProfileOrNull(encoded)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_profile_import_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Text(
+            text = stringResource(R.string.dogecoin_tpn_profile_import_intro),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            lineHeight = 18.sp
+        )
+        OutlinedTextField(
+            value = encoded,
+            onValueChange = { changed ->
+                if (changed.length <= DOGECOIN_TPN_CONNECTION_PROFILE_MAX_CHARS) {
+                    encoded = changed
+                    tooLong = false
+                } else {
+                    // Never leave an older valid candidate actionable after rejecting a replacement.
+                    encoded = ""
+                    tooLong = true
+                }
+                passwordDisclosureAccepted = false
+                imported = false
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = enabled,
+            minLines = 2,
+            maxLines = 4,
+            label = { Text(stringResource(R.string.dogecoin_tpn_profile_import_label)) },
+            visualTransformation = PasswordVisualTransformation(),
+            isError = tooLong || (encoded.isNotEmpty() && parsed == null)
+        )
+        if (tooLong || (encoded.isNotEmpty() && parsed == null)) {
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_profile_invalid),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                lineHeight = 18.sp
+            )
+        }
+        parsed?.let { candidate ->
+            Text(
+                text = stringResource(
+                    R.string.dogecoin_tpn_profile_import_preview,
+                    candidate.origin,
+                    candidate.username,
+                    candidate.coreWalletId
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 18.sp
+            )
+            if (candidate.password != null) {
+                TpnConfirmationRow(
+                    checked = passwordDisclosureAccepted,
+                    onCheckedChange = { passwordDisclosureAccepted = it },
+                    text = stringResource(R.string.dogecoin_tpn_profile_import_password_disclosure),
+                    enabled = enabled
+                )
+            }
+            Button(
+                onClick = {
+                    onImported(candidate)
+                    encoded = ""
+                    passwordDisclosureAccepted = false
+                    imported = true
+                },
+                enabled = enabled && !tooLong &&
+                    (candidate.password == null || passwordDisclosureAccepted),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(stringResource(R.string.dogecoin_tpn_profile_import_action))
+            }
+        }
+        if (imported) {
+            Text(
+                text = stringResource(R.string.dogecoin_tpn_profile_imported_draft),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary,
+                lineHeight = 18.sp
+            )
+        }
     }
 }
 
