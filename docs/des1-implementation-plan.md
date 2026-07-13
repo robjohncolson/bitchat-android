@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE — **DES-1-A–D DONE**; next **DES-1-E** (settlement)  
+**Status:** ACTIVE — **DES-1-A–E DONE**; next **DES-1-F** (ops + share)  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -140,7 +140,7 @@ Proof-backed build/sign on phone → hard fee blocks (1 DOGE / 10%) → per-spen
 
 ---
 
-## DES-1-E — Settlement + dispute
+## DES-1-E — Settlement + dispute (DONE)
 
 ### Goal
 

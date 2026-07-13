@@ -14,6 +14,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -185,6 +186,257 @@ class DogecoinTrustedPersonalNodeAttemptStoreTest {
     }
 
     @Test
+    fun `only fully synced independent SPV advances claim and persists exact provenance`() {
+        val attempt = claimedAttempt()
+
+        assertFalse(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = 1,
+                    provenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                    fullySynced = false
+                )
+            )
+        )
+        assertEquals(
+            DogecoinTrustedPersonalNodeAttemptState.CLAIMED,
+            availableAttempt().state
+        )
+        assertFalse(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = 6,
+                    provenance = DogecoinSpvEvidenceProvenance.NONE
+                )
+            )
+        )
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = 0,
+                    provenance = DogecoinSpvEvidenceProvenance.PEER
+                )
+            )
+        )
+        var observed = availableAttempt()
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.OBSERVED, observed.state)
+        assertEquals(0, observed.settlementSpvDepth)
+        assertEquals(DogecoinSpvEvidenceProvenance.PEER, observed.settlementSpvProvenance)
+        assertTrue(observed.hasReservedInputs)
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = 5,
+                    provenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                    tipHash = "44".repeat(32)
+                )
+            )
+        )
+        observed = availableAttempt()
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.OBSERVED, observed.state)
+        assertEquals(5, observed.settlementSpvDepth)
+        assertEquals(DogecoinSpvEvidenceProvenance.CHAIN, observed.settlementSpvProvenance)
+        assertTrue(observed.hasReservedInputs)
+        // A late exact Core response is weaker than SPV observation and succeeds idempotently.
+        assertTrue(store.markClaimed(attempt.correlationId, attempt.review.localTxid))
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.OBSERVED, availableAttempt().state)
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = 2,
+                    provenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                    tipHash = "45".repeat(32)
+                )
+            )
+        )
+        observed = availableAttempt()
+        assertEquals(2, observed.settlementSpvDepth)
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS,
+                    provenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                    tipHash = "55".repeat(32)
+                )
+            )
+        )
+        val confirmed = DogecoinTrustedPersonalNodeAttemptStore(prefs).load()
+            as DogecoinTrustedPersonalNodeAttemptLoadResult.Available
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.CONFIRMED, confirmed.attempt.state)
+        assertEquals(DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS, confirmed.attempt.settlementSpvDepth)
+        assertEquals(DogecoinSpvEvidenceProvenance.CHAIN, confirmed.attempt.settlementSpvProvenance)
+        assertEquals("55".repeat(32), confirmed.attempt.settlementSpvTipHash)
+        assertEquals(
+            DogecoinTrustedPersonalNodeReservationState.RELEASED_EXACT_SPV_CONFIRMATION,
+            confirmed.attempt.reservationState
+        )
+        assertFalse(confirmed.attempt.hasReservedInputs)
+        assertTrue(store.markClaimed(attempt.correlationId, attempt.review.localTxid))
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.CONFIRMED, availableAttempt().state)
+    }
+
+    @Test
+    fun `only stable SPV conflicting spend releases reservation and records terminal conflict`() {
+        val attempt = claimedAttempt()
+        val reserved = attempt.review.proofReferences.single()
+        val conflictingTxid = "66".repeat(32)
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = null,
+                    provenance = DogecoinSpvEvidenceProvenance.NONE,
+                    conflicts = listOf(
+                        DogecoinSpvConflictingSpendEvidence(
+                            reservedTxid = reserved.txid,
+                            reservedVout = reserved.vout,
+                            spendingTxid = conflictingTxid,
+                            depth = 5,
+                            provenance = DogecoinSpvEvidenceProvenance.CHAIN
+                        )
+                    )
+                )
+            )
+        )
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.CLAIMED, availableAttempt().state)
+        assertTrue(availableAttempt().hasReservedInputs)
+
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = null,
+                    provenance = DogecoinSpvEvidenceProvenance.NONE,
+                    tipHash = "77".repeat(32),
+                    conflicts = listOf(
+                        DogecoinSpvConflictingSpendEvidence(
+                            reservedTxid = reserved.txid,
+                            reservedVout = reserved.vout,
+                            spendingTxid = conflictingTxid,
+                            depth = DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS,
+                            provenance = DogecoinSpvEvidenceProvenance.CHAIN
+                        )
+                    )
+                )
+            )
+        )
+        val conflicted = availableAttempt()
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.CONFLICTED, conflicted.state)
+        assertEquals(
+            DogecoinTrustedPersonalNodeReservationState.RELEASED_CONFLICTING_SPEND,
+            conflicted.reservationState
+        )
+        assertEquals(conflictingTxid, conflicted.conflictingSpendTxid)
+        assertEquals(DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS, conflicted.conflictingSpendDepth)
+        assertEquals("77".repeat(32), conflicted.settlementSpvTipHash)
+        assertFalse(conflicted.hasReservedInputs)
+        assertTrue(
+            store.applySpvSettlementEvidence(
+                attempt.correlationId,
+                settlementEvidence(
+                    attempt,
+                    depth = DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS,
+                    provenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                    tipHash = "88".repeat(32)
+                )
+            )
+        )
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.CONFLICTED, availableAttempt().state)
+    }
+
+    @Test
+    fun `recovery keeps disclosed bytes reserved but explicitly abandons proven undisclosed bytes`() {
+        val ready = store.persistBeforeDisclosure(frozenReview())!!
+        assertEquals(
+            DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_EXPIRED_UNDISCLOSED,
+            store.recoveryDisposition(
+                currentBinding = binding,
+                profileRevoked = false,
+                nowMillis = ready.review.expiresAtMillis + 1L
+            )
+        )
+        assertTrue(
+            store.abandonNeverDisclosed(
+                correlationId = ready.correlationId,
+                localTxid = ready.review.localTxid,
+                currentBinding = binding,
+                profileRevoked = false,
+                nowMillis = ready.review.expiresAtMillis + 1L
+            )
+        )
+        assertEquals(
+            DogecoinTrustedPersonalNodeReservationState.RELEASED_NEVER_DISCLOSED,
+            availableAttempt().reservationState
+        )
+
+        prefs.edit().clear().commit()
+        val disclosed = store.persistBeforeDisclosure(frozenReview())!!
+        assertTrue(store.markSubmissionUnknown(disclosed.correlationId, disclosed.review.localTxid))
+        assertEquals(
+            DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_REVOKED_PROFILE,
+            store.recoveryDisposition(
+                currentBinding = null,
+                profileRevoked = true,
+                nowMillis = disclosed.review.expiresAtMillis + 1L
+            )
+        )
+        assertFalse(
+            store.abandonNeverDisclosed(
+                correlationId = disclosed.correlationId,
+                localTxid = disclosed.review.localTxid,
+                currentBinding = null,
+                profileRevoked = true,
+                nowMillis = disclosed.review.expiresAtMillis + 1L
+            )
+        )
+        assertTrue(availableAttempt().hasReservedInputs)
+    }
+
+    @Test
+    fun `D schema migrates fail closed and next transition writes settlement schema`() {
+        val attempt = store.persistBeforeDisclosure(frozenReview())!!
+        val ledger = JSONObject(prefs.getString("attempt_ledger", null)!!)
+        val legacyAttempt = ledger.getJSONObject("attempt")
+        listOf(
+            "reservation_state",
+            "settlement_spv_depth",
+            "settlement_spv_provenance",
+            "settlement_spv_tip_hash",
+            "conflicting_spend_txid",
+            "conflicting_spend_depth"
+        ).forEach(legacyAttempt::remove)
+        ledger.put("schema_version", 1)
+        prefs.edit().putString("attempt_ledger", ledger.toString()).commit()
+
+        val migrated = availableAttempt()
+        assertEquals(DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED, migrated.state)
+        assertEquals(DogecoinTrustedPersonalNodeReservationState.RESERVED, migrated.reservationState)
+        assertNull(migrated.settlementSpvDepth)
+        assertEquals(DogecoinSpvEvidenceProvenance.NONE, migrated.settlementSpvProvenance)
+        assertTrue(store.markSubmissionUnknown(attempt.correlationId, attempt.review.localTxid))
+        assertEquals(2, JSONObject(prefs.getString("attempt_ledger", null)!!).getInt("schema_version"))
+    }
+
+    @Test
     fun `corrupt or unknown ledger is unavailable rather than empty`() {
         assertSame(DogecoinTrustedPersonalNodeAttemptLoadResult.Empty, store.load())
         prefs.edit().putString("attempt_ledger", "not-json").commit()
@@ -292,6 +544,37 @@ class DogecoinTrustedPersonalNodeAttemptStoreTest {
             personalNodeOracleAcknowledged = true
         )
     }
+
+    private fun claimedAttempt(): DogecoinTrustedPersonalNodeAttempt {
+        val attempt = store.persistBeforeDisclosure(frozenReview())!!
+        assertTrue(store.markSubmissionUnknown(attempt.correlationId, attempt.review.localTxid))
+        assertTrue(store.markClaimed(attempt.correlationId, attempt.review.localTxid))
+        return availableAttempt()
+    }
+
+    private fun availableAttempt(): DogecoinTrustedPersonalNodeAttempt =
+        (store.load() as DogecoinTrustedPersonalNodeAttemptLoadResult.Available).attempt
+
+    private fun settlementEvidence(
+        attempt: DogecoinTrustedPersonalNodeAttempt,
+        depth: Int?,
+        provenance: DogecoinSpvEvidenceProvenance,
+        fullySynced: Boolean = true,
+        tipHash: String = "33".repeat(32),
+        conflicts: List<DogecoinSpvConflictingSpendEvidence> = emptyList()
+    ): DogecoinSpvSettlementEvidence = DogecoinSpvSettlementEvidence(
+        network = DogecoinNetwork.MAINNET,
+        expectedTxid = attempt.review.localTxid,
+        exactTransactionDepth = depth,
+        exactTransactionProvenance = provenance,
+        fullySynced = fullySynced,
+        peerCount = DogecoinSpvService.MIN_PEERS,
+        peerFloorMet = true,
+        chainHeight = 5_000_000,
+        bestPeerHeight = 5_000_001,
+        chainTipHash = tipHash,
+        conflictingSpends = conflicts
+    )
 
     private fun canonicalReview(
         transaction: DogecoinSignedTransaction,

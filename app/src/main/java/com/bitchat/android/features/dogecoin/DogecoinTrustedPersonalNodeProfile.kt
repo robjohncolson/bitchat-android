@@ -10,8 +10,33 @@ internal enum class DogecoinTrustedPersonalNodeState {
     ACTIVE_UNVERIFIED,
     DEGRADED,
     AUTH_REQUIRED,
+    DISPUTED,
     REVOKED
 }
+
+internal enum class DogecoinTrustedPersonalNodeCrossCheckResult {
+    AGREEMENT,
+    CONFLICT,
+    INCONCLUSIVE
+}
+
+/** One fresh fully-synced SPV-vs-node comparison; node receipt/confirmation status is never evidence. */
+internal data class DogecoinTrustedPersonalNodeCrossCheckEvidence(
+    val comparisonId: String,
+    val result: DogecoinTrustedPersonalNodeCrossCheckResult,
+    val fullySyncedMainnet: Boolean,
+    val confirmationContextDepth: Int,
+    val hasConflictingSpend: Boolean,
+    val capturedAtMillis: Long
+)
+
+internal data class DogecoinTrustedPersonalNodeDisputeStatus(
+    val state: DogecoinTrustedPersonalNodeState,
+    val stableConflictStreak: Int,
+    val recoveryAgreementStreak: Int,
+    val recoveryReadyForOperator: Boolean,
+    val lastComparisonId: String?
+)
 
 internal data class DogecoinTrustedPersonalNodeProfileCandidate(
     val origin: String,

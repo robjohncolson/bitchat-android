@@ -581,6 +581,19 @@ internal fun DogecoinTrustedPersonalNodeSettings(
                                 lineHeight = 18.sp
                             )
                         }
+                        DogecoinTrustedPersonalNodeState.DISPUTED -> {
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_disputed_title),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = stringResource(R.string.dogecoin_tpn_disputed_body),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 18.sp
+                            )
+                        }
                         else -> Unit
                     }
 

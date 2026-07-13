@@ -18,6 +18,7 @@ import org.bitcoinj.core.ECKey
 import org.bitcoinj.core.NetworkParameters
 import org.bitcoinj.core.Peer
 import org.bitcoinj.core.PeerGroup
+import org.bitcoinj.core.TransactionConfidence
 import org.bitcoinj.core.VersionMessage
 import org.bitcoinj.core.listeners.DownloadProgressTracker
 import org.bitcoinj.net.BlockingClientManager
@@ -508,7 +509,9 @@ class DogecoinSpvService private constructor(
      * Phase 3 corroboration: confirmation depth of OUR broadcast [txid] as the SPV chain catches up —
      * no third party, no API key. Returns null if SPV is not the active backend for [network], the txid is
      * malformed, or the tx is not (yet) known to the wallet; 0 if known but unconfirmed; the block depth
-     * (>=1) once it is mined. Callers keep polling on null/0 and treat >=1 as corroborated.
+     * (>=1) once it is mined. Callers keep polling on null/0 and treat >=1 as corroborated. This legacy
+     * presentation helper does not distinguish locally inserted pending records; TPN settlement MUST use
+     * [settlementEvidence] instead.
      */
     fun confirmationDepth(network: DogecoinNetwork, txid: String): Int? = synchronized(lock) {
         val w = wallet?.takeIf { activeNetwork == network } ?: return null
@@ -516,6 +519,80 @@ class DogecoinSpvService private constructor(
         val hash = runCatching { org.bitcoinj.core.Sha256Hash.wrap(txid.trim()) }.getOrNull() ?: return null
         val tx = w.getTransaction(hash) ?: return null
         runCatching { tx.confidence?.depthInBlocks }.getOrNull()
+    }
+
+    /**
+     * DES-1-E independent settlement evidence for one TPN attempt. This is intentionally mainnet-only and
+     * read-only. A transaction counts only when bitcoinj learned it from the peer network, or when it is in
+     * the validated best chain. In particular, a locally injected `receivePending` transaction is excluded.
+     * Node/RPC data never enters this method.
+     */
+    internal fun settlementEvidence(
+        network: DogecoinNetwork,
+        expectedTxid: String,
+        reservedOutpoints: List<Pair<String, Int>>
+    ): DogecoinSpvSettlementEvidence? = synchronized(lock) {
+        if (network != DogecoinNetwork.MAINNET) return null
+        val w = wallet?.takeIf { activeNetwork == network } ?: return null
+        val chain = blockChain ?: return null
+        val pg = peerGroup?.takeIf { activeNetwork == network } ?: return null
+        org.bitcoinj.core.Context.propagate(bitcoinjContext)
+
+        // Do not let a status sample that was true before peers disconnected promote settlement. Re-sample the
+        // live peer floor and tip lag under the same service lock; mainnet has no falling-edge hysteresis.
+        val publishedStatus = _status.value
+        val livePeers = pg.connectedPeers
+        val livePeerCount = livePeers.size
+        val liveChainHeight = runCatching { chain.bestChainHeight }.getOrDefault(0)
+        val liveBestPeerHeight = livePeers.maxOfOrNull { it.bestHeight } ?: 0L
+        val liveBehind = if (liveBestPeerHeight > 0L) {
+            (liveBestPeerHeight - liveChainHeight).coerceAtLeast(0L)
+        } else {
+            Long.MAX_VALUE
+        }
+        val liveStatus = publishedStatus.copy(
+            peerCount = livePeerCount,
+            chainHeight = liveChainHeight,
+            bestPeerHeight = liveBestPeerHeight,
+            synced = publishedStatus.network == network && publishedStatus.running && publishedStatus.synced &&
+                livePeerCount >= MIN_PEERS && liveBehind <= SYNCED_WITHIN_BLOCKS
+        )
+
+        val facts = w.getTransactions(false).map { transaction ->
+            val confidence = transaction.confidence
+            val confidenceKind = when (confidence?.confidenceType) {
+                TransactionConfidence.ConfidenceType.BUILDING -> DogecoinSpvWalletConfidence.CHAIN_BUILDING
+                TransactionConfidence.ConfidenceType.PENDING -> when (confidence?.source) {
+                    TransactionConfidence.Source.NETWORK -> DogecoinSpvWalletConfidence.NETWORK_PENDING
+                    TransactionConfidence.Source.SELF -> DogecoinSpvWalletConfidence.LOCAL_PENDING
+                    else -> DogecoinSpvWalletConfidence.UNKNOWN
+                }
+                TransactionConfidence.ConfidenceType.DEAD,
+                TransactionConfidence.ConfidenceType.IN_CONFLICT -> DogecoinSpvWalletConfidence.DEAD_OR_CONFLICTING
+                else -> DogecoinSpvWalletConfidence.UNKNOWN
+            }
+            DogecoinSpvWalletTransactionFact(
+                txid = transaction.hashAsString,
+                confidence = confidenceKind,
+                depth = if (confidenceKind == DogecoinSpvWalletConfidence.CHAIN_BUILDING) {
+                    runCatching { confidence?.depthInBlocks ?: 0 }.getOrDefault(0).coerceAtLeast(0)
+                } else {
+                    0
+                },
+                spentOutpoints = transaction.inputs.mapNotNull { input ->
+                    val index = input.outpoint.index
+                    if (index !in 0L..Int.MAX_VALUE.toLong()) return@mapNotNull null
+                    input.outpoint.hash.toString() to index.toInt()
+                }
+            )
+        }
+        DogecoinSpvSettlementEvidencePolicy.derive(
+            status = liveStatus,
+            expectedTxid = expectedTxid,
+            reservedOutpoints = reservedOutpoints,
+            chainTipHash = runCatching { chain.chainHead.header.hashAsString }.getOrNull(),
+            transactions = facts
+        )
     }
 
     /**

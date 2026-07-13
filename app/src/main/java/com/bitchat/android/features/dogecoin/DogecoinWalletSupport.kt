@@ -202,14 +202,31 @@ internal data class DogecoinBroadcastReceipt(
 /** DES-1-D settlement guard: no node or unsynced-SPV depth can promote a durable TPN attempt. */
 internal fun dogecoinPresentedConfirmationDepth(
     observedDepth: Int,
-    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?
-): Int = if (trustedPersonalNodeAttemptState == null) observedDepth.coerceAtLeast(0) else 0
+    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?,
+    independentSpvDepth: Int? = null
+): Int = when (trustedPersonalNodeAttemptState) {
+    null -> observedDepth.coerceAtLeast(0)
+    DogecoinTrustedPersonalNodeAttemptState.OBSERVED ->
+        independentSpvDepth?.coerceIn(0, DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS - 1) ?: 0
+    DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ->
+        independentSpvDepth?.coerceAtLeast(DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS) ?: 0
+    DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
+    DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN,
+    DogecoinTrustedPersonalNodeAttemptState.CLAIMED,
+    DogecoinTrustedPersonalNodeAttemptState.CONFLICTED -> 0
+}
 
 internal fun dogecoinPresentationIsConfirmed(
     observedDepth: Int,
     confirmationTarget: Int,
-    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?
-): Boolean = trustedPersonalNodeAttemptState == null && observedDepth >= confirmationTarget
+    trustedPersonalNodeAttemptState: DogecoinTrustedPersonalNodeAttemptState?,
+    independentSpvDepth: Int? = null
+): Boolean = when (trustedPersonalNodeAttemptState) {
+    null -> observedDepth >= confirmationTarget
+    DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ->
+        independentSpvDepth != null && independentSpvDepth >= confirmationTarget
+    else -> false
+}
 
 internal enum class DogecoinWatchImportAction {
     REFRESH_BALANCE,

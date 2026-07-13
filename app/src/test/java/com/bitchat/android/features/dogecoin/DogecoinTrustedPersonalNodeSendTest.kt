@@ -33,6 +33,49 @@ class DogecoinTrustedPersonalNodeSendTest {
     }
 
     @Test
+    fun `only durable independent SPV settlement depth advances TPN presentation`() {
+        assertEquals(
+            3,
+            dogecoinPresentedConfirmationDepth(
+                observedDepth = 99,
+                trustedPersonalNodeAttemptState = DogecoinTrustedPersonalNodeAttemptState.OBSERVED,
+                independentSpvDepth = 3
+            )
+        )
+        assertFalse(
+            dogecoinPresentationIsConfirmed(
+                observedDepth = 99,
+                confirmationTarget = 6,
+                trustedPersonalNodeAttemptState = DogecoinTrustedPersonalNodeAttemptState.OBSERVED,
+                independentSpvDepth = 3
+            )
+        )
+        assertEquals(
+            6,
+            dogecoinPresentedConfirmationDepth(
+                observedDepth = 0,
+                trustedPersonalNodeAttemptState = DogecoinTrustedPersonalNodeAttemptState.CONFIRMED,
+                independentSpvDepth = 6
+            )
+        )
+        assertTrue(
+            dogecoinPresentationIsConfirmed(
+                observedDepth = 0,
+                confirmationTarget = 6,
+                trustedPersonalNodeAttemptState = DogecoinTrustedPersonalNodeAttemptState.CONFIRMED,
+                independentSpvDepth = 6
+            )
+        )
+        listOf(
+            DogecoinTrustedPersonalNodeAttemptState.CLAIMED,
+            DogecoinTrustedPersonalNodeAttemptState.CONFLICTED
+        ).forEach { state ->
+            assertEquals(0, dogecoinPresentedConfirmationDepth(99, state, 99))
+            assertFalse(dogecoinPresentationIsConfirmed(99, 6, state, 99))
+        }
+    }
+
+    @Test
     fun `typed route unlocks only current mainnet active session with a nonempty fresh proof`() {
         val fixture = activeFixture()
         val route = assertNotNullValue(fixture.holder.beginSpendRoute(1_004L))
@@ -100,6 +143,20 @@ class DogecoinTrustedPersonalNodeSendTest {
         assertNotNull(fixture.holder.refreshActiveReadSnapshot(1_006L))
         assertFalse(fixture.holder.isSpendAuthorizationCurrent(second, 1_006L))
         assertNull(fixture.holder.freshProofSnapshot(1_006L))
+    }
+
+    @Test
+    fun `independent cross-check freezes existing spend authorization and proof`() {
+        val fixture = activeFixture()
+        val authorization = assertNotNullValue(fixture.holder.beginSpendAuthorization(1_004L))
+        assertTrue(fixture.holder.isSpendAuthorizationCurrent(authorization, 1_004L))
+
+        fixture.holder.freezeSpendForIndependentCrossCheck()
+
+        assertFalse(fixture.holder.isSpendAuthorizationCurrent(authorization, 1_005L))
+        assertNull(fixture.holder.freshProofSnapshot(1_005L))
+        assertNull(fixture.holder.beginSpendAuthorization(1_005L))
+        assertEquals(DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED, fixture.holder.state)
     }
 
     @Test

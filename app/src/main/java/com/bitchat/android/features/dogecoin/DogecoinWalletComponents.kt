@@ -214,7 +214,8 @@ internal fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
     val confirmed = dogecoinPresentationIsConfirmed(
         row.confirmations,
         DOGECOIN_SPV_CONFIRM_TARGET,
-        trustedNodeAttemptState
+        trustedNodeAttemptState,
+        row.confirmations
     )
     Row(
         modifier = Modifier
@@ -236,7 +237,32 @@ internal fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
             maxLines = 1,
             modifier = Modifier.weight(1f)
         )
-        if (trustedNodeAttemptState != null) {
+        if (trustedNodeAttemptState == DogecoinTrustedPersonalNodeAttemptState.OBSERVED) {
+            ConfirmationRing(
+                mode = RingMode.CONFIRMING,
+                progress = row.confirmations.toFloat() / DOGECOIN_SPV_CONFIRM_TARGET,
+                diameter = 24.dp,
+                strokeWidth = 3.dp,
+                segments = DOGECOIN_SPV_CONFIRM_TARGET,
+                contentDescription = stringResource(
+                    R.string.dogecoin_tpn_last_observed_confirmation_description,
+                    row.confirmations,
+                    DOGECOIN_SPV_CONFIRM_TARGET
+                )
+            )
+            Text(
+                text = stringResource(
+                    R.string.dogecoin_tpn_attempt_observed_compact,
+                    row.confirmations,
+                    DOGECOIN_SPV_CONFIRM_TARGET
+                ),
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.muted
+            )
+        } else if (trustedNodeAttemptState != null) {
+            if (trustedNodeAttemptState == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED) {
+                Text("✓", style = MaterialTheme.typography.titleMedium, color = colors.gold)
+            }
             Text(
                 text = stringResource(
                     when (trustedNodeAttemptState) {
@@ -246,6 +272,12 @@ internal fun WalletTxRowView(row: WalletTxRow, onClick: (() -> Unit)? = null) {
                             R.string.dogecoin_tpn_attempt_state_unknown
                         DogecoinTrustedPersonalNodeAttemptState.CLAIMED ->
                             R.string.dogecoin_tpn_attempt_state_claimed
+                        DogecoinTrustedPersonalNodeAttemptState.OBSERVED ->
+                            R.string.dogecoin_tpn_attempt_state_observed
+                        DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ->
+                            R.string.dogecoin_tpn_attempt_state_confirmed
+                        DogecoinTrustedPersonalNodeAttemptState.CONFLICTED ->
+                            R.string.dogecoin_tpn_attempt_state_conflicted
                     }
                 ),
                 style = MaterialTheme.typography.labelMedium,
