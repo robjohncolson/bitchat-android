@@ -1,6 +1,6 @@
 # DES-1 implementation plan — TRUSTED_PERSONAL_NODE
 
-**Status:** ACTIVE — **DES-1-A–E DONE**; next **DES-1-F** (ops + share)  
+**Status:** DONE — **DES-1-A–F complete**; live soak/canary are release activities  
 **Decisions:** `docs/des1-human-decisions.md` (DECIDED 2026-07-12)  
 **Design:** `docs/dogecoin-trusted-personal-node-mainnet-design.md`  
 **Guardrail:** DONE — `DogecoinSpendRoutePolicy` (mainnet generic RPC spend fail-closed)
@@ -148,7 +148,7 @@ Claimed → Observed (SPV sees tx) → Confirmed (SPV ≥6). DISPUTED recovery p
 
 ---
 
-## DES-1-F — Ops + share
+## DES-1-F — Ops + share (DONE)
 
 ### Goal
 

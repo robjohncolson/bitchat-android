@@ -84,7 +84,7 @@ SPV-BALANCE-REFRESH   DONE — re-pull SPV balance; honest behind labels
 SPV-NETWORK-REBIND    DONE — network switch rebinds SPV chain
 ```
 
-### Wave 4 (ACTIVE) — mainnet trusted personal node
+### Wave 4 (DONE) — mainnet trusted personal node
 
 Full design: **`docs/dogecoin-trusted-personal-node-mainnet-design.md`**  
 Decisions: **`docs/des1-human-decisions.md`** — **DECIDED 2026-07-12**  
@@ -98,7 +98,7 @@ DES-1-B           DONE — Activation + readiness + read-only display
 DES-1-C           DONE — Proof-backed UTXO / prev-tx
 DES-1-D           DONE — Send coordinator (first TPN spend unlock)
 DES-1-E           DONE — Settlement + dispute + SPV-6
-DES-1-F           NEXT — Ops runbook + shareable profile export (Codex)
+DES-1-F           DONE — Ops runbook + shareable profile export
 WALLET-SESSION    State hoist (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 ```
@@ -331,6 +331,14 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 
 ---
 
+### DES-1-F — Ops runbook + shareable connection profile
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-implementation-plan.md` § DES-1-F  
+**Status:** DONE — host runbook + connection-profile export/import (draft only; full ceremony still required).
+
+---
+
 ## 4. Proven baseline (do not re-litigate)
 
 - Tailscale Serve + loopback Core RPC works on testnet.  
@@ -341,6 +349,7 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 - `verificationprogress` slightly >1.0 is normal on Dogecoin testnet (clamped).  
 - Confirmation ring under assist was **known gap** until CONF-RPC-PROGRESS.  
 - Mainnet SPV can hold correct balance in the service while UI shows empty Syncing (SPV-BALANCE-REFRESH).
+- DES-1 Wave 4 A–F shipped; live mainnet canary remains a separate human go (`docs/dogecoin-trusted-personal-node-host-runbook.md`).
 
 ---
 

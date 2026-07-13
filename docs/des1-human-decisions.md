@@ -48,7 +48,7 @@
 
 ```text
 DES-1-GUARDRAIL   DONE
-DES-1-A … F       See docs/des1-implementation-plan.md (start with A — profile, no spend)
+DES-1-A … F       DONE — see docs/des1-implementation-plan.md; host runbook docs/dogecoin-trusted-personal-node-host-runbook.md
 ```
 
 Share/export of connection profiles is DES-1-F; must never include WIF.
