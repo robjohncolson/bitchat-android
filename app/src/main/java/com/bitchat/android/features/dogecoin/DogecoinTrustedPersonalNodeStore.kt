@@ -39,10 +39,12 @@ internal class DogecoinTrustedPersonalNodeStore private constructor(
     fun loadState(): DogecoinTrustedPersonalNodeState = synchronized(STORE_LOCK) {
         when (readStoredState()) {
             DogecoinTrustedPersonalNodeState.REVOKED -> DogecoinTrustedPersonalNodeState.REVOKED
-            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE -> {
+            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE,
+            DogecoinTrustedPersonalNodeState.DISPUTED -> {
+                val storedState = readStoredState()!!
                 val profile = readTrustProfile()
                 if (profile != null && readCredentials(profile.revision) != null) {
-                    DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+                    storedState
                 } else {
                     DogecoinTrustedPersonalNodeState.UNAUTHORIZED
                 }
@@ -52,7 +54,11 @@ internal class DogecoinTrustedPersonalNodeStore private constructor(
     }
 
     fun loadProfile(): DogecoinTrustedPersonalNodeProfile? = synchronized(STORE_LOCK) {
-        if (readStoredState() != DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE) return@synchronized null
+        if (readStoredState() !in setOf(
+                DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE,
+                DogecoinTrustedPersonalNodeState.DISPUTED
+            )
+        ) return@synchronized null
         val profile = readTrustProfile() ?: return@synchronized null
         profile.takeIf { readCredentials(it.revision) != null }
     }
@@ -61,9 +67,129 @@ internal class DogecoinTrustedPersonalNodeStore private constructor(
         profile: DogecoinTrustedPersonalNodeProfile
     ): DogecoinTrustedPersonalNodeCredentials? = synchronized(STORE_LOCK) {
         if (!isValidDogecoinTrustedPersonalNodeProfile(profile)) return@synchronized null
-        if (readStoredState() != DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE) return@synchronized null
+        if (readStoredState() !in setOf(
+                DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE,
+                DogecoinTrustedPersonalNodeState.DISPUTED
+            )
+        ) return@synchronized null
         if (readTrustProfile() != profile) return@synchronized null
         readCredentials(profile.revision)
+    }
+
+    fun loadDisputeStatus(
+        profile: DogecoinTrustedPersonalNodeProfile
+    ): DogecoinTrustedPersonalNodeDisputeStatus? = synchronized(STORE_LOCK) {
+        if (readTrustProfile() != profile || readCredentials(profile.revision) == null) {
+            return@synchronized null
+        }
+        val state = readStoredState()?.takeIf {
+            it == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE ||
+                it == DogecoinTrustedPersonalNodeState.DISPUTED
+        } ?: return@synchronized null
+        DogecoinTrustedPersonalNodeDisputeStatus(
+            state = state,
+            stableConflictStreak = trustPrefs.getInt(KEY_DISPUTE_CONFLICT_STREAK, 0).coerceIn(0, 2),
+            recoveryAgreementStreak = trustPrefs.getInt(KEY_DISPUTE_AGREEMENT_STREAK, 0).coerceIn(0, 2),
+            recoveryReadyForOperator = state == DogecoinTrustedPersonalNodeState.DISPUTED &&
+                trustPrefs.getInt(KEY_DISPUTE_AGREEMENT_STREAK, 0) >= 2,
+            lastComparisonId = trustPrefs.getString(KEY_DISPUTE_LAST_COMPARISON_ID, null)
+        )
+    }
+
+    /**
+     * Persists stable conflict/recovery evidence for the exact profile. Replaying one comparison id is
+     * idempotent. DISPUTED is entered only after two distinct fully-synced conflicts and never clears
+     * automatically; two distinct agreements merely arm the explicit operator recovery action.
+     */
+    fun recordCrossCheck(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        evidence: DogecoinTrustedPersonalNodeCrossCheckEvidence
+    ): DogecoinTrustedPersonalNodeDisputeStatus? = synchronized(STORE_LOCK) {
+        if (readTrustProfile() != profile || readCredentials(profile.revision) == null) {
+            return@synchronized null
+        }
+        val currentState = readStoredState()?.takeIf {
+            it == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE ||
+                it == DogecoinTrustedPersonalNodeState.DISPUTED
+        } ?: return@synchronized null
+        if (!isValidCrossCheckEvidence(evidence)) return@synchronized null
+        val current = loadDisputeStatus(profile) ?: return@synchronized null
+        if (current.lastComparisonId == evidence.comparisonId) return@synchronized current
+        val lastComparisonAt = trustPrefs.getLong(KEY_DISPUTE_LAST_COMPARISON_AT, 0L)
+        if (evidence.capturedAtMillis <= lastComparisonAt) return@synchronized null
+
+        var nextState = currentState
+        var conflictStreak = current.stableConflictStreak
+        var agreementStreak = current.recoveryAgreementStreak
+        when (currentState) {
+            DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE -> when (evidence.result) {
+                DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT -> {
+                    conflictStreak = (conflictStreak + 1).coerceAtMost(2)
+                    agreementStreak = 0
+                    if (conflictStreak >= 2) nextState = DogecoinTrustedPersonalNodeState.DISPUTED
+                }
+                DogecoinTrustedPersonalNodeCrossCheckResult.AGREEMENT -> {
+                    conflictStreak = 0
+                    agreementStreak = 0
+                }
+                DogecoinTrustedPersonalNodeCrossCheckResult.INCONCLUSIVE -> {
+                    conflictStreak = 0
+                    agreementStreak = 0
+                }
+            }
+            DogecoinTrustedPersonalNodeState.DISPUTED -> when (evidence.result) {
+                DogecoinTrustedPersonalNodeCrossCheckResult.AGREEMENT -> {
+                    agreementStreak = (agreementStreak + 1).coerceAtMost(2)
+                    conflictStreak = 0
+                }
+                DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT,
+                DogecoinTrustedPersonalNodeCrossCheckResult.INCONCLUSIVE -> {
+                    agreementStreak = 0
+                    if (evidence.result == DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT) {
+                        conflictStreak = 2
+                    }
+                }
+            }
+            else -> return@synchronized null
+        }
+        val committed = trustPrefs.edit()
+            .putString(KEY_STATE, nextState.name)
+            .putInt(KEY_DISPUTE_CONFLICT_STREAK, conflictStreak)
+            .putInt(KEY_DISPUTE_AGREEMENT_STREAK, agreementStreak)
+            .putString(KEY_DISPUTE_LAST_COMPARISON_ID, evidence.comparisonId)
+            .putLong(KEY_DISPUTE_LAST_COMPARISON_AT, evidence.capturedAtMillis)
+            .commit()
+        if (!committed) return@synchronized null
+        loadDisputeStatus(profile)
+    }
+
+    /** Explicit human action after the locked two-agreement recovery gate. */
+    fun clearDisputeAfterOperatorConfirmation(
+        profile: DogecoinTrustedPersonalNodeProfile
+    ): Boolean = synchronized(STORE_LOCK) {
+        val status = loadDisputeStatus(profile) ?: return@synchronized false
+        if (status.state != DogecoinTrustedPersonalNodeState.DISPUTED ||
+            !status.recoveryReadyForOperator) return@synchronized false
+        trustPrefs.edit()
+            .putString(KEY_STATE, DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE.name)
+            .remove(KEY_DISPUTE_CONFLICT_STREAK)
+            .remove(KEY_DISPUTE_AGREEMENT_STREAK)
+            .remove(KEY_DISPUTE_LAST_COMPARISON_ID)
+            .remove(KEY_DISPUTE_LAST_COMPARISON_AT)
+            .commit()
+    }
+
+    private fun isValidCrossCheckEvidence(
+        evidence: DogecoinTrustedPersonalNodeCrossCheckEvidence
+    ): Boolean {
+        if (!Regex("^[0-9a-f]{64}:[0-9a-f]{64}$").matches(evidence.comparisonId)) return false
+        if (!evidence.fullySyncedMainnet || evidence.confirmationContextDepth < 6 ||
+            evidence.capturedAtMillis <= 0L) return false
+        return when (evidence.result) {
+            DogecoinTrustedPersonalNodeCrossCheckResult.AGREEMENT -> !evidence.hasConflictingSpend
+            DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT -> true
+            DogecoinTrustedPersonalNodeCrossCheckResult.INCONCLUSIVE -> !evidence.hasConflictingSpend
+        }
     }
 
     /**
@@ -210,6 +336,10 @@ internal class DogecoinTrustedPersonalNodeStore private constructor(
         const val KEY_PROFILE_AUTHORIZED_AT = "profile_authorized_at"
         const val KEY_PROFILE_RESCAN_ATTESTED = "profile_rescan_attested"
         const val KEY_PROFILE_RESCAN_ATTESTED_AT = "profile_rescan_attested_at"
+        const val KEY_DISPUTE_CONFLICT_STREAK = "dispute_conflict_streak"
+        const val KEY_DISPUTE_AGREEMENT_STREAK = "dispute_agreement_streak"
+        const val KEY_DISPUTE_LAST_COMPARISON_ID = "dispute_last_comparison_id"
+        const val KEY_DISPUTE_LAST_COMPARISON_AT = "dispute_last_comparison_at"
 
         const val KEY_CREDENTIAL_REVISION = "credential_revision"
         const val KEY_CREDENTIAL_USERNAME = "credential_username"

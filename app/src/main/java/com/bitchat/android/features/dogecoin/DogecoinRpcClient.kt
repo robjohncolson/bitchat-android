@@ -733,6 +733,127 @@ class DogecoinRpcClient private constructor(
     }
 
     /**
+     * DES-1-E fixed read-only half of an SPV-vs-node comparison. The caller supplies only proof
+     * references that were durably frozen before disclosure. The live session callback is installed
+     * at [callElement], so revocation stops the workflow before its next request. No signed bytes or
+     * caller-selected RPC method can enter this boundary.
+     */
+    internal suspend fun readTrustedPersonalNodeCrossCheckSnapshot(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        binding: DogecoinTrustedPersonalNodeSessionBinding,
+        expectedTxid: String,
+        proofReferences: List<DogecoinTrustedPersonalNodeAttemptProofReference>,
+        requestIsCurrent: () -> Boolean,
+        capturedAtMillis: Long = System.currentTimeMillis()
+    ): DogecoinTrustedPersonalNodeCrossCheckSnapshot = guardedBy {
+        check(requestIsCurrent()) {
+            "Trusted personal node cross-check request is no longer current."
+        }
+    }.readTrustedPersonalNodeCrossCheckSnapshotInternal(
+        profile,
+        credentials,
+        binding,
+        expectedTxid,
+        proofReferences,
+        capturedAtMillis
+    )
+
+    private suspend fun readTrustedPersonalNodeCrossCheckSnapshotInternal(
+        profile: DogecoinTrustedPersonalNodeProfile,
+        credentials: DogecoinTrustedPersonalNodeCredentials,
+        binding: DogecoinTrustedPersonalNodeSessionBinding,
+        expectedTxid: String,
+        proofReferences: List<DogecoinTrustedPersonalNodeAttemptProofReference>,
+        capturedAtMillis: Long
+    ): DogecoinTrustedPersonalNodeCrossCheckSnapshot = withContext(Dispatchers.IO) {
+        require(isValidDogecoinTrustedPersonalNodeProfile(profile) &&
+            profile.network == DogecoinNetwork.MAINNET) {
+            "Trusted personal node cross-check profile is invalid."
+        }
+        require(binding == profile.toSessionBinding()) {
+            "Trusted personal node cross-check binding does not match the profile."
+        }
+        require(credentials.isValid()) {
+            "Trusted personal node RPC credentials are unavailable."
+        }
+        require(txidRegex.matches(expectedTxid)) {
+            "Trusted personal node cross-check transaction id is invalid."
+        }
+        require(capturedAtMillis > 0L) {
+            "Trusted personal node cross-check capture time is invalid."
+        }
+        require(proofReferences.isNotEmpty() &&
+            proofReferences.size <= DOGECOIN_TPN_MAX_PROOF_CANDIDATES) {
+            "Trusted personal node cross-check proof references are incomplete."
+        }
+        val expectedScript = DogecoinHex.encode(
+            DogecoinAddress.p2pkhScript(profile.androidAddress, profile.network)
+        )
+        val keys = HashSet<String>()
+        require(proofReferences.all { reference ->
+            reference.amountKoinu > 0L &&
+                reference.scriptPubKeyHex == expectedScript &&
+                keys.add("${reference.txid}:${reference.vout}")
+        }) {
+            "Trusted personal node cross-check proof references are invalid or duplicated."
+        }
+        val config = DogecoinRpcConfig(
+            url = profile.origin,
+            username = credentials.username,
+            password = credentials.password,
+            walletName = profile.coreWalletId
+        )
+        requireTrustedPersonalNodeCrossCheckNetworkReadiness(config)
+        val startTip = readTrustedPersonalNodeProofTip(config)
+        val outpoints = proofReferences.map { reference ->
+            val current = readTrustedPersonalNodeCrossCheckTxOut(
+                config,
+                reference.txid,
+                reference.vout
+            )
+            if (current != null) {
+                require(current.first == startTip.hash) {
+                    "Trusted personal node tip changed during the cross-check outpoint reads."
+                }
+            }
+            DogecoinTrustedPersonalNodeCrossCheckOutpoint(
+                txid = reference.txid,
+                vout = reference.vout,
+                expectedAmountKoinu = reference.amountKoinu,
+                expectedScriptPubKeyHex = reference.scriptPubKeyHex,
+                nodeTxOut = current?.second
+            )
+        }
+        val endTip = readTrustedPersonalNodeProofTip(config)
+        require(endTip == startTip) {
+            "Trusted personal node tip changed during the cross-check snapshot."
+        }
+        DogecoinTrustedPersonalNodeCrossCheckSnapshot(
+            binding = binding,
+            expectedTxid = expectedTxid,
+            tip = endTip,
+            outpoints = outpoints,
+            capturedAtMillis = capturedAtMillis
+        )
+    }
+
+    /** A stale/offline node cannot participate in a dispute or recovery comparison. */
+    private fun requireTrustedPersonalNodeCrossCheckNetworkReadiness(
+        config: DogecoinRpcConfig
+    ) {
+        val networkInfo = callObject(config.copy(walletName = ""), "getnetworkinfo")
+        val networkActive = parseOptionalBoolean(networkInfo, "networkactive", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report networkactive.")
+        require(networkActive) { "Trusted personal node networking is disabled." }
+        val peerCount = parseOptionalNonNegativeInt(networkInfo, "connections", "getnetworkinfo")
+            ?: throw IllegalArgumentException("RPC getnetworkinfo did not report connections.")
+        require(peerCount >= DOGECOIN_TPN_MIN_MAINNET_PEERS) {
+            "Trusted personal node has $peerCount peers; at least $DOGECOIN_TPN_MIN_MAINNET_PEERS are required."
+        }
+    }
+
+    /**
      * DES-1-D's one-route mainnet submission boundary. This deliberately does not call the generic
      * [testMempoolAcceptance] or [sendRawTransaction] entry points: those remain centrally forbidden
      * on mainnet. The exact profile origin, proof-backed frozen review, and live process authorization
@@ -1210,6 +1331,54 @@ class DogecoinRpcClient private constructor(
         }
         return TrustedPersonalNodeProofTxOut(
             bestBlockHash = bestBlockHash,
+            amountKoinu = amountKoinu,
+            scriptPubKeyHex = scriptHex,
+            confirmations = confirmations
+        )
+    }
+
+    /** A comparison read permits null/spent and depths below the signing minimum; it grants no spend. */
+    private fun readTrustedPersonalNodeCrossCheckTxOut(
+        config: DogecoinRpcConfig,
+        txid: String,
+        vout: Int
+    ): Pair<String, DogecoinTrustedPersonalNodeCrossCheckTxOut>? {
+        val result = callElement(
+            config.copy(walletName = ""),
+            "gettxout",
+            JsonArray().apply {
+                add(txid)
+                add(vout)
+                add(true)
+            }
+        )
+        if (result.isJsonNull) return null
+        require(result.isJsonObject) { "RPC gettxout response was not an object." }
+        val value = result.asJsonObject
+        val bestBlockHash = requiredExactString(value, "bestblock", "gettxout")
+        require(txidRegex.matches(bestBlockHash)) {
+            "RPC gettxout returned an invalid bestblock hash."
+        }
+        val amountKoinu = value.get("value")
+            ?.takeUnless { it.isJsonNull }
+            ?.let(::dogeJsonToKoinu)
+            ?: throw IllegalArgumentException("RPC gettxout did not report value.")
+        require(amountKoinu > 0L) { "RPC gettxout returned a non-positive value." }
+        val scriptObject = value.get("scriptPubKey")?.takeIf { it.isJsonObject }?.asJsonObject
+            ?: throw IllegalArgumentException("RPC gettxout did not report scriptPubKey.")
+        val scriptHex = requiredExactString(scriptObject, "hex", "gettxout")
+        require(scriptHex.length % 2 == 0 && scriptHex.all { it in '0'..'9' || it in 'a'..'f' }) {
+            "RPC gettxout returned an invalid scriptPubKey hex."
+        }
+        val confirmations = parseRequiredInt(
+            value,
+            "confirmations",
+            "RPC gettxout did not report valid confirmations."
+        )
+        require(confirmations >= 0) {
+            "RPC gettxout returned negative confirmations."
+        }
+        return bestBlockHash to DogecoinTrustedPersonalNodeCrossCheckTxOut(
             amountKoinu = amountKoinu,
             scriptPubKeyHex = scriptHex,
             confirmations = confirmations

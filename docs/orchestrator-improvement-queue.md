@@ -97,8 +97,8 @@ DES-1-A           DONE — TPN profile + ceremony (no spend)
 DES-1-B           DONE — Activation + readiness + read-only display
 DES-1-C           DONE — Proof-backed UTXO / prev-tx
 DES-1-D           DONE — Send coordinator (first TPN spend unlock)
-DES-1-E           NEXT — Settlement + dispute + SPV-6 (Codex)
-DES-1-F           Ops runbook + shareable profile export
+DES-1-E           DONE — Settlement + dispute + SPV-6
+DES-1-F           NEXT — Ops runbook + shareable profile export (Codex)
 WALLET-SESSION    State hoist (after money-path calm)
 SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 ```
@@ -320,6 +320,14 @@ SPV-AUDIT-LATER   Independent SPV corroboration badge / dispute
 **Preferred agent:** Codex  
 **Spec:** `docs/des1-implementation-plan.md` § DES-1-D  
 **Status:** DONE — typed route, VerifiedPrevout signing, hard fees, Claimed-only; generic mainnet RPC still blocked.
+
+---
+
+### DES-1-E — TPN settlement + dispute + SPV-6
+
+**Preferred agent:** Codex  
+**Spec:** `docs/des1-implementation-plan.md` § DES-1-E  
+**Status:** DONE — SPV-only Claimed→Observed→Confirmed; DISPUTED 2-conflict / 2-agreement recovery; reservation release on SPV evidence.
 
 ---
 

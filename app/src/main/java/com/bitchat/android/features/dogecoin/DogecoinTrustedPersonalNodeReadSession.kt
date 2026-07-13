@@ -75,6 +75,12 @@ internal fun dogecoinTrustedPersonalNodeSessionUsesNode(
     state == DogecoinTrustedPersonalNodeState.ACTIVE_UNVERIFIED ||
     state == DogecoinTrustedPersonalNodeState.DEGRADED
 
+/** A disputed profile owns no node authority, but Built-in must keep syncing for reconciliation. */
+internal fun dogecoinTrustedPersonalNodeNeedsSpvReconciliation(
+    state: DogecoinTrustedPersonalNodeState
+): Boolean = dogecoinTrustedPersonalNodeSessionUsesNode(state) ||
+    state == DogecoinTrustedPersonalNodeState.DISPUTED
+
 /**
  * Pure second boundary around the fixed RPC workflow. The RPC method cannot construct its result until
  * chain/IBD/network/wallet/watch/rescan/capability checks pass; this additionally rebinds every returned
@@ -151,6 +157,8 @@ internal object DogecoinTrustedPersonalNodeProcessSessionRegistry {
         val projectedState = when {
             selectedNetwork != DogecoinNetwork.MAINNET -> DogecoinTrustedPersonalNodeState.UNAUTHORIZED
             savedState == DogecoinTrustedPersonalNodeState.REVOKED -> DogecoinTrustedPersonalNodeState.REVOKED
+            savedState == DogecoinTrustedPersonalNodeState.DISPUTED && matchingProfile != null ->
+                DogecoinTrustedPersonalNodeState.DISPUTED
             matchingProfile != null -> DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
             else -> DogecoinTrustedPersonalNodeState.UNAUTHORIZED
         }

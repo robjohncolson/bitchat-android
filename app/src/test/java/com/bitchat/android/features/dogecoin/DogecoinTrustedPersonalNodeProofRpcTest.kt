@@ -578,6 +578,128 @@ class DogecoinTrustedPersonalNodeProofRpcTest {
         assertEquals(1, requests.count { it.method == "getblockchaininfo" })
     }
 
+    @Test
+    fun `cross-check snapshot uses only fixed tip and gettxout reads`() = runTest {
+        val requests = mutableListOf<CapturedRequest>()
+        val client = client(requests) { request ->
+            when (request.method) {
+                "getnetworkinfo" -> response("""{"networkactive":true,"connections":4}""")
+                "getblockchaininfo" -> tipResponse(100, startHash)
+                "gettxout" -> response("null")
+                else -> error("Unexpected cross-check RPC ${request.method}")
+            }
+        }
+
+        val snapshot = client.readTrustedPersonalNodeCrossCheckSnapshot(
+            profile = profile(),
+            credentials = credentials,
+            binding = profile().toSessionBinding(),
+            expectedTxid = "99".repeat(32),
+            proofReferences = listOf(proofReference()),
+            requestIsCurrent = { true },
+            capturedAtMillis = 9_000L
+        )
+
+        assertEquals(profile().toSessionBinding(), snapshot.binding)
+        assertEquals(DogecoinTrustedPersonalNodeBlockTip(100, startHash), snapshot.tip)
+        assertEquals(null, snapshot.outpoints.single().nodeTxOut)
+        assertEquals(9_000L, snapshot.capturedAtMillis)
+        assertEquals(
+            listOf("getnetworkinfo", "getblockchaininfo", "gettxout", "getblockchaininfo"),
+            requests.map { it.method }
+        )
+        assertTrue(requests.all { it.path == "/" })
+        assertEquals("[\"$txid\",0,true]", requests[2].params)
+    }
+
+    @Test
+    fun `cross-check preserves a node amount lie for pure conflict classification`() = runTest {
+        val requests = mutableListOf<CapturedRequest>()
+        val client = client(requests) { request ->
+            when (request.method) {
+                "getnetworkinfo" -> response("""{"networkactive":true,"connections":4}""")
+                "getblockchaininfo" -> tipResponse(100, startHash)
+                "gettxout" -> txOutResponse(startHash, amount = "4.00000000")
+                else -> error("Unexpected cross-check RPC ${request.method}")
+            }
+        }
+
+        val snapshot = client.readTrustedPersonalNodeCrossCheckSnapshot(
+            profile(), credentials, profile().toSessionBinding(), "99".repeat(32), listOf(proofReference()),
+            requestIsCurrent = { true }, capturedAtMillis = 9_000L
+        )
+
+        assertEquals(400_000_000L, snapshot.outpoints.single().nodeTxOut?.amountKoinu)
+    }
+
+    @Test
+    fun `cross-check refuses a mixed-tip snapshot and a revoked request lease`() = runTest {
+        val changedTip = "bb".repeat(32)
+        var tipCalls = 0
+        val mixedRequests = mutableListOf<CapturedRequest>()
+        val mixedClient = client(mixedRequests) { request ->
+            when (request.method) {
+                "getnetworkinfo" -> response("""{"networkactive":true,"connections":4}""")
+                "getblockchaininfo" -> {
+                    tipCalls += 1
+                    if (tipCalls == 1) tipResponse(100, startHash) else tipResponse(101, changedTip)
+                }
+                "gettxout" -> txOutResponse(startHash)
+                else -> error("Unexpected cross-check RPC ${request.method}")
+            }
+        }
+        val mixed = runCatching {
+            mixedClient.readTrustedPersonalNodeCrossCheckSnapshot(
+                profile(), credentials, profile().toSessionBinding(), "99".repeat(32), listOf(proofReference()),
+                requestIsCurrent = { true }, capturedAtMillis = 9_000L
+            )
+        }
+        assertTrue(mixed.isFailure)
+
+        var leaseChecks = 0
+        val revokedRequests = mutableListOf<CapturedRequest>()
+        val revokedClient = client(revokedRequests) { request ->
+            when (request.method) {
+                "getnetworkinfo" -> response("""{"networkactive":true,"connections":4}""")
+                else -> error("Revoked lease must stop before ${request.method}")
+            }
+        }
+        val revoked = runCatching {
+            revokedClient.readTrustedPersonalNodeCrossCheckSnapshot(
+                profile(), credentials, profile().toSessionBinding(), "99".repeat(32), listOf(proofReference()),
+                requestIsCurrent = { ++leaseChecks == 1 }, capturedAtMillis = 9_000L
+            )
+        }
+        assertTrue(revoked.isFailure)
+        assertEquals(listOf("getnetworkinfo"), revokedRequests.map { it.method })
+    }
+
+    @Test
+    fun `cross-check refuses offline or under-peered node before reading chain state`() = runTest {
+        listOf(
+            """{"networkactive":false,"connections":8}""",
+            """{"networkactive":true,"connections":3}"""
+        ).forEach { networkInfo ->
+            val requests = mutableListOf<CapturedRequest>()
+            val client = client(requests) { request ->
+                when (request.method) {
+                    "getnetworkinfo" -> response(networkInfo)
+                    else -> error("Readiness must stop before ${request.method}")
+                }
+            }
+
+            val result = runCatching {
+                client.readTrustedPersonalNodeCrossCheckSnapshot(
+                    profile(), credentials, profile().toSessionBinding(), "99".repeat(32),
+                    listOf(proofReference()), requestIsCurrent = { true }, capturedAtMillis = 9_000L
+                )
+            }
+
+            assertTrue(result.isFailure)
+            assertEquals(listOf("getnetworkinfo"), requests.map { it.method })
+        }
+    }
+
     private fun profile(): DogecoinTrustedPersonalNodeProfile = DogecoinTrustedPersonalNodeProfile(
         origin = "https://dogebox.tail1234.ts.net",
         network = DogecoinNetwork.MAINNET,
@@ -595,6 +717,20 @@ class DogecoinTrustedPersonalNodeProofRpcTest {
             nonce = 1L,
             binding = profile().toSessionBinding(),
             startedAtMonotonicMillis = 55L
+        )
+
+    private fun proofReference(): DogecoinTrustedPersonalNodeAttemptProofReference =
+        DogecoinTrustedPersonalNodeAttemptProofReference.fromVerifiedPrevout(
+            DogecoinVerifiedPrevout.verify(
+                rawPreviousTransactionHex = rawHex,
+                expectedTxid = txid,
+                vout = 0,
+                expectedP2pkhScript = DogecoinAddress.p2pkhScript(
+                    address,
+                    DogecoinNetwork.MAINNET
+                ),
+                source = DogecoinTrustedPersonalNodePreviousTransactionSource.WALLET_GETTRANSACTION
+            )
         )
 
     private suspend fun readProof(

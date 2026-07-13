@@ -368,6 +368,16 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         return true
     }
 
+    /**
+     * An independent cross-check freezes every in-flight proof/review before it samples the node.
+     * The read session remains active so the fixed read-only comparison can finish; any later spend
+     * must collect a new proof after the comparison outcome has been durably accepted.
+     */
+    @Synchronized
+    fun freezeSpendForIndependentCrossCheck() {
+        clearProofSession()
+    }
+
     /** Dismiss/cancellation resolves CHECKING synchronously instead of leaving an immortal spinner. */
     @Synchronized
     fun cancelActivation(token: DogecoinTrustedPersonalNodeActivationToken): Boolean {
@@ -503,9 +513,14 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         savedProfile: DogecoinTrustedPersonalNodeProfile?
     ) {
         val validProfile = savedProfile
-            ?.takeIf { savedState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE }
+            ?.takeIf {
+                savedState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE ||
+                    savedState == DogecoinTrustedPersonalNodeState.DISPUTED
+            }
             ?.takeIf(::isValidDogecoinTrustedPersonalNodeProfile)
-        if (profile == validProfile && validProfile != null && state.isLiveReadSessionState()) {
+        if (savedState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE &&
+            profile == validProfile && validProfile != null && state.isLiveReadSessionState()
+        ) {
             return
         }
         clearTransientProvisioning()
@@ -604,6 +619,10 @@ internal class DogecoinTrustedPersonalNodeSessionHolder(
         ): DogecoinTrustedPersonalNodeState = when {
             savedState == DogecoinTrustedPersonalNodeState.REVOKED ->
                 DogecoinTrustedPersonalNodeState.REVOKED
+            savedState == DogecoinTrustedPersonalNodeState.DISPUTED &&
+                savedProfile != null &&
+                isValidDogecoinTrustedPersonalNodeProfile(savedProfile) ->
+                DogecoinTrustedPersonalNodeState.DISPUTED
             savedState == DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE &&
                 savedProfile != null &&
                 isValidDogecoinTrustedPersonalNodeProfile(savedProfile) ->

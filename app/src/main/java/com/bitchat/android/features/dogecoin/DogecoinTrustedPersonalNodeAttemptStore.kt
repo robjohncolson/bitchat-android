@@ -11,8 +11,32 @@ import java.security.SecureRandom
 internal enum class DogecoinTrustedPersonalNodeAttemptState {
     READY_UNDISCLOSED,
     SUBMISSION_UNKNOWN,
-    CLAIMED
+    CLAIMED,
+    OBSERVED,
+    CONFIRMED,
+    CONFLICTED
 }
+
+/** Reservation lifetime is independent of the presentation/settlement label above. */
+internal enum class DogecoinTrustedPersonalNodeReservationState {
+    RESERVED,
+    RELEASED_NEVER_DISCLOSED,
+    RELEASED_EXACT_SPV_CONFIRMATION,
+    RELEASED_CONFLICTING_SPEND
+}
+
+internal enum class DogecoinTrustedPersonalNodeRecoveryDisposition {
+    RETRY_SAME_BYTES,
+    RESERVED_EXPIRED_UNDISCLOSED,
+    RESERVED_EXPIRED_DISCLOSED,
+    RESERVED_REVOKED_PROFILE,
+    RESERVED_CHANGED_OR_MISSING_PROFILE,
+    AWAITING_INDEPENDENT_SPV,
+    DISPUTED,
+    RELEASED
+}
+
+internal const val DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS = 6
 
 /** A compact durable reference to one proof-backed input; full previous transactions stay in memory. */
 internal class DogecoinTrustedPersonalNodeAttemptProofReference private constructor(
@@ -575,31 +599,119 @@ internal class DogecoinTrustedPersonalNodeAttemptReviewRecord private constructo
     }
 }
 
-/** One durable idempotency record. It intentionally has no API for releasing its input reservations. */
+/** One durable idempotency record, including the exact independent evidence that resolved reservations. */
 internal class DogecoinTrustedPersonalNodeAttempt private constructor(
     val correlationId: String,
     val state: DogecoinTrustedPersonalNodeAttemptState,
-    val review: DogecoinTrustedPersonalNodeAttemptReviewRecord
+    val review: DogecoinTrustedPersonalNodeAttemptReviewRecord,
+    val reservationState: DogecoinTrustedPersonalNodeReservationState,
+    val settlementSpvDepth: Int?,
+    val settlementSpvProvenance: DogecoinSpvEvidenceProvenance,
+    val settlementSpvTipHash: String?,
+    val conflictingSpendTxid: String?,
+    val conflictingSpendDepth: Int?
 ) {
     override fun toString(): String =
         "DogecoinTrustedPersonalNodeAttempt(correlationId=<redacted>, state=$state, review=<redacted>)"
 
-    internal fun withState(next: DogecoinTrustedPersonalNodeAttemptState):
-        DogecoinTrustedPersonalNodeAttempt {
+    val hasReservedInputs: Boolean
+        get() = reservationState == DogecoinTrustedPersonalNodeReservationState.RESERVED
+
+    internal fun withState(next: DogecoinTrustedPersonalNodeAttemptState): DogecoinTrustedPersonalNodeAttempt {
         require(
             next == state ||
                 state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED &&
                 next == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN ||
+                state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.OBSERVED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ||
                 state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN &&
-                next == DogecoinTrustedPersonalNodeAttemptState.CLAIMED
+                next == DogecoinTrustedPersonalNodeAttemptState.CLAIMED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN &&
+                next == DogecoinTrustedPersonalNodeAttemptState.OBSERVED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN &&
+                next == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.OBSERVED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ||
+                state == DogecoinTrustedPersonalNodeAttemptState.OBSERVED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ||
+                state != DogecoinTrustedPersonalNodeAttemptState.CONFLICTED &&
+                next == DogecoinTrustedPersonalNodeAttemptState.CONFLICTED
         ) { "Trusted personal node attempt state cannot regress or skip disclosure." }
-        return DogecoinTrustedPersonalNodeAttempt(correlationId, next, review)
+        return copy(state = next)
+    }
+
+    internal fun withSettlement(
+        next: DogecoinTrustedPersonalNodeAttemptState,
+        release: DogecoinTrustedPersonalNodeReservationState? = null,
+        spvDepth: Int? = settlementSpvDepth,
+        spvProvenance: DogecoinSpvEvidenceProvenance = settlementSpvProvenance,
+        spvTipHash: String? = settlementSpvTipHash
+    ): DogecoinTrustedPersonalNodeAttempt = withState(next).copy(
+        reservationState = release ?: reservationState,
+        settlementSpvDepth = spvDepth,
+        settlementSpvProvenance = spvProvenance,
+        settlementSpvTipHash = spvTipHash
+    )
+
+    internal fun withStableConflictingSpend(
+        conflict: DogecoinSpvConflictingSpendEvidence,
+        spvTipHash: String
+    ): DogecoinTrustedPersonalNodeAttempt = withState(
+        DogecoinTrustedPersonalNodeAttemptState.CONFLICTED
+    ).copy(
+        reservationState = DogecoinTrustedPersonalNodeReservationState.RELEASED_CONFLICTING_SPEND,
+        settlementSpvDepth = null,
+        settlementSpvProvenance = DogecoinSpvEvidenceProvenance.NONE,
+        settlementSpvTipHash = spvTipHash,
+        conflictingSpendTxid = conflict.spendingTxid,
+        conflictingSpendDepth = conflict.depth
+    )
+
+    internal fun recoveryDisposition(
+        currentBinding: DogecoinTrustedPersonalNodeSessionBinding?,
+        profileRevoked: Boolean,
+        profileDisputed: Boolean,
+        nowMillis: Long
+    ): DogecoinTrustedPersonalNodeRecoveryDisposition {
+        if (profileDisputed) {
+            return DogecoinTrustedPersonalNodeRecoveryDisposition.DISPUTED
+        }
+        if (!hasReservedInputs) return DogecoinTrustedPersonalNodeRecoveryDisposition.RELEASED
+        if (profileRevoked) {
+            return DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_REVOKED_PROFILE
+        }
+        if (currentBinding != review.binding) {
+            return DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_CHANGED_OR_MISSING_PROFILE
+        }
+        if (state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED ||
+            state == DogecoinTrustedPersonalNodeAttemptState.OBSERVED
+        ) {
+            return DogecoinTrustedPersonalNodeRecoveryDisposition.AWAITING_INDEPENDENT_SPV
+        }
+        if (nowMillis < review.createdAtMillis || nowMillis > review.expiresAtMillis) {
+            return if (state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED) {
+                DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_EXPIRED_UNDISCLOSED
+            } else {
+                DogecoinTrustedPersonalNodeRecoveryDisposition.RESERVED_EXPIRED_DISCLOSED
+            }
+        }
+        return DogecoinTrustedPersonalNodeRecoveryDisposition.RETRY_SAME_BYTES
     }
 
     internal fun toJson(): JSONObject = JSONObject()
         .put(KEY_CORRELATION_ID, correlationId)
         .put(KEY_STATE, state.name)
         .put(KEY_REVIEW, review.toJson())
+        .put(KEY_RESERVATION_STATE, reservationState.name)
+        .put(KEY_SETTLEMENT_SPV_DEPTH, settlementSpvDepth ?: JSONObject.NULL)
+        .put(KEY_SETTLEMENT_SPV_PROVENANCE, settlementSpvProvenance.name)
+        .put(KEY_SETTLEMENT_SPV_TIP_HASH, settlementSpvTipHash ?: JSONObject.NULL)
+        .put(KEY_CONFLICTING_SPEND_TXID, conflictingSpendTxid ?: JSONObject.NULL)
+        .put(KEY_CONFLICTING_SPEND_DEPTH, conflictingSpendDepth ?: JSONObject.NULL)
 
     companion object {
         internal fun create(
@@ -612,12 +724,32 @@ internal class DogecoinTrustedPersonalNodeAttempt private constructor(
             return DogecoinTrustedPersonalNodeAttempt(
                 correlationId,
                 DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
-                review
+                review,
+                DogecoinTrustedPersonalNodeReservationState.RESERVED,
+                settlementSpvDepth = null,
+                settlementSpvProvenance = DogecoinSpvEvidenceProvenance.NONE,
+                settlementSpvTipHash = null,
+                conflictingSpendTxid = null,
+                conflictingSpendDepth = null
             )
         }
 
-        internal fun fromJson(json: JSONObject): DogecoinTrustedPersonalNodeAttempt {
-            json.requireExactKeys(KEY_CORRELATION_ID, KEY_STATE, KEY_REVIEW)
+        internal fun fromJson(json: JSONObject, schemaVersion: Int): DogecoinTrustedPersonalNodeAttempt {
+            if (schemaVersion == 1) {
+                json.requireExactKeys(KEY_CORRELATION_ID, KEY_STATE, KEY_REVIEW)
+            } else {
+                json.requireExactKeys(
+                    KEY_CORRELATION_ID,
+                    KEY_STATE,
+                    KEY_REVIEW,
+                    KEY_RESERVATION_STATE,
+                    KEY_SETTLEMENT_SPV_DEPTH,
+                    KEY_SETTLEMENT_SPV_PROVENANCE,
+                    KEY_SETTLEMENT_SPV_TIP_HASH,
+                    KEY_CONFLICTING_SPEND_TXID,
+                    KEY_CONFLICTING_SPEND_DEPTH
+                )
+            }
             val id = json.requireString(KEY_CORRELATION_ID)
             require(EXACT_CORRELATION_ID.matches(id)) {
                 "Stored trusted personal node correlation id is invalid."
@@ -626,17 +758,126 @@ internal class DogecoinTrustedPersonalNodeAttempt private constructor(
             val state = DogecoinTrustedPersonalNodeAttemptState.values()
                 .firstOrNull { it.name == stateName }
                 ?: throw IllegalArgumentException("Stored trusted personal node attempt state is invalid.")
+            if (schemaVersion == 1) {
+                require(
+                    state == DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED ||
+                        state == DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN ||
+                        state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED
+                ) { "Legacy attempt contains a post-D settlement state." }
+            }
+            val reservation = if (schemaVersion == 1) {
+                DogecoinTrustedPersonalNodeReservationState.RESERVED
+            } else {
+                json.requireEnum<DogecoinTrustedPersonalNodeReservationState>(KEY_RESERVATION_STATE)
+            }
+            val spvDepth = if (schemaVersion == 1 || json.isNull(KEY_SETTLEMENT_SPV_DEPTH)) {
+                null
+            } else {
+                json.requireInt(KEY_SETTLEMENT_SPV_DEPTH)
+            }
+            val spvProvenance = if (schemaVersion == 1) {
+                DogecoinSpvEvidenceProvenance.NONE
+            } else {
+                json.requireEnum<DogecoinSpvEvidenceProvenance>(KEY_SETTLEMENT_SPV_PROVENANCE)
+            }
+            val spvTipHash = if (schemaVersion == 1 || json.isNull(KEY_SETTLEMENT_SPV_TIP_HASH)) {
+                null
+            } else {
+                json.requireString(KEY_SETTLEMENT_SPV_TIP_HASH)
+            }
+            val conflictingTxid = if (schemaVersion == 1 || json.isNull(KEY_CONFLICTING_SPEND_TXID)) {
+                null
+            } else {
+                json.requireString(KEY_CONFLICTING_SPEND_TXID)
+            }
+            val conflictingDepth = if (schemaVersion == 1 || json.isNull(KEY_CONFLICTING_SPEND_DEPTH)) {
+                null
+            } else {
+                json.requireInt(KEY_CONFLICTING_SPEND_DEPTH)
+            }
+            require(spvTipHash == null || EXACT_LOWER_TXID.matches(spvTipHash)) {
+                "Stored settlement SPV tip hash is invalid."
+            }
+            require(conflictingTxid == null || EXACT_LOWER_TXID.matches(conflictingTxid)) {
+                "Stored conflicting-spend txid is invalid."
+            }
+            require(
+                when (state) {
+                    DogecoinTrustedPersonalNodeAttemptState.OBSERVED ->
+                        reservation == DogecoinTrustedPersonalNodeReservationState.RESERVED &&
+                            spvDepth != null &&
+                            spvDepth in 0 until DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS &&
+                            spvTipHash != null &&
+                            conflictingTxid == null && conflictingDepth == null &&
+                            (spvDepth == 0 && spvProvenance == DogecoinSpvEvidenceProvenance.PEER ||
+                                spvDepth > 0 &&
+                                spvProvenance == DogecoinSpvEvidenceProvenance.CHAIN)
+                    DogecoinTrustedPersonalNodeAttemptState.CONFIRMED ->
+                        reservation == DogecoinTrustedPersonalNodeReservationState.RELEASED_EXACT_SPV_CONFIRMATION &&
+                            spvDepth != null && spvDepth >= DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS &&
+                            spvProvenance == DogecoinSpvEvidenceProvenance.CHAIN &&
+                            spvTipHash != null && conflictingTxid == null && conflictingDepth == null
+                    DogecoinTrustedPersonalNodeAttemptState.CONFLICTED ->
+                        reservation == DogecoinTrustedPersonalNodeReservationState.RELEASED_CONFLICTING_SPEND &&
+                            spvDepth == null && spvProvenance == DogecoinSpvEvidenceProvenance.NONE &&
+                            spvTipHash != null && conflictingTxid != null &&
+                            conflictingDepth != null &&
+                            conflictingDepth >= DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS
+                    DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED ->
+                        (reservation == DogecoinTrustedPersonalNodeReservationState.RESERVED ||
+                            reservation == DogecoinTrustedPersonalNodeReservationState.RELEASED_NEVER_DISCLOSED) &&
+                            spvDepth == null && spvProvenance == DogecoinSpvEvidenceProvenance.NONE &&
+                            spvTipHash == null && conflictingTxid == null && conflictingDepth == null
+                    DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN,
+                    DogecoinTrustedPersonalNodeAttemptState.CLAIMED ->
+                        reservation == DogecoinTrustedPersonalNodeReservationState.RESERVED &&
+                            spvDepth == null && spvProvenance == DogecoinSpvEvidenceProvenance.NONE &&
+                            spvTipHash == null && conflictingTxid == null && conflictingDepth == null
+                }
+            ) { "Stored reservation/settlement evidence is inconsistent." }
             return DogecoinTrustedPersonalNodeAttempt(
                 correlationId = id,
                 state = state,
-                review = DogecoinTrustedPersonalNodeAttemptReviewRecord.fromJson(json.requireObject(KEY_REVIEW))
+                review = DogecoinTrustedPersonalNodeAttemptReviewRecord.fromJson(json.requireObject(KEY_REVIEW)),
+                reservationState = reservation,
+                settlementSpvDepth = spvDepth,
+                settlementSpvProvenance = spvProvenance,
+                settlementSpvTipHash = spvTipHash,
+                conflictingSpendTxid = conflictingTxid,
+                conflictingSpendDepth = conflictingDepth
             )
         }
+
+        private fun DogecoinTrustedPersonalNodeAttempt.copy(
+            state: DogecoinTrustedPersonalNodeAttemptState = this.state,
+            reservationState: DogecoinTrustedPersonalNodeReservationState = this.reservationState,
+            settlementSpvDepth: Int? = this.settlementSpvDepth,
+            settlementSpvProvenance: DogecoinSpvEvidenceProvenance = this.settlementSpvProvenance,
+            settlementSpvTipHash: String? = this.settlementSpvTipHash,
+            conflictingSpendTxid: String? = this.conflictingSpendTxid,
+            conflictingSpendDepth: Int? = this.conflictingSpendDepth
+        ): DogecoinTrustedPersonalNodeAttempt = DogecoinTrustedPersonalNodeAttempt(
+            correlationId = correlationId,
+            state = state,
+            review = review,
+            reservationState = reservationState,
+            settlementSpvDepth = settlementSpvDepth,
+            settlementSpvProvenance = settlementSpvProvenance,
+            settlementSpvTipHash = settlementSpvTipHash,
+            conflictingSpendTxid = conflictingSpendTxid,
+            conflictingSpendDepth = conflictingSpendDepth
+        )
 
         private val EXACT_CORRELATION_ID = Regex("^[0-9a-f]{32}$")
         private const val KEY_CORRELATION_ID = "correlation_id"
         private const val KEY_STATE = "state"
         private const val KEY_REVIEW = "review"
+        private const val KEY_RESERVATION_STATE = "reservation_state"
+        private const val KEY_SETTLEMENT_SPV_DEPTH = "settlement_spv_depth"
+        private const val KEY_SETTLEMENT_SPV_PROVENANCE = "settlement_spv_provenance"
+        private const val KEY_SETTLEMENT_SPV_TIP_HASH = "settlement_spv_tip_hash"
+        private const val KEY_CONFLICTING_SPEND_TXID = "conflicting_spend_txid"
+        private const val KEY_CONFLICTING_SPEND_DEPTH = "conflicting_spend_depth"
     }
 }
 
@@ -707,15 +948,26 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
                 }.getOrNull() ?: return@synchronized null
                 if (commitLocked(attempt)) attempt else null
             }
-            is DogecoinTrustedPersonalNodeAttemptLoadResult.Available ->
-                loaded.attempt.takeIf {
-                    it.state != DogecoinTrustedPersonalNodeAttemptState.CLAIMED &&
-                        it.review.sameSignedAttemptAs(
+            is DogecoinTrustedPersonalNodeAttemptLoadResult.Available -> {
+                val current = loaded.attempt
+                if (!current.hasReservedInputs) {
+                    val attempt = runCatching {
+                        DogecoinTrustedPersonalNodeAttempt.create(correlationIdFactory(), record)
+                    }.getOrNull() ?: return@synchronized null
+                    if (commitLocked(attempt)) attempt else null
+                } else {
+                    current.takeIf {
+                        it.state in setOf(
+                            DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
+                            DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN
+                        ) && it.review.sameSignedAttemptAs(
                             review,
                             mainnetAcknowledged,
                             personalNodeOracleAcknowledged
                         )
+                    }
                 }
+            }
             DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable -> null
         }
     }
@@ -730,11 +982,22 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
                 }.getOrNull() ?: return@synchronized null
                 if (commitLocked(attempt)) attempt else null
             }
-            is DogecoinTrustedPersonalNodeAttemptLoadResult.Available ->
-                loaded.attempt.takeIf {
-                    it.state != DogecoinTrustedPersonalNodeAttemptState.CLAIMED &&
-                        it.review.sameAs(review)
+            is DogecoinTrustedPersonalNodeAttemptLoadResult.Available -> {
+                val current = loaded.attempt
+                if (!current.hasReservedInputs) {
+                    val attempt = runCatching {
+                        DogecoinTrustedPersonalNodeAttempt.create(correlationIdFactory(), review)
+                    }.getOrNull() ?: return@synchronized null
+                    if (commitLocked(attempt)) attempt else null
+                } else {
+                    current.takeIf {
+                        it.state in setOf(
+                            DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
+                            DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN
+                        ) && it.review.sameAs(review)
+                    }
                 }
+            }
             DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable -> null
         }
     }
@@ -745,7 +1008,160 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
 
     /** Exact Core txid acceptance is still only a claim; reservations deliberately remain present. */
     fun markClaimed(correlationId: String, exactReturnedTxid: String): Boolean =
-        transition(correlationId, exactReturnedTxid, DogecoinTrustedPersonalNodeAttemptState.CLAIMED)
+        synchronized(STORE_LOCK) {
+            val current = (loadLocked() as? DogecoinTrustedPersonalNodeAttemptLoadResult.Available)
+                ?.attempt ?: return@synchronized false
+            if (
+                current.correlationId == correlationId &&
+                current.review.localTxid == exactReturnedTxid &&
+                current.state in setOf(
+                    DogecoinTrustedPersonalNodeAttemptState.OBSERVED,
+                    DogecoinTrustedPersonalNodeAttemptState.CONFIRMED
+                )
+            ) {
+                // Independent SPV may win the response race. A later exact node claim is idempotent
+                // and must never regress the stronger durable settlement state.
+                true
+            } else {
+                transition(
+                    correlationId,
+                    exactReturnedTxid,
+                    DogecoinTrustedPersonalNodeAttemptState.CLAIMED
+                )
+            }
+        }
+
+    /**
+     * Applies only independently peer-/chain-derived Built-in evidence. RPC confirmation counts have no
+     * representation in [DogecoinSpvSettlementEvidence] and therefore cannot advance this ledger.
+     */
+    internal fun applySpvSettlementEvidence(
+        correlationId: String,
+        evidence: DogecoinSpvSettlementEvidence
+    ): Boolean = synchronized(STORE_LOCK) {
+        val attempt = (loadLocked() as? DogecoinTrustedPersonalNodeAttemptLoadResult.Available)
+            ?.attempt ?: return@synchronized false
+        if (attempt.correlationId != correlationId ||
+            attempt.reservationState ==
+            DogecoinTrustedPersonalNodeReservationState.RELEASED_NEVER_DISCLOSED ||
+            evidence.network != DogecoinNetwork.MAINNET ||
+            evidence.expectedTxid != attempt.review.localTxid ||
+            !EXACT_LOWER_TXID.matches(evidence.expectedTxid) ||
+            !evidence.fullySynced ||
+            !evidence.peerFloorMet ||
+            evidence.peerCount < DogecoinSpvService.MIN_PEERS ||
+            evidence.chainHeight < 0 ||
+            evidence.bestPeerHeight < 0L ||
+            evidence.bestPeerHeight - evidence.chainHeight.toLong() > MAX_SETTLEMENT_TIP_LAG ||
+            evidence.chainTipHash?.let(EXACT_LOWER_TXID::matches) != true
+        ) {
+            return@synchronized false
+        }
+
+        val exactDepth = evidence.exactTransactionDepth
+        val exactIsIndependent = when (evidence.exactTransactionProvenance) {
+            DogecoinSpvEvidenceProvenance.NONE -> exactDepth == null
+            DogecoinSpvEvidenceProvenance.PEER -> exactDepth == 0
+            DogecoinSpvEvidenceProvenance.CHAIN -> exactDepth != null && exactDepth > 0
+        }
+        if (!exactIsIndependent) return@synchronized false
+
+        val reserved = attempt.review.proofReferences
+            .map { it.txid to it.vout }
+            .toSet()
+        val conflictsAreCanonical = evidence.conflictingSpends.all { conflict ->
+            conflict.reservedTxid to conflict.reservedVout in reserved &&
+                EXACT_LOWER_TXID.matches(conflict.reservedTxid) &&
+                conflict.reservedVout >= 0 &&
+                EXACT_LOWER_TXID.matches(conflict.spendingTxid) &&
+                conflict.spendingTxid != attempt.review.localTxid &&
+                (conflict.provenance == DogecoinSpvEvidenceProvenance.PEER && conflict.depth == 0 ||
+                    conflict.provenance == DogecoinSpvEvidenceProvenance.CHAIN && conflict.depth > 0)
+        }
+        val uniqueConflicts = evidence.conflictingSpends
+            .map { Triple(it.reservedTxid, it.reservedVout, it.spendingTxid) }
+            .toSet()
+            .size == evidence.conflictingSpends.size
+        if (!conflictsAreCanonical || !uniqueConflicts) return@synchronized false
+        val stableConflicts = evidence.conflictingSpends.filter { conflict ->
+            conflict.provenance == DogecoinSpvEvidenceProvenance.CHAIN &&
+                conflict.depth >= DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS
+        }
+        if (evidence.conflictingSpends.isNotEmpty() && exactDepth != null) {
+            // A coherent wallet view cannot independently observe both the exact transaction and a
+            // different spend of one of its inputs. Keep reservations and let the profile cross-check
+            // establish/clear DISPUTED instead of choosing one side here.
+            return@synchronized false
+        }
+
+        val updated = when {
+            attempt.state == DogecoinTrustedPersonalNodeAttemptState.CONFLICTED -> attempt
+            stableConflicts.isNotEmpty() -> attempt.withStableConflictingSpend(
+                conflict = stableConflicts.maxByOrNull { it.depth }!!,
+                spvTipHash = evidence.chainTipHash!!
+            )
+            exactDepth == null -> attempt
+            exactDepth >= DOGECOIN_TPN_SETTLEMENT_CONFIRMATIONS -> attempt.withSettlement(
+                next = DogecoinTrustedPersonalNodeAttemptState.CONFIRMED,
+                release = DogecoinTrustedPersonalNodeReservationState.RELEASED_EXACT_SPV_CONFIRMATION,
+                spvDepth = maxOf(exactDepth, attempt.settlementSpvDepth ?: 0),
+                spvProvenance = DogecoinSpvEvidenceProvenance.CHAIN,
+                spvTipHash = evidence.chainTipHash
+            )
+            attempt.state == DogecoinTrustedPersonalNodeAttemptState.CONFIRMED -> attempt
+            attempt.state == DogecoinTrustedPersonalNodeAttemptState.CONFLICTED -> attempt
+            else -> attempt.withSettlement(
+                next = DogecoinTrustedPersonalNodeAttemptState.OBSERVED,
+                spvDepth = exactDepth,
+                spvProvenance = evidence.exactTransactionProvenance,
+                spvTipHash = evidence.chainTipHash
+            )
+        }
+        if (updated === attempt) return@synchronized true
+        commitLocked(updated)
+    }
+
+    /** Pure recovery classification; every non-released result deliberately retains reservations. */
+    fun recoveryDisposition(
+        currentBinding: DogecoinTrustedPersonalNodeSessionBinding?,
+        profileRevoked: Boolean,
+        profileDisputed: Boolean = false,
+        nowMillis: Long
+    ): DogecoinTrustedPersonalNodeRecoveryDisposition? = synchronized(STORE_LOCK) {
+        val attempt = (loadLocked() as? DogecoinTrustedPersonalNodeAttemptLoadResult.Available)
+            ?.attempt ?: return@synchronized null
+        attempt.recoveryDisposition(currentBinding, profileRevoked, profileDisputed, nowMillis)
+    }
+
+    /**
+     * Explicit recovery for a record proven never disclosed. This is never time-triggered: callers must
+     * present the exact id and txid after expiry or profile revocation. UNKNOWN/CLAIMED bytes can never use
+     * this escape hatch because they may already be propagating.
+     */
+    fun abandonNeverDisclosed(
+        correlationId: String,
+        localTxid: String,
+        currentBinding: DogecoinTrustedPersonalNodeSessionBinding?,
+        profileRevoked: Boolean,
+        nowMillis: Long
+    ): Boolean = synchronized(STORE_LOCK) {
+        val attempt = (loadLocked() as? DogecoinTrustedPersonalNodeAttemptLoadResult.Available)
+            ?.attempt ?: return@synchronized false
+        if (attempt.correlationId != correlationId ||
+            attempt.review.localTxid != localTxid ||
+            attempt.state != DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED ||
+            !attempt.hasReservedInputs
+        ) return@synchronized false
+        val expired = nowMillis > attempt.review.expiresAtMillis
+        val bindingUnavailable = currentBinding != attempt.review.binding
+        if (!expired && !profileRevoked && !bindingUnavailable) return@synchronized false
+        commitLocked(
+            attempt.withSettlement(
+                next = DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
+                release = DogecoinTrustedPersonalNodeReservationState.RELEASED_NEVER_DISCLOSED
+            )
+        )
+    }
 
     /**
      * Restores only same-byte retry material for the exact profile revision. Persisted proof metadata
@@ -757,7 +1173,11 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
     ): DogecoinTrustedPersonalNodeAttempt? = synchronized(STORE_LOCK) {
         val attempt = (loadLocked() as? DogecoinTrustedPersonalNodeAttemptLoadResult.Available)
             ?.attempt ?: return@synchronized null
-        if (attempt.state == DogecoinTrustedPersonalNodeAttemptState.CLAIMED) return@synchronized null
+        if (!attempt.hasReservedInputs || attempt.state !in setOf(
+                DogecoinTrustedPersonalNodeAttemptState.READY_UNDISCLOSED,
+                DogecoinTrustedPersonalNodeAttemptState.SUBMISSION_UNKNOWN
+            )
+        ) return@synchronized null
         if (attempt.review.binding != binding) return@synchronized null
         if (nowMillis < attempt.review.createdAtMillis || nowMillis > attempt.review.expiresAtMillis) {
             return@synchronized null
@@ -775,6 +1195,7 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
         if (attempt.correlationId != correlationId || attempt.review.localTxid != localTxid) {
             return@synchronized false
         }
+        if (!attempt.hasReservedInputs) return@synchronized false
         if (attempt.state == next) return@synchronized true
         val updated = runCatching { attempt.withState(next) }.getOrNull()
             ?: return@synchronized false
@@ -791,11 +1212,13 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
         return runCatching {
             val ledger = JSONObject(serialized)
             ledger.requireExactKeys(KEY_SCHEMA_VERSION, KEY_ATTEMPT)
-            require(ledger.requireInt(KEY_SCHEMA_VERSION) == SCHEMA_VERSION) {
+            val schemaVersion = ledger.requireInt(KEY_SCHEMA_VERSION)
+            require(schemaVersion in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION) {
                 "Unsupported trusted personal node attempt schema."
             }
             val attempt = DogecoinTrustedPersonalNodeAttempt.fromJson(
-                ledger.requireObject(KEY_ATTEMPT)
+                ledger.requireObject(KEY_ATTEMPT),
+                schemaVersion
             )
             DogecoinTrustedPersonalNodeAttemptLoadResult.Available(attempt)
         }.getOrElse { DogecoinTrustedPersonalNodeAttemptLoadResult.Unavailable }
@@ -818,8 +1241,10 @@ internal class DogecoinTrustedPersonalNodeAttemptStore private constructor(
         const val KEY_LEDGER = "attempt_ledger"
         const val KEY_SCHEMA_VERSION = "schema_version"
         const val KEY_ATTEMPT = "attempt"
-        const val SCHEMA_VERSION = 1
+        const val MIN_SUPPORTED_SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
         const val MAX_LEDGER_CHARS = 2_100_000
+        const val MAX_SETTLEMENT_TIP_LAG = 2L
 
         fun newCorrelationId(): String = ByteArray(16)
             .also(SECURE_RANDOM::nextBytes)
@@ -914,6 +1339,12 @@ private fun JSONObject.requireBoolean(key: String): Boolean {
     val value = get(key)
     require(value is Boolean) { "Stored trusted personal node attempt field $key is not Boolean." }
     return value
+}
+
+private inline fun <reified T : Enum<T>> JSONObject.requireEnum(key: String): T {
+    val name = requireString(key)
+    return enumValues<T>().firstOrNull { it.name == name }
+        ?: throw IllegalArgumentException("Stored trusted personal node attempt field $key is invalid.")
 }
 
 private fun JSONObject.requireObject(key: String): JSONObject {

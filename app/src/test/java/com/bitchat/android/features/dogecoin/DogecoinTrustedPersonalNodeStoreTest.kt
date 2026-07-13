@@ -152,6 +152,111 @@ class DogecoinTrustedPersonalNodeStoreTest {
         assertTrue(credentialPrefs.all.isEmpty())
     }
 
+    @Test
+    fun `stable conflict disputes and only two fresh agreements arm explicit recovery`() {
+        val credentials = DogecoinTrustedPersonalNodeCredentials("phone-user", "secret")
+        val profile = store.authorize(candidate(), credentials, 3_000L)!!
+
+        val conflictOne = crossCheck(
+            id = "${"11".repeat(32)}:${"22".repeat(32)}",
+            result = DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT,
+            at = 4_000L,
+            hasConflictingSpend = true
+        )
+        val first = store.recordCrossCheck(profile, conflictOne)!!
+        assertEquals(DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE, first.state)
+        assertEquals(1, first.stableConflictStreak)
+        // Replaying the same snapshot cannot manufacture stability.
+        assertEquals(1, store.recordCrossCheck(profile, conflictOne)!!.stableConflictStreak)
+        assertNull(
+            store.recordCrossCheck(
+                profile,
+                conflictOne.copy(
+                    comparisonId = "${"aa".repeat(32)}:${"bb".repeat(32)}",
+                    capturedAtMillis = 3_999L
+                )
+            )
+        )
+        assertEquals(1, store.loadDisputeStatus(profile)!!.stableConflictStreak)
+
+        val disputed = store.recordCrossCheck(
+            profile,
+            conflictOne.copy(
+                comparisonId = "${"33".repeat(32)}:${"44".repeat(32)}",
+                capturedAtMillis = 5_000L
+            )
+        )!!
+        assertEquals(DogecoinTrustedPersonalNodeState.DISPUTED, disputed.state)
+        assertEquals(DogecoinTrustedPersonalNodeState.DISPUTED, store.loadState())
+        assertEquals(profile, store.loadProfile())
+        assertEquals(credentials, store.loadCredentials(profile))
+        assertFalse(store.clearDisputeAfterOperatorConfirmation(profile))
+
+        val agreementOne = crossCheck(
+            id = "${"55".repeat(32)}:${"66".repeat(32)}",
+            result = DogecoinTrustedPersonalNodeCrossCheckResult.AGREEMENT,
+            at = 6_000L
+        )
+        assertEquals(1, store.recordCrossCheck(profile, agreementOne)!!.recoveryAgreementStreak)
+        // Duplicate evidence cannot advance the recovery gate.
+        assertEquals(1, store.recordCrossCheck(profile, agreementOne)!!.recoveryAgreementStreak)
+        val recoveryReady = store.recordCrossCheck(
+            profile,
+            agreementOne.copy(
+                comparisonId = "${"77".repeat(32)}:${"88".repeat(32)}",
+                capturedAtMillis = 7_000L
+            )
+        )!!
+        assertTrue(recoveryReady.recoveryReadyForOperator)
+        assertEquals(DogecoinTrustedPersonalNodeState.DISPUTED, store.loadState())
+        assertTrue(store.clearDisputeAfterOperatorConfirmation(profile))
+        assertEquals(DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE, store.loadState())
+    }
+
+    @Test
+    fun `inconclusive or under-depth comparison cannot dispute or clear dispute`() {
+        val profile = store.authorize(
+            candidate(),
+            DogecoinTrustedPersonalNodeCredentials("phone-user", "secret"),
+            3_000L
+        )!!
+        assertNull(
+            store.recordCrossCheck(
+                profile,
+                crossCheck(
+                    id = "${"11".repeat(32)}:${"22".repeat(32)}",
+                    result = DogecoinTrustedPersonalNodeCrossCheckResult.CONFLICT,
+                    at = 4_000L
+                ).copy(fullySyncedMainnet = false)
+            )
+        )
+        assertNull(
+            store.recordCrossCheck(
+                profile,
+                crossCheck(
+                    id = "${"33".repeat(32)}:${"44".repeat(32)}",
+                    result = DogecoinTrustedPersonalNodeCrossCheckResult.AGREEMENT,
+                    at = 5_000L
+                ).copy(confirmationContextDepth = 5)
+            )
+        )
+        assertEquals(DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE, store.loadState())
+    }
+
+    private fun crossCheck(
+        id: String,
+        result: DogecoinTrustedPersonalNodeCrossCheckResult,
+        at: Long,
+        hasConflictingSpend: Boolean = false
+    ) = DogecoinTrustedPersonalNodeCrossCheckEvidence(
+        comparisonId = id,
+        result = result,
+        fullySyncedMainnet = true,
+        confirmationContextDepth = 6,
+        hasConflictingSpend = hasConflictingSpend,
+        capturedAtMillis = at
+    )
+
     private fun candidate(): DogecoinTrustedPersonalNodeProfileCandidate =
         DogecoinTrustedPersonalNodeProfileCandidate(
             origin = "https://dogebox.tail1234.ts.net",

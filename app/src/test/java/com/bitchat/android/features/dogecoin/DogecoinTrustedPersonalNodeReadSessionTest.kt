@@ -83,6 +83,25 @@ class DogecoinTrustedPersonalNodeReadSessionTest {
     }
 
     @Test
+    fun `disputed profile keeps Built-in reconciliation without retaining node authority`() {
+        assertFalse(
+            dogecoinTrustedPersonalNodeSessionUsesNode(
+                DogecoinTrustedPersonalNodeState.DISPUTED
+            )
+        )
+        assertTrue(
+            dogecoinTrustedPersonalNodeNeedsSpvReconciliation(
+                DogecoinTrustedPersonalNodeState.DISPUTED
+            )
+        )
+        assertFalse(
+            dogecoinTrustedPersonalNodeNeedsSpvReconciliation(
+                DogecoinTrustedPersonalNodeState.AUTHORIZED_INACTIVE
+            )
+        )
+    }
+
+    @Test
     fun `active refresh is explicit and cancellation cannot leave checking stuck`() {
         val profile = profile(revision = 12L)
         val holder = holder(profile)
